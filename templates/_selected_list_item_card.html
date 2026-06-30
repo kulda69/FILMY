@@ -1,0 +1,152 @@
+<div class="h-100 rounded-4 border border-secondary-subtle p-2 bg-body">
+    <div class="d-flex flex-column gap-2 h-100">
+        <a class="rounded-4 overflow-hidden bg-secondary-subtle text-decoration-none" href="/titles/{{ item.tconst }}" aria-label="Open detail for {{ item.title }}">
+            <div class="rounded-4 overflow-hidden bg-secondary-subtle poster-grid-image">
+                <img src="{{ item.poster_url }}" alt="Poster for {{ item.title }}" class="img-fluid w-100 h-100 object-fit-cover">
+            </div>
+        </a>
+        <div class="min-w-0">
+            <a class="fw-semibold text-truncate text-decoration-none text-body d-block" href="/titles/{{ item.tconst }}">{{ item.title }}</a>
+            <div class="d-flex align-items-center gap-2 small text-secondary">
+                <div class="text-truncate">
+                    {% if item.year %}{{ item.year }}{% endif %}
+                    {% if item.season_number is not none and item.episode_number is not none %}
+                    · S{{ '%02d'|format(item.season_number) }} E{{ '%02d'|format(item.episode_number) }}
+                    {% elif item.series_title %}
+                    · {{ item.series_title }}
+                    {% endif %}
+                </div>
+                {% if selected_list_actions_enabled %}
+                {% set menu_id = "card-menu-" ~ selected_list.id ~ "-" ~ item.tconst %}
+                <div class="ms-auto">
+                    <button
+                        type="button"
+                        class="card-menu-trigger text-secondary border-0 bg-transparent p-0"
+                        popovertarget="{{ menu_id }}"
+                        aria-label="Item actions for {{ item.title }}"
+                    >...</button>
+                    <div id="{{ menu_id }}" popover class="card-menu-panel">
+                        <div class="card-menu-view" data-menu-view="root">
+                            <form action="/ui/list-actions/delete" method="post" class="m-0">
+                                <input type="hidden" name="list_id" value="{{ selected_list.id }}">
+                                <input type="hidden" name="display_tconst" value="{{ item.tconst }}">
+                                <input type="hidden" name="return_to" value="{{ selected_list_return_to }}">
+                                <button type="submit" class="card-menu-item">Delete from list</button>
+                            </form>
+                            <form action="/ui/list-actions/watched" method="post" class="m-0">
+                                <input type="hidden" name="tconst" value="{{ item.tconst }}">
+                                <input type="hidden" name="list_id" value="{{ selected_list.id }}">
+                                <input type="hidden" name="display_tconst" value="{{ item.tconst }}">
+                                <input type="hidden" name="return_to" value="{{ selected_list_return_to }}">
+                                <button type="submit" class="card-menu-item">Watched</button>
+                            </form>
+                            <button
+                                type="button"
+                                class="card-menu-item d-flex justify-content-between align-items-center"
+                                data-menu-open="rating"
+                            >
+                                <span>Rate</span>
+                                {% if item.user_rating %}
+                                <span class="small text-secondary">{{ "%.1f"|format(item.user_rating / 2) }}★</span>
+                                {% else %}
+                                <span class="text-secondary">›</span>
+                                {% endif %}
+                            </button>
+                            {% if selected_list_move_targets %}
+                            <div class="border-top border-secondary-subtle my-1"></div>
+                            <button
+                                type="button"
+                                class="card-menu-item d-flex justify-content-between align-items-center"
+                                data-menu-open="move"
+                            >
+                                <span>Move to</span>
+                                <span class="text-secondary">›</span>
+                            </button>
+                            <button
+                                type="button"
+                                class="card-menu-item d-flex justify-content-between align-items-center"
+                                data-menu-open="copy"
+                            >
+                                <span>Copy to</span>
+                                <span class="text-secondary">›</span>
+                            </button>
+                            {% endif %}
+                        </div>
+
+                        <div class="card-menu-view d-none" data-menu-view="move">
+                            <button type="button" class="card-menu-item d-flex align-items-center gap-2" data-menu-back>
+                                <span class="text-secondary">‹</span>
+                                <span>Back</span>
+                            </button>
+                            <div class="card-menu-label">Move to list</div>
+                            {% for target in selected_list_move_targets %}
+                            <form action="/ui/list-actions/move" method="post" class="m-0">
+                                <input type="hidden" name="source_list_id" value="{{ selected_list.id }}">
+                                <input type="hidden" name="target_list_id" value="{{ target.id }}">
+                                <input type="hidden" name="display_tconst" value="{{ item.tconst }}">
+                                <input type="hidden" name="return_to" value="{{ selected_list_return_to }}">
+                                <button type="submit" class="card-menu-item">{{ target.name }}</button>
+                            </form>
+                            {% endfor %}
+                        </div>
+
+                        <div class="card-menu-view d-none" data-menu-view="copy">
+                            <button type="button" class="card-menu-item d-flex align-items-center gap-2" data-menu-back>
+                                <span class="text-secondary">‹</span>
+                                <span>Back</span>
+                            </button>
+                            <div class="card-menu-label">Copy to list</div>
+                            {% for target in selected_list_move_targets %}
+                            <form action="/ui/list-actions/copy" method="post" class="m-0">
+                                <input type="hidden" name="source_list_id" value="{{ selected_list.id }}">
+                                <input type="hidden" name="target_list_id" value="{{ target.id }}">
+                                <input type="hidden" name="display_tconst" value="{{ item.tconst }}">
+                                <input type="hidden" name="return_to" value="{{ selected_list_return_to }}">
+                                <button type="submit" class="card-menu-item">{{ target.name }}</button>
+                            </form>
+                            {% endfor %}
+                        </div>
+
+                        <div class="card-menu-view d-none" data-menu-view="rating">
+                            <button type="button" class="card-menu-item d-flex align-items-center gap-2" data-menu-back>
+                                <span class="text-secondary">‹</span>
+                                <span>Back</span>
+                            </button>
+                            <div class="card-menu-label">Your rating</div>
+                            {% if item.user_rating %}
+                            <div class="card-menu-current-rating">
+                                Current {{ item.user_rating }}/10
+                            </div>
+                            {% endif %}
+                            {% for rating_value in range(10, 0, -1) %}
+                            {% set full_stars = rating_value // 2 %}
+                            {% set has_half_star = rating_value % 2 == 1 %}
+                            {% set empty_stars = 5 - full_stars - (1 if has_half_star else 0) %}
+                            <form action="/ui/list-actions/rating" method="post" class="m-0">
+                                <input type="hidden" name="tconst" value="{{ item.tconst }}">
+                                <input type="hidden" name="rating" value="{{ rating_value }}">
+                                <input type="hidden" name="return_to" value="{{ selected_list_return_to }}">
+                                <button type="submit" class="card-menu-item d-flex justify-content-between align-items-center">
+                                    <span class="card-rating-stars">
+                                        {{ "★" * full_stars }}{% if has_half_star %}½{% endif %}{{ "☆" * empty_stars }}
+                                    </span>
+                                    <span class="small text-secondary">{{ "%.1f"|format(rating_value / 2) }}</span>
+                                </button>
+                            </form>
+                            {% endfor %}
+                            {% if item.user_rating %}
+                            <div class="border-top border-secondary-subtle my-1"></div>
+                            <form action="/ui/list-actions/rating/clear" method="post" class="m-0">
+                                <input type="hidden" name="tconst" value="{{ item.tconst }}">
+                                <input type="hidden" name="return_to" value="{{ selected_list_return_to }}">
+                                <button type="submit" class="card-menu-item text-secondary">Clear rating</button>
+                            </form>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>

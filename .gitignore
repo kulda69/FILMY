@@ -1,0 +1,34 @@
+.env
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# macOS noise
+.DS_Store
+
+# IDE and local tooling
+.idea/
+.playwright-cli/
+.playwright-mcp/
+
+# local databases and exports
+data/filmy.duckdb
+data/trakt_exports/
+trakt-export/
+data/assets/
+NetflixViewingHistory.csv
+imdb/*.tsv
+imdb_lists/*.csv
+
+# generated debug and probe artifacts
+data/plex_probe.json
+data/tmdb_backfill.log
+data/*.log
+data/*.pid
+tmp/
+output/playwright/
+Screenshot *.png

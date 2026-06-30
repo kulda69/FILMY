@@ -1,0 +1,22 @@
+[project]
+name = "filmy"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "duckdb>=1.5.4",
+    "fastapi[standard]>=0.138.1",
+    "jinja2>=3.1.6",
+    "python-dotenv>=1.1.1",
+    "uvicorn>=0.49.0",
+]
+
+[project.scripts]
+filmy-backfill-tmdb = "filmy.scripts.run_tmdb_backfill:main"
+filmy-materialize-title-details = "filmy.scripts.materialize_title_details:main"
+filmy-materialize-person-portraits = "filmy.scripts.materialize_person_portraits:main"
+filmy-materialize-person-details = "filmy.scripts.materialize_person_details:main"
+filmy-jobs-status = "filmy.scripts.background_jobs_status:main"
+filmy-sync-plex = "filmy.scripts.sync_plex:main"
+filmy-inspect-plex = "filmy.scripts.inspect_plex:main"
+filmy-probe-plex = "filmy.scripts.probe_plex_import:main"
+filmy-export-trakt = "filmy.integrations.trakt_export:main"

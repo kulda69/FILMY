@@ -1,0 +1,52 @@
+Projekt: Filmy a seriály
+
+Oslovení a styl
+
+- Uživatel se jmenuje Jiří (Kulda)
+- Odpovídat stručně, nevymýšlet si, občas vtipná poznámka, jinak solidní a uzemněný tón.
+- Komunikace v češtině.
+
+Technické prostředí
+
+- Mac s Apple Silicon.
+- Python, správa prostředí přes uv.
+- Stack: FastAPI + Jinja2 + Bootstrap 5.3 (jen vestavěné utility třídy, data-bs-theme="dark", bez vlastního CSS).
+- Bez Reactu a složitých abstrakcí — jednoduchá, čitelná řešení.
+- Lokálně může běžet Ollama (modely nomic-embed-text pro embeddingy, qwen3:14b pro generování).
+- Appka se spouští jako desktopová přes Brave/Chrome app mód, případně později pywebview.
+
+Pracovní styl
+
+- Před většími změnami mini plán.
+- Postupovat v malých inkrementálních krocích, na konci každého krátké shrnutí.
+- Kvalitní docstringy, čitelnost před chytrostí.
+
+Cíl projektu
+
+Osobní webová appka pro filmy a seriály — co jsem viděl, co si chci vybrat, a kde je to v ČR dostupné.
+
+Datové zdroje (vše zdarma)
+
+- IMDb TSV dumpy (datasets.imdbws.com) jako základní katalog — stažené lokálně, čtené přímo v DuckDB. Při importu filtrovat (jen filmy/seriály, ne epizody jako samostatné řádky, případně od určitého roku), protože title.basics má ~11M záznamů.
+- TMDB API (zdarma pro osobní použití) — plakáty, popisy, česká metadata. Propojení přes IMDb ID (external_ids).
+- Dostupnost v ČR — TMDB watch providers endpoint (data od JustWatch). Pozor: cache na API až ~8h, občas nekompletní. Nutná atribuce JustWatch.
+
+Historie sledování
+
+- Vlastní tabulka v DuckDB.
+  - Jednorázový import z Netflix CSV exportu (Účet → Viewing Activity → Download all) a z exportu Traktu.
+- Trakt.tv se vyřazuje (placený, nespolehlivá synchronizace) — appka má historii vlastnit lokálně.
+- Po dokoukání značit "viděno" přímo v appce.
+
+Doporučování ("co by se mi mohlo líbit")
+
+- Jednoduchá verze (start): filtrování a řazení katalogu podle žánrů, hodnocení, roku a ručně nastavených preferencí, odvozeno z historie + hodnocení. Čistý DuckDB dotaz.
+- Chytřejší verze (později): embeddingy popisů přes Ollama (nomic-embed-text), vektorové vyhledávání přes DuckDB rozšíření vss (není nutná ChromaDB), qwen3:14b pro slovní zdůvodnění doporučení.
+
+Další stav
+
+- Zatím nezačato. Příští krok: návrh schématu databáze a struktury projektu.
+
+---
+
+Poznámka: API klíče (IMDb/TMDB) nepatří sem do instrukcí — dej je do .env v kódu projektu.

@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+
+{% block title %}Filmy | {{ person_item.name }}{% endblock %}
+
+{% block content %}
+<section class="mb-3">
+    <a class="link-light text-decoration-none small" href="{{ back_url }}">« Back</a>
+</section>
+
+<section class="mb-4">
+    <div class="card bg-black border-secondary-subtle overflow-hidden">
+        <div class="card-body p-4 p-lg-5">
+            <div class="row g-4 g-xl-5 align-items-start">
+                <div class="col-12 col-lg-4 col-xl-3">
+                    {% if person_item.portrait_url %}
+                    <img src="{{ person_item.portrait_url }}" alt="Portrait of {{ person_item.name }}" class="img-fluid rounded-4 border border-secondary-subtle w-100 title-hero-poster">
+                    {% else %}
+                    <div class="rounded-4 border border-secondary-subtle bg-body-tertiary d-flex align-items-center justify-content-center text-secondary text-center px-3 title-hero-poster">
+                        Portrait not available yet.
+                    </div>
+                    {% endif %}
+                </div>
+                <div class="col-12 col-lg-8 col-xl-9">
+                    <div class="d-flex flex-wrap gap-2 mb-4">
+                        <span class="badge text-bg-light text-dark px-3 py-2">{{ person_item.nconst }}</span>
+                        {% if person_item.birth_year %}
+                        <span class="badge text-bg-secondary px-3 py-2">{{ person_item.birth_year }}</span>
+                        {% endif %}
+                        {% if person_item.death_year %}
+                        <span class="badge text-bg-dark border border-secondary-subtle px-3 py-2">{{ person_item.death_year }}</span>
+                        {% endif %}
+                        {% if person_item.credit_count %}
+                        <span class="badge text-bg-dark border border-secondary-subtle px-3 py-2">{{ person_item.credit_count }} credits</span>
+                        {% endif %}
+                    </div>
+
+                    <h1 class="display-4 mb-3 lh-1" style="color: #b56a33;">{{ person_item.name }}</h1>
+
+                    {% if person_item.primary_profession %}
+                    <div class="text-secondary fs-4 mb-4">{{ person_item.primary_profession }}</div>
+                    {% endif %}
+
+                    {% if person_item.known_for_titles %}
+                    <div class="rounded-4 border border-secondary-subtle bg-body p-4">
+                        <div class="text-uppercase small text-secondary mb-3">Known for</div>
+                        <p class="mb-0 fs-6 lh-lg">{{ person_item.known_for_titles }}</p>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="mb-4">
+    <div class="card bg-black border-secondary-subtle">
+        <div class="card-body p-4">
+            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-4">
+                <div class="text-uppercase small text-secondary">Filmography</div>
+                <span class="badge text-bg-dark border border-secondary-subtle">{{ person_item.credit_count or 0 }} total credits</span>
+            </div>
+
+            <div class="row g-4">
+                {% for section in filmography_sections if section["items"] %}
+                <div class="col-12 col-xl-6">
+                    <div class="rounded-4 border border-secondary-subtle bg-body h-100 p-3">
+                        <div class="text-uppercase small text-secondary mb-3">{{ section["title"] }}</div>
+                        <div class="d-grid gap-2">
+                            {% for item in section["items"][:20] %}
+                            <a
+                                href="/titles/{{ item.tconst }}?return_to=/people/{{ person_item.nconst }}"
+                                class="rounded-3 border border-secondary-subtle bg-black text-decoration-none text-light p-3"
+                            >
+                                <div class="d-flex flex-wrap justify-content-between gap-2">
+                                    <div class="fw-semibold">{{ item.title }}</div>
+                                    {% if item.start_year %}
+                                    <span class="text-secondary small">{{ item.start_year }}</span>
+                                    {% endif %}
+                                </div>
+                                <div class="small text-secondary mt-1">
+                                    {{ item.title_type }}
+                                    {% if item.character %}
+                                    · {{ item.character }}
+                                    {% elif item.job %}
+                                    · {{ item.job }}
+                                    {% endif %}
+                                </div>
+                            </a>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock %}

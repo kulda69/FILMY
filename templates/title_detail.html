@@ -1,0 +1,413 @@
+{% extends "base.html" %}
+
+{% block title %}Filmy | {{ title_item.title }}{% endblock %}
+
+{% block content %}
+<section class="mb-3">
+    <a class="link-light text-decoration-none small" href="{{ back_url }}">« Back</a>
+</section>
+
+<section class="mb-4">
+    <div class="card bg-black border-secondary-subtle overflow-hidden">
+        {% if backdrop_url %}
+        <div class="title-hero-backdrop border-bottom border-secondary-subtle" style="background-image: linear-gradient(rgba(0, 0, 0, 0.18), rgba(0, 0, 0, 0.86)), url('{{ backdrop_url }}');"></div>
+        {% endif %}
+        <div class="card-body p-4 p-lg-5">
+            <div class="row g-4 g-xl-5 align-items-start">
+                <div class="col-12 col-lg-5 col-xl-4">
+                    {% if poster_url %}
+                    <img src="{{ poster_url }}" alt="Poster for {{ title_item.title }}" class="img-fluid rounded-4 border border-secondary-subtle w-100 title-hero-poster">
+                    {% else %}
+                    <div class="rounded-4 border border-secondary-subtle bg-body-tertiary d-flex align-items-center justify-content-center text-secondary text-center px-3 title-hero-poster">
+                        Poster not available yet.
+                    </div>
+                    {% endif %}
+                </div>
+                <div class="col-12 col-lg-7 col-xl-8">
+                    <div class="d-flex flex-wrap gap-2 mb-4">
+                        <span class="badge text-bg-light text-dark px-3 py-2">{{ title_item.kind_label }}</span>
+                        {% if title_item.year %}
+                        <span class="badge text-bg-secondary px-3 py-2">{{ title_item.year }}</span>
+                        {% endif %}
+                        {% if title_item.end_year and title_item.end_year != title_item.year %}
+                        <span class="badge text-bg-dark border border-secondary-subtle px-3 py-2">{{ title_item.end_year }}</span>
+                        {% endif %}
+                        {% if title_item.runtime_minutes %}
+                        <span class="badge text-bg-dark border border-secondary-subtle px-3 py-2">{{ title_item.runtime_minutes }} min</span>
+                        {% endif %}
+                        {% if title_item.imdb_rating %}
+                        <span class="badge text-bg-warning text-dark px-3 py-2">IMDb {{ "%.1f"|format(title_item.imdb_rating) }}</span>
+                        {% endif %}
+                        {% if content_state.interest_state %}
+                        <span class="badge text-bg-dark border border-secondary-subtle px-3 py-2">{{ content_state.interest_state }}</span>
+                        {% endif %}
+                        {% if library_state.rating %}
+                        <span class="badge px-3 py-2 text-dark border-0" style="background-color: #d7b1aa;">You: {{ library_state.rating.value }}</span>
+                        {% endif %}
+                        <span class="badge text-bg-dark border border-secondary-subtle text-secondary-emphasis px-3 py-2">{{ title_item.tconst }}</span>
+                    </div>
+
+                    <h1 class="display-4 mb-3 lh-1" style="color: #b56a33;">{{ title_item.title }}</h1>
+                    {% if title_item.original_title and title_item.original_title != title_item.title %}
+                    <div class="text-secondary fs-4 mb-4">{{ title_item.original_title }}</div>
+                    {% endif %}
+
+                    {% if title_item.kind == "episode" and title_item.series_title %}
+                    <div class="mb-4 fs-5">
+                        <span class="text-secondary">Part of</span>
+                        <span class="fw-semibold">{{ title_item.series_title }}</span>
+                        {% if title_item.season_number is not none and title_item.episode_number is not none %}
+                        <span class="text-secondary">· S{{ '%02d'|format(title_item.season_number) }} E{{ '%02d'|format(title_item.episode_number) }}</span>
+                        {% endif %}
+                    </div>
+                    {% endif %}
+
+                    {% if title_item.genres %}
+                    <div class="d-flex flex-wrap gap-2 mb-5">
+                        {% for genre in title_item.genres %}
+                        <span class="badge rounded-pill text-bg-secondary px-3 py-2">{{ genre }}</span>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
+
+                    {% if tmdb_details.overview %}
+                    <div class="title-hero-overview mb-5">
+                        <div class="text-uppercase small mb-3" style="color: #b56a33;">What it is about</div>
+                        <p class="mb-0 fs-6 lh-lg">{{ tmdb_details.overview }}</p>
+                    </div>
+                    {% endif %}
+
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+{% if title_main_cast or title_item.directed_by or title_item.written_by or title_item.created_by %}
+<section class="mb-4">
+    <div class="card bg-black border-secondary-subtle">
+        <div class="card-body p-4">
+            <div class="row g-4 align-items-start">
+                <div class="col-12 col-xl-6">
+                    {% include "_title_main_cast.html" %}
+                </div>
+
+                <div class="col-12 col-md-6 col-xl-3">
+                    <div class="text-uppercase small mb-3" style="color: #b56a33;">Directed by</div>
+                    <div class="rounded-4 border border-secondary-subtle p-3 bg-body h-100">
+                        <div class="d-flex flex-wrap gap-2">
+                            {% for person in title_item.directed_by or [] %}
+                            <a class="badge text-bg-dark border border-secondary-subtle text-decoration-none" href="/people/{{ person.nconst }}?return_to={{ title_return_to | urlencode }}">{{ person.name }}</a>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+
+                <div class="col-12 col-md-6 col-xl-3">
+                    <div class="text-uppercase small mb-3" style="color: #b56a33;">Written by</div>
+                    <div class="rounded-4 border border-secondary-subtle p-3 bg-body h-100">
+                        <div class="d-flex flex-wrap gap-2">
+                            {% for person in title_item.written_by or [] %}
+                            <a class="badge text-bg-dark border border-secondary-subtle text-decoration-none" href="/people/{{ person.nconst }}?return_to={{ title_return_to | urlencode }}">{{ person.name }}</a>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+
+                {% if title_item.created_by %}
+                <div class="col-12">
+                    <div class="rounded-4 border border-secondary-subtle p-3 bg-body">
+                        <div class="text-uppercase small mb-3" style="color: #b56a33;">Created by</div>
+                        <div class="d-flex flex-wrap gap-2">
+                            {% for person in title_item.created_by %}
+                            <a class="badge text-bg-dark border border-secondary-subtle text-decoration-none" href="/people/{{ person.nconst }}?return_to={{ title_return_to | urlencode }}">{{ person.name }}</a>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</section>
+{% endif %}
+
+{% if title_aliases_display %}
+<section class="mb-4">
+    <div class="card bg-black border-secondary-subtle">
+        <div class="card-body p-4">
+            <div class="text-uppercase small mb-3" style="color: #b56a33;">Aliases</div>
+            <div class="small text-secondary lh-sm">
+                {% for alias in title_aliases_display %}
+                <span class="me-1">{{ alias.title }}</span>
+                {% if not loop.last %}<span class="me-1">·</span>{% endif %}
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+</section>
+{% endif %}
+
+<section class="mb-4">
+    <div class="row g-4 align-items-start">
+        {% if library_state %}
+        <div class="col-12 col-xl-6">
+            <div class="card bg-black border-secondary-subtle h-100">
+                <div class="card-body p-4">
+                    <div class="text-uppercase small mb-3" style="color: #b56a33;">Your State</div>
+                    <div class="d-flex flex-wrap align-items-center gap-2">
+                        {% if library_state.watched_count %}
+                        <span class="badge text-bg-dark border border-secondary-subtle">Watched {{ library_state.watched_count }}×</span>
+                        {% else %}
+                        <span class="badge text-bg-dark border border-secondary-subtle">Not watched yet</span>
+                        {% endif %}
+                        <span class="badge text-bg-dark border border-secondary-subtle">
+                            {{ "Watchlist" if library_state.in_watchlist else "No watchlist" }}
+                        </span>
+                        {% if library_state.lists %}
+                        {% for user_list in library_state.lists %}
+                        <span class="badge text-dark border-0" style="background-color: #9fb6c9;">{{ user_list.name }}</span>
+                        {% endfor %}
+                        {% endif %}
+                        {% if library_state.rating %}
+                        <span class="badge px-3 py-2 text-dark border-0" style="background-color: #d7b1aa;">{{ library_state.rating.value }}</span>
+                        {% else %}
+                        <span class="badge text-bg-dark border border-secondary-subtle">Unrated</span>
+                        {% endif %}
+                    </div>
+                    {% if library_state.last_watched_at %}
+                    <div class="small text-secondary mt-2">
+                        Last watched {{ format_czech_datetime(library_state.last_watched_at) }}
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
+        <div class="col-12 col-xl-6">
+            <div class="card bg-black border-secondary-subtle h-100">
+                <div class="card-body p-4">
+                    <div class="text-uppercase small mb-3" style="color: #b56a33;">Where To Watch</div>
+                    {% if provider_groups %}
+                    <div class="d-grid gap-3">
+                        {% for group in provider_groups %}
+                        <div class="rounded-4 border border-secondary-subtle p-3 bg-body">
+                            <div class="small mb-2" style="color: #b56a33;">{{ group.label }}</div>
+                            <div class="d-flex flex-wrap gap-2">
+                                {% for provider in group.providers %}
+                                <span class="badge text-bg-secondary">{{ provider }}</span>
+                                {% endfor %}
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <div class="rounded-4 border border-secondary-subtle p-4 text-secondary">
+                        Czech availability has not been enriched yet.
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+{% block scripts %}
+{{ super() }}
+{% if title_main_cast_pending_count > 0 %}
+<script>
+    (() => {
+        const intervalMs = 2000;
+        const maxAttempts = 20;
+        let attempts = 0;
+
+        async function refreshMainCast() {
+            const panel = document.getElementById("title-main-cast-panel");
+            if (!panel) {
+                return;
+            }
+            const pending = Number(panel.dataset.pendingCount || "0");
+            if (pending <= 0 || attempts >= maxAttempts) {
+                return;
+            }
+
+            attempts += 1;
+            try {
+                const response = await fetch(panel.dataset.refreshUrl, {
+                    headers: {"X-Requested-With": "fetch"},
+                    cache: "no-store"
+                });
+                if (!response.ok) {
+                    return;
+                }
+                const html = await response.text();
+                panel.outerHTML = html;
+                const nextPanel = document.getElementById("title-main-cast-panel");
+                if (nextPanel && Number(nextPanel.dataset.pendingCount || "0") > 0 && attempts < maxAttempts) {
+                    window.setTimeout(refreshMainCast, intervalMs);
+                }
+            } catch {
+                if (attempts < maxAttempts) {
+                    window.setTimeout(refreshMainCast, intervalMs);
+                }
+            }
+        }
+
+        window.setTimeout(refreshMainCast, intervalMs);
+    })();
+</script>
+{% endif %}
+{% if title_episode_seasons %}
+<script>
+    (() => {
+        function applyEpisodeSeasonFilter(season) {
+            const cards = document.querySelectorAll("[data-episode-season]");
+            const badges = document.querySelectorAll("[data-season-filter]");
+            for (const card of cards) {
+                card.classList.toggle("d-none", card.dataset.episodeSeason !== season);
+            }
+            for (const badge of badges) {
+                const active = badge.dataset.seasonFilter === season;
+                badge.classList.toggle("text-bg-light", active);
+                badge.classList.toggle("text-dark", active);
+                badge.classList.toggle("text-bg-dark", !active);
+                badge.classList.toggle("border", !active);
+                badge.classList.toggle("border-secondary-subtle", !active);
+            }
+        }
+
+        const badges = document.querySelectorAll("[data-season-filter]");
+        if (!badges.length) {
+            return;
+        }
+        const params = new URLSearchParams(window.location.search);
+        const requestedSeason = params.get("season");
+        const initialBadge = Array.from(badges).find((badge) => badge.dataset.seasonFilter === requestedSeason) || badges[0];
+        for (const badge of badges) {
+            badge.addEventListener("click", () => applyEpisodeSeasonFilter(badge.dataset.seasonFilter));
+        }
+        applyEpisodeSeasonFilter(initialBadge.dataset.seasonFilter);
+    })();
+</script>
+{% endif %}
+{% endblock %}
+
+{% if title_episode_items %}
+<section id="episodes-section" class="mb-4 anchor-offset">
+    <div class="card bg-black border-secondary-subtle">
+        <div class="card-body p-4">
+                <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-3">
+                    <div class="text-uppercase small" style="color: #b56a33;">Episodes</div>
+                    {% if title_episode_seasons %}
+                    <div class="d-flex flex-wrap justify-content-center gap-2 flex-grow-1">
+                        {% for season_number in title_episode_seasons %}
+                        <button
+                            type="button"
+                            class="badge text-bg-dark border border-secondary-subtle"
+                            data-season-filter="{{ season_number }}"
+                    >
+                        Season {{ season_number }}
+                    </button>
+                    {% endfor %}
+                    </div>
+                    {% endif %}
+                </div>
+                <div class="row row-cols-1 row-cols-md-2 row-cols-xl-3 g-3">
+                {% for episode in title_episode_items %}
+                <div class="col" data-episode-season="{{ episode.season_number if episode.season_number is not none else '' }}">
+                    <div class="rounded-4 border border-secondary-subtle p-3 bg-body h-100">
+                        <div class="d-flex align-items-start gap-2">
+                            <div class="fw-semibold flex-grow-1">{{ episode.title or episode.tconst }}</div>
+                            {% if episode.watched_count %}
+                            <span class="fw-bold" style="color: #7fa38a;">✓</span>
+                            {% endif %}
+                            {% set episode_menu_id = "episode-menu-" ~ title_item.tconst ~ "-" ~ episode.tconst %}
+                            <button
+                                type="button"
+                                class="card-menu-trigger text-secondary border-0 bg-transparent p-0"
+                                popovertarget="{{ episode_menu_id }}"
+                                aria-label="Episode actions for {{ episode.title or episode.tconst }}"
+                            >...</button>
+                            <div id="{{ episode_menu_id }}" popover class="card-menu-panel">
+                                <div class="card-menu-view" data-menu-view="root">
+                                    <button
+                                        type="button"
+                                        class="card-menu-item d-flex justify-content-between align-items-center"
+                                        data-menu-open="rating"
+                                    >
+                                        <span>Rate episode</span>
+                                        {% if episode.user_rating %}
+                                        <span class="small text-secondary">{{ "%.1f"|format(episode.user_rating / 2) }}★</span>
+                                        {% else %}
+                                        <span class="text-secondary">›</span>
+                                        {% endif %}
+                                    </button>
+                                    <form action="/ui/list-actions/watched" method="post" class="m-0">
+                                        <input type="hidden" name="tconst" value="{{ episode.tconst }}">
+                                        <input type="hidden" name="return_to" value="{{ title_return_to }}&season={{ episode.season_number }}#episodes-section">
+                                        <button type="submit" class="card-menu-item">Mark watched</button>
+                                    </form>
+                                    <form action="/ui/title-episodes/watched-through" method="post" class="m-0">
+                                        <input type="hidden" name="episode_tconst" value="{{ episode.tconst }}">
+                                        <input type="hidden" name="return_to" value="{{ title_return_to }}&season={{ episode.season_number }}#episodes-section">
+                                        <button type="submit" class="card-menu-item">Mark watched up to here</button>
+                                    </form>
+                                </div>
+
+                                <div class="card-menu-view d-none" data-menu-view="rating">
+                                    <button type="button" class="card-menu-item d-flex align-items-center gap-2" data-menu-back>
+                                        <span class="text-secondary">‹</span>
+                                        <span>Back</span>
+                                    </button>
+                                    <div class="card-menu-label">Episode rating</div>
+                                    {% if episode.user_rating %}
+                                    <div class="card-menu-current-rating">
+                                        Current {{ episode.user_rating }}/10
+                                    </div>
+                                    {% endif %}
+                                    {% for rating_value in range(10, 0, -1) %}
+                                    {% set full_stars = rating_value // 2 %}
+                                    {% set has_half_star = rating_value % 2 == 1 %}
+                                    {% set empty_stars = 5 - full_stars - (1 if has_half_star else 0) %}
+                                    <form action="/ui/list-actions/rating" method="post" class="m-0">
+                                        <input type="hidden" name="tconst" value="{{ episode.tconst }}">
+                                        <input type="hidden" name="rating" value="{{ rating_value }}">
+                                        <input type="hidden" name="return_to" value="{{ title_return_to }}&season={{ episode.season_number }}#episodes-section">
+                                        <button type="submit" class="card-menu-item d-flex justify-content-between align-items-center">
+                                            <span class="card-rating-stars">
+                                                {{ "★" * full_stars }}{% if has_half_star %}½{% endif %}{{ "☆" * empty_stars }}
+                                            </span>
+                                            <span class="small text-secondary">{{ "%.1f"|format(rating_value / 2) }}</span>
+                                        </button>
+                                    </form>
+                                    {% endfor %}
+                                    {% if episode.user_rating %}
+                                    <div class="border-top border-secondary-subtle my-1"></div>
+                                    <form action="/ui/list-actions/rating/clear" method="post" class="m-0">
+                                        <input type="hidden" name="tconst" value="{{ episode.tconst }}">
+                                        <input type="hidden" name="return_to" value="{{ title_return_to }}&season={{ episode.season_number }}#episodes-section">
+                                        <button type="submit" class="card-menu-item text-secondary">Clear rating</button>
+                                    </form>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </div>
+                        <div class="small text-secondary mt-1">
+                            {% if episode.season_number is not none and episode.episode_number is not none %}
+                            S{{ '%02d'|format(episode.season_number) }} E{{ '%02d'|format(episode.episode_number) }}
+                            {% endif %}
+                            {% if episode.year %}
+                            · {{ episode.year }}
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+</section>
+{% endif %}
+
+{% endblock %}

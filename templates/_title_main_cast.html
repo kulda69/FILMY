@@ -1,0 +1,29 @@
+{% if title_main_cast %}
+<div id="title-main-cast-panel" data-refresh-url="/titles/{{ title_item.tconst }}/main-cast" data-pending-count="{{ title_main_cast_pending_count }}">
+    <div class="text-uppercase small mb-3" style="color: #b56a33;">Main cast</div>
+    <div class="row row-cols-1 row-cols-md-2 g-2">
+        {% for person in title_main_cast %}
+        <div class="col">
+            <a
+                href="/people/{{ person.nconst }}?return_to=/titles/{{ title_item.tconst }}"
+                class="rounded-3 border border-secondary-subtle px-3 py-2 bg-body h-100 d-flex align-items-center gap-3 cast-person-chip text-decoration-none text-light"
+            >
+                {% if person.portrait_url %}
+                <img src="{{ person.portrait_url }}" alt="{{ person.name }}" class="rounded-3 border border-secondary-subtle flex-shrink-0 cast-person-thumb">
+                {% else %}
+                <div class="rounded-3 border border-secondary-subtle bg-dark-subtle text-secondary d-flex align-items-center justify-content-center flex-shrink-0 cast-person-thumb">
+                    <span class="small">?</span>
+                </div>
+                {% endif %}
+                <div class="min-w-0">
+                    <div class="fw-semibold text-truncate">{{ person.name }}</div>
+                    {% if person.character %}
+                    <div class="small text-secondary text-truncate">{{ person.character }}</div>
+                    {% endif %}
+                </div>
+            </a>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}

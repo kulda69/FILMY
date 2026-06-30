@@ -1,0 +1,367 @@
+{% extends "base.html" %}
+
+{% block title %}Filmy | Home{% endblock %}
+
+{% block content %}
+<section class="mb-4">
+    <div class="row g-4 align-items-stretch">
+        <div class="col-12">
+            <div class="card bg-black border-secondary-subtle h-100">
+                <div class="card-body p-4">
+                    <div class="d-flex justify-content-between align-items-start gap-3 mb-4">
+                        <div>
+                            <span class="badge text-bg-light text-dark align-self-start mb-3">Continue Watching</span>
+                            <h1 class="h3 mb-0">Jump back into what you were watching.</h1>
+                        </div>
+                        <a class="link-light small text-decoration-none" href="#">Show all »</a>
+                    </div>
+                    {% if continue_watching %}
+                    <div id="continue-watching-rail" class="d-flex flex-nowrap gap-3 overflow-x-auto pb-2 hide-scrollbar-x">
+                        {% for item in continue_watching %}
+                        <div class="flex-shrink-0 poster-rail-item">
+                            <div class="rounded-4 border border-secondary-subtle p-3 h-100 {% if loop.first %}bg-body-tertiary{% endif %}">
+                                <div class="d-flex flex-column gap-3">
+                                    <a class="d-flex align-items-center justify-content-center rounded-4 bg-secondary-subtle text-dark text-decoration-none overflow-hidden poster-rail-image"
+                                       href="/titles/{{ item.tconst }}"
+                                       aria-label="Open detail for {{ item.title }}">
+                                        {% if item.poster_url %}
+                                        <img src="{{ item.poster_url }}" alt="Poster for {{ item.title }}" class="img-fluid w-100 h-100 object-fit-cover">
+                                        {% endif %}
+                                    </a>
+                                    <div class="min-w-0">
+                                        <div class="d-flex flex-wrap align-items-center gap-2 mb-1">
+                                            <h2 class="h6 mb-0 text-truncate">{{ item.title }}</h2>
+                                            <span class="badge text-bg-secondary">{{ item.title_type }}</span>
+                                            <span class="badge text-bg-dark border border-secondary-subtle">{{ item.interest_state }}</span>
+                                        </div>
+                                        <div class="text-secondary small mb-2">
+                                            {% if item.year %}{{ item.year }}{% endif %}
+                                            {% if item.season_number is not none and item.episode_number is not none %}
+                                            · S{{ '%02d'|format(item.season_number) }} E{{ '%02d'|format(item.episode_number) }}
+                                            {% elif item.series_title %}
+                                            · {{ item.series_title }}
+                                            {% endif %}
+                                        </div>
+                                        <div class="small text-secondary">
+                                            {% set updated_text = format_czech_datetime(item.updated_at) %}
+                                            {% if item.last_watched_at %}
+                                            Poslední sledování {{ format_czech_datetime(item.last_watched_at) }}
+                                            {% elif item.last_previewed_at %}
+                                            Poslední rozkoukání {{ format_czech_datetime(item.last_previewed_at) }}
+                                            {% else %}
+                                            Aktualizováno {{ updated_text }}
+                                            {% endif %}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <div class="rounded-4 border border-secondary-subtle p-4 text-secondary">
+                        Current in-progress titles do not have their own posters yet.
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section id="lists-section" class="mb-4 anchor-offset">
+    <div class="row g-4 align-items-start">
+        <div class="col-12 col-xl-4">
+            <div class="card bg-black border-secondary-subtle" data-lists-card="lists">
+                <div class="card-body p-4 d-flex flex-column min-h-0">
+                    <div class="d-flex justify-content-between align-items-center gap-3 mb-3">
+                        <div class="d-flex align-items-center gap-3">
+                            <span class="badge text-bg-light text-dark align-self-start">Your Lists</span>
+                            <details>
+                                <summary class="text-secondary small" style="cursor: pointer; list-style: none;">+</summary>
+                                <form action="/ui/lists/create" method="post" class="mt-2 d-grid gap-2">
+                                    <input
+                                        type="text"
+                                        name="name"
+                                        class="form-control bg-body-tertiary border-secondary-subtle text-light"
+                                        placeholder="New list name"
+                                        maxlength="120"
+                                        required
+                                    >
+                                    <textarea
+                                        name="description"
+                                        class="form-control bg-body-tertiary border-secondary-subtle text-light"
+                                        placeholder="Short description"
+                                        rows="2"
+                                        maxlength="400"
+                                    ></textarea>
+                                    <button type="submit" class="btn btn-sm btn-outline-light">Create</button>
+                                </form>
+                            </details>
+                        </div>
+                        <span class="badge text-bg-secondary">{{ library_status.counts.lists }}</span>
+                    </div>
+                    <div class="overflow-y-auto overflow-x-hidden px-2 hide-scrollbar-y selected-list-scroll-fill" data-lists-scroll="lists">
+                        <div class="d-flex flex-column gap-2 min-w-0">
+                        {% for item in library_status.visible_lists %}
+                        <a class="text-decoration-none text-body d-block w-100 min-w-0" href="/?list_id={{ item.id }}#lists-section" {% if selected_list and item.id == selected_list.id %}aria-current="page"{% endif %}>
+                            <div class="rounded-4 border border-secondary-subtle px-3 py-2 w-100 {% if selected_list and item.id == selected_list.id %}bg-body-secondary{% else %}bg-black{% endif %}">
+                                <div class="d-flex justify-content-between align-items-center gap-3">
+                                    <div class="min-w-0">
+                                        <div class="fw-semibold text-truncate">{{ item.name }}</div>
+                                        {% if item.description %}
+                                        <div class="small text-secondary text-truncate">{{ item.description }}</div>
+                                        {% endif %}
+                                    </div>
+                                    <span class="badge text-bg-dark border border-secondary-subtle">{{ item.item_count }}</span>
+                                </div>
+                            </div>
+                        </a>
+                        {% endfor %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="col-12 col-xl-8">
+            <div class="card bg-black border-secondary-subtle overflow-hidden" data-lists-card="items">
+                <div class="card-body p-4 d-flex flex-column min-h-0">
+                    <div class="d-flex justify-content-between align-items-start gap-3 mb-3" data-lists-fixed="items">
+                        <div class="d-flex align-items-center flex-wrap gap-3 flex-grow-1">
+                            <div class="d-flex flex-column gap-1">
+                                <div class="d-flex align-items-center gap-3">
+                                    <span class="badge text-bg-light text-dark align-self-start">{{ selected_list.name if selected_list else "Watchlist" }}</span>
+                                    {% if selected_list and selected_list.item_type == "list" and (selected_list.list_kind == "custom" or selected_list.id == "watchlist") %}
+                                    <details>
+                                        <summary class="link-light small text-decoration-none" style="cursor: pointer; list-style: none;">Edit</summary>
+                                        <form action="/ui/lists/update-description" method="post" class="mt-2 d-grid gap-2">
+                                            <input type="hidden" name="list_id" value="{{ selected_list.id }}">
+                                            <input type="hidden" name="return_to" value="{{ selected_list_return_to }}">
+                                            <textarea
+                                                name="description"
+                                                class="form-control bg-body-tertiary border-secondary-subtle text-light"
+                                                placeholder="Short description"
+                                                rows="2"
+                                                maxlength="400"
+                                            >{{ selected_list.description or '' }}</textarea>
+                                            <button type="submit" class="btn btn-sm btn-outline-light align-self-start">Save</button>
+                                        </form>
+                                    </details>
+                                    {% endif %}
+                                </div>
+                                {% if selected_list and selected_list.description %}
+                                <div class="small text-secondary">{{ selected_list.description }}</div>
+                                {% endif %}
+                            </div>
+                            {% if selected_list_has_more and selected_list_show_all_url %}
+                            <a class="link-light small text-decoration-none ms-auto" href="{{ selected_list_show_all_url }}">Show all »</a>
+                            {% endif %}
+                        </div>
+                        {% if selected_list %}
+                        <span class="badge text-bg-secondary">{{ selected_list_total }}</span>
+                        {% endif %}
+                    </div>
+                    {% if selected_list_items %}
+                    <div id="selected-list-scroll" class="overflow-y-auto pe-1 hide-scrollbar-y selected-list-scroll-fill" data-lists-scroll="items">
+                        <div class="row row-cols-2 row-cols-md-3 row-cols-xxl-4 g-3" data-list-items-grid>
+                            {% for item in selected_list_items %}
+                            <div class="col">
+                                {% include "_selected_list_item_card.html" %}
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                    {% else %}
+                    <div class="rounded-4 border border-secondary-subtle p-4 text-secondary">
+                        This list does not have any poster-backed items yet.
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="mb-4">
+    <div class="card bg-black border-secondary-subtle">
+        <div class="card-body p-4">
+            <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4">
+                <div>
+                    <span class="badge text-bg-light text-dark align-self-start mb-3">Suggestions</span>
+                    <h2 class="h5 mb-1">Aktualni zanrove signaly.</h2>
+                    <p class="text-secondary mb-0">Pracovni vystup z toho, co uz mame v lokalnich datech.</p>
+                </div>
+                {% if suggestion_scores_generated_at %}
+                <span class="badge text-bg-dark border border-secondary-subtle">Updated {{ format_czech_datetime(suggestion_scores_generated_at) }}</span>
+                {% endif %}
+            </div>
+
+            {% if suggestion_scores %}
+            <div class="row g-3">
+                {% for item in suggestion_scores %}
+                <div class="col-12 col-md-6 col-xl-3">
+                    <div class="rounded-4 border border-secondary-subtle bg-body h-100 p-3">
+                        <div class="d-flex justify-content-between align-items-center gap-3 mb-2">
+                            <div>
+                                <div class="fw-semibold">{{ item.genre }}</div>
+                                <div class="small text-secondary mt-1">{{ item.titles_considered }} titles</div>
+                            </div>
+                            <span class="badge text-bg-light text-dark">{{ "%.1f"|format(item.final_score) }}</span>
+                        </div>
+
+                        <div class="d-flex flex-wrap gap-2">
+                            {% if item.preference_overlap_score %}
+                            <span class="badge text-bg-dark border border-secondary-subtle">Manual {{ "%.2f"|format(item.preference_overlap_score) }}</span>
+                            {% endif %}
+                            <span class="badge text-bg-dark border border-secondary-subtle">Affinity {{ "%.2f"|format(item.affinity_score) }}</span>
+                            <span class="badge text-bg-dark border border-secondary-subtle">Watch {{ "%.2f"|format(item.watch_signal_score) }}</span>
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="rounded-4 border border-secondary-subtle p-4 text-secondary">
+                Suggestions zatim nejsou spocitane.
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</section>
+
+<section class="mt-4">
+    <div id="background-activity-card">
+        {% include "_background_activity_card.html" %}
+    </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script>
+    (function () {
+        const refreshUrl = "/ui/cards/background-activity";
+        const target = document.getElementById("background-activity-card");
+
+        if (!target) {
+            return;
+        }
+
+        async function refreshBackgroundCard() {
+            try {
+                const response = await fetch(refreshUrl, {
+                    headers: { "X-Requested-With": "fetch" }
+                });
+                if (!response.ok) {
+                    return;
+                }
+                target.innerHTML = await response.text();
+            } catch (_) {
+                // Keep the last rendered card if refresh fails.
+            }
+        }
+
+        window.setInterval(refreshBackgroundCard, 20000);
+    })();
+
+    (function () {
+        const section = document.getElementById("lists-section");
+        if (!section) {
+            return;
+        }
+
+        const leftCard = section.querySelector("[data-lists-card='lists']");
+        const rightCard = section.querySelector("[data-lists-card='items']");
+        const leftScroll = section.querySelector("[data-lists-scroll='lists']");
+        const rightScroll = section.querySelector("[data-lists-scroll='items']");
+        const itemsGrid = section.querySelector("[data-list-items-grid]");
+
+        if (
+            !(leftCard instanceof HTMLElement)
+            || !(rightCard instanceof HTMLElement)
+            || !(leftScroll instanceof HTMLElement)
+            || !(rightScroll instanceof HTMLElement)
+        ) {
+            return;
+        }
+
+        function resetHeights() {
+            leftCard.style.height = "";
+            rightCard.style.height = "";
+        }
+
+        function getThreeRowHeight() {
+            if (!(itemsGrid instanceof HTMLElement)) {
+                return 0;
+            }
+
+            const items = Array.from(itemsGrid.children).filter((item) => item instanceof HTMLElement);
+            if (!items.length) {
+                return 0;
+            }
+
+            const rows = [];
+            for (const item of items) {
+                const top = Math.round(item.offsetTop);
+                const bottom = item.offsetTop + item.offsetHeight;
+                const existingRow = rows.find((row) => Math.abs(row.top - top) <= 2);
+                if (existingRow) {
+                    existingRow.bottom = Math.max(existingRow.bottom, bottom);
+                    continue;
+                }
+
+                rows.push({ top, bottom });
+                if (rows.length >= 3) {
+                    continue;
+                }
+            }
+
+            rows.sort((a, b) => a.top - b.top);
+            const visibleRows = rows.slice(0, Math.min(3, rows.length));
+            if (!visibleRows.length) {
+                return 0;
+            }
+
+            return visibleRows[visibleRows.length - 1].bottom - visibleRows[0].top;
+        }
+
+        function syncListPanels() {
+            resetHeights();
+
+            if (window.innerWidth < 1200) {
+                return;
+            }
+
+            const leftNaturalHeight = leftCard.offsetHeight;
+            const rightFixedHeight = rightCard.offsetHeight - rightScroll.offsetHeight;
+            const rightMinimumHeight = rightFixedHeight + getThreeRowHeight();
+            const targetHeight = Math.max(leftNaturalHeight, rightMinimumHeight);
+
+            if (targetHeight > 0) {
+                leftCard.style.height = `${targetHeight}px`;
+                rightCard.style.height = `${targetHeight}px`;
+            }
+        }
+
+        const observer = new ResizeObserver(() => {
+            window.requestAnimationFrame(syncListPanels);
+        });
+
+        observer.observe(leftScroll);
+        observer.observe(rightScroll);
+        if (itemsGrid instanceof HTMLElement) {
+            observer.observe(itemsGrid);
+        }
+
+        window.addEventListener("resize", () => {
+            window.requestAnimationFrame(syncListPanels);
+        });
+
+        window.addEventListener("load", () => {
+            window.requestAnimationFrame(syncListPanels);
+        });
+
+        window.requestAnimationFrame(syncListPanels);
+    })();
+</script>
+{% endblock %}

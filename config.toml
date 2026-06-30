@@ -1,0 +1,15 @@
+# Počet karet v sekci Continue Watching na úvodní stránce.
+# Mění jen backendové omezení dotazu, ne žádné UI rozložení.
+continue_watching_limit = 24
+
+# Počet položek zobrazených po výběru seznamu v My Lists na úvodní stránce.
+# Pokud má seznam více položek, zbytek se řeší přes Show all / detail seznamu.
+my_lists_selected_limit = 50
+
+# Kolik posledních dní se má počítat do Recently Watched.
+# Starší watch eventy zůstávají v databázi, ale tento pohled je ignoruje.
+recently_watched_days = 183
+
+# Primární jazyk TMDB detailu pro zobrazení v appce.
+# Povolené hodnoty jsou jen "EN" a "CZ"; druhý jazyk se automaticky bere jako fallback.
+tmdb_primary_language = "EN"

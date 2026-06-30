@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+
+{% block title %}Filmy | Favorite Traits{% endblock %}
+
+{% block content %}
+<section class="mb-3">
+    <a class="link-light text-decoration-none small" href="{{ back_url }}">« Back</a>
+</section>
+
+<section class="mb-4">
+    <div class="card bg-black border-secondary-subtle">
+        <div class="card-body p-4 p-lg-5">
+            <div class="d-flex flex-wrap align-items-start justify-content-between gap-3 mb-4">
+                <div>
+                    <h1 class="h2 mb-2" style="color: #b56a33;">Favorite Traits</h1>
+                    <p class="text-secondary mb-0">Volne vyrazy jako cerebral, dark, slow-burn nebo mind-bending. Vyplnena priorita znamena, ze trait patri mezi oblibene.</p>
+                </div>
+                <div class="d-flex flex-wrap gap-2">
+                    <span class="badge text-bg-dark border border-secondary-subtle px-3 py-2">{{ favorite_count }} selected</span>
+                </div>
+            </div>
+
+            {% if saved %}
+            <div class="alert alert-success border-0 mb-4" role="alert">
+                Favorite traits updated.
+            </div>
+            {% endif %}
+
+            <form method="post" action="/system/favorite-traits">
+                <input type="hidden" name="return_to" value="{{ return_to }}">
+
+                <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4">
+                    <div class="small text-secondary">Prazdny radek se ignoruje. Pokud vyplnis nazev, vypln i prioritu.</div>
+                    <button type="submit" class="btn btn-light text-dark">Save traits</button>
+                </div>
+
+                <div class="row g-3">
+                    {% for item in trait_rows %}
+                    <div class="col-12 col-xl-6">
+                        <div class="rounded-4 border border-secondary-subtle bg-body h-100 p-3">
+                            <div class="row g-3 align-items-end">
+                                <div class="col">
+                                    <label class="form-label small text-secondary mb-1" for="trait-{{ loop.index }}">Trait</label>
+                                    <input
+                                        id="trait-{{ loop.index }}"
+                                        class="form-control bg-black border-secondary-subtle text-light"
+                                        type="text"
+                                        maxlength="120"
+                                        name="trait_{{ loop.index }}"
+                                        value="{{ item.trait }}"
+                                        placeholder="cerebral"
+                                    >
+                                </div>
+                                <div class="col-auto" style="width: 7rem;">
+                                    <label class="form-label small text-secondary mb-1" for="priority-{{ loop.index }}">Priority</label>
+                                    <input
+                                        id="priority-{{ loop.index }}"
+                                        class="form-control bg-black border-secondary-subtle text-light"
+                                        type="number"
+                                        min="1"
+                                        step="1"
+                                        name="priority_{{ loop.index }}"
+                                        value="{{ item.preference_rank if item.preference_rank is not none else '' }}"
+                                        placeholder="-"
+                                    >
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+
+                <div class="d-flex justify-content-end mt-4">
+                    <button type="submit" class="btn btn-light text-dark">Save traits</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</section>
+{% endblock %}

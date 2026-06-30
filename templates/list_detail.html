@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+
+{% block title %}Filmy | {{ selected_list.name }}{% endblock %}
+
+{% block content %}
+<section class="mb-4">
+    <div class="card bg-black border-secondary-subtle">
+        <div class="card-body p-4">
+            <div class="d-flex justify-content-between align-items-start gap-3 mb-4">
+                <div class="d-flex flex-column gap-2">
+                    <div class="d-flex align-items-center gap-3">
+                        <span class="badge text-bg-light text-dark align-self-start">{{ selected_list.name }}</span>
+                        {% if selected_list.list_kind == "custom" or selected_list.id == "watchlist" %}
+                        <details>
+                            <summary class="link-light small text-decoration-none" style="cursor: pointer; list-style: none;">Edit</summary>
+                            <form action="/ui/lists/update-description" method="post" class="mt-2 d-grid gap-2">
+                                <input type="hidden" name="list_id" value="{{ selected_list.id }}">
+                                <input type="hidden" name="return_to" value="/lists/{{ selected_list.id }}?page={{ selected_list_page }}">
+                                <textarea
+                                    name="description"
+                                    class="form-control bg-body-tertiary border-secondary-subtle text-light"
+                                    placeholder="Short description"
+                                    rows="2"
+                                    maxlength="400"
+                                >{{ selected_list.description or '' }}</textarea>
+                                <button type="submit" class="btn btn-sm btn-outline-light align-self-start">Save</button>
+                            </form>
+                        </details>
+                        {% endif %}
+                    </div>
+                    {% if selected_list.description %}
+                    <div class="small text-secondary">{{ selected_list.description }}</div>
+                    {% endif %}
+                    <div class="text-secondary small">
+                        {{ selected_list_total }} položek
+                        {% if selected_list_total_pages > 1 %}
+                        · stránka {{ selected_list_page }} z {{ selected_list_total_pages }}
+                        {% endif %}
+                    </div>
+                </div>
+                <a class="btn btn-outline-light btn-sm" href="/">Back home</a>
+            </div>
+
+            {% if selected_list_items %}
+            <div class="row row-cols-2 row-cols-md-4 g-3">
+                {% for item in selected_list_items %}
+                <div class="col">
+                    {% include "_selected_list_item_card.html" %}
+                </div>
+                {% endfor %}
+            </div>
+            <div class="d-flex justify-content-between align-items-center gap-3 mt-4">
+                {% if selected_list_has_previous and selected_list_prev_url %}
+                <a class="btn btn-outline-secondary" href="{{ selected_list_prev_url }}">Previous</a>
+                {% else %}
+                <span></span>
+                {% endif %}
+                {% if selected_list_has_next and selected_list_next_url %}
+                <a class="btn btn-outline-secondary ms-auto" href="{{ selected_list_next_url }}">Next</a>
+                {% endif %}
+            </div>
+            {% else %}
+            <div class="rounded-4 border border-secondary-subtle p-4 text-secondary">
+                This list does not have any poster-backed items yet.
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</section>
+{% endblock %}

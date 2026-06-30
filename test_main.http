@@ -1,0 +1,46 @@
+# Test your FastAPI endpoints
+
+GET http://127.0.0.1:8000/
+Accept: application/json
+
+###
+
+GET http://127.0.0.1:8000/api/catalog/stats
+Accept: application/json
+
+###
+
+GET http://127.0.0.1:8000/api/catalog/search?q=matrix&limit=5
+Accept: application/json
+
+###
+
+GET http://127.0.0.1:8000/api/catalog/lookup?q=Killer%20Heat&candidates_limit=3
+Accept: application/json
+
+###
+
+GET http://127.0.0.1:8000/api/catalog/lookup/text?q=Tenet
+Accept: text/plain
+
+###
+
+GET http://127.0.0.1:8000/api/catalog/describe?q=Killer%20Heat
+Accept: application/json
+
+###
+
+POST http://127.0.0.1:8000/api/admin/imdb/rebuild
+Accept: application/json
+
+###
+
+GET http://127.0.0.1:8000/api/admin/content/tt0133093
+Accept: application/json
+
+###
+
+POST http://127.0.0.1:8000/api/admin/content/tt0133093/state?interest_state=previewed
+Accept: application/json
+
+###
