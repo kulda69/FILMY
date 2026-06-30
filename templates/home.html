@@ -229,41 +229,11 @@
     </div>
 </section>
 
-<section class="mt-4">
-    <div id="background-activity-card">
-        {% include "_background_activity_card.html" %}
-    </div>
-</section>
 {% endblock %}
 
 {% block scripts %}
 {{ super() }}
 <script>
-    (function () {
-        const refreshUrl = "/ui/cards/background-activity";
-        const target = document.getElementById("background-activity-card");
-
-        if (!target) {
-            return;
-        }
-
-        async function refreshBackgroundCard() {
-            try {
-                const response = await fetch(refreshUrl, {
-                    headers: { "X-Requested-With": "fetch" }
-                });
-                if (!response.ok) {
-                    return;
-                }
-                target.innerHTML = await response.text();
-            } catch (_) {
-                // Keep the last rendered card if refresh fails.
-            }
-        }
-
-        window.setInterval(refreshBackgroundCard, 20000);
-    })();
-
     (function () {
         const section = document.getElementById("lists-section");
         if (!section) {

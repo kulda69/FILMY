@@ -10,12 +10,20 @@ from time import time
 ROOT = Path(__file__).resolve().parents[2]
 JOB_SPECS = [
     {
-        "name": "tmdb_backfill",
+        "name": "metadata_pipeline",
+        "pid_file": ROOT / "data" / "metadata_pipeline.pid",
+        "log_file": ROOT / "data" / "metadata_pipeline.log",
+    },
+]
+
+ARCHIVAL_JOB_SPECS = [
+    {
+        "name": "tmdb_backfill_archive",
         "pid_file": ROOT / "data" / "tmdb_backfill.pid",
         "log_file": ROOT / "data" / "tmdb_backfill.log",
     },
     {
-        "name": "title_details_cache",
+        "name": "title_details_cache_archive",
         "pid_file": ROOT / "data" / "title_details_cache.pid",
         "log_file": ROOT / "data" / "title_details_cache.log",
     },
@@ -79,11 +87,22 @@ def main() -> int:
     args = parser.parse_args()
 
     jobs = [_describe_job(spec) for spec in JOB_SPECS]
+    archival_jobs = [_describe_job(spec) for spec in ARCHIVAL_JOB_SPECS]
     if args.json:
-        print(json.dumps({"jobs": jobs}, ensure_ascii=False, indent=2), flush=True)
+        print(json.dumps({"jobs": jobs, "archival_jobs": archival_jobs}, ensure_ascii=False, indent=2), flush=True)
         return 0
 
+    print("Active jobs:")
     for job in jobs:
+        alive = "alive" if job["alive"] else "dead"
+        pid = job["pid"] if job["pid"] is not None else "-"
+        log_age = job["log_age_seconds"] if job["log_age_seconds"] is not None else "-"
+        print(f'{job["name"]}: {alive}, pid={pid}, log_age_s={log_age}')
+        if job["last_log_line"]:
+            print(f'  last: {job["last_log_line"]}')
+
+    print("\nArchival maintenance tools:")
+    for job in archival_jobs:
         alive = "alive" if job["alive"] else "dead"
         pid = job["pid"] if job["pid"] is not None else "-"
         log_age = job["log_age_seconds"] if job["log_age_seconds"] is not None else "-"

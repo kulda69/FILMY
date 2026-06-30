@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+
+{% block title %}Filmy | Background Jobs{% endblock %}
+
+{% block content %}
+<section class="mb-3">
+    <a class="link-light text-decoration-none small" href="{{ back_url }}">« Back</a>
+</section>
+
+<section class="mb-4">
+    <div class="card bg-black border-secondary-subtle">
+        <div class="card-body p-4 p-lg-5">
+            <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4">
+                <div>
+                    <h1 class="h2 mb-2" style="color: #b56a33;">Background Jobs</h1>
+                    <p class="text-secondary mb-0">Sem jsme presunuli prubeznou aktivitu na pozadi, at neprekazi na domovce.</p>
+                </div>
+                <span class="badge text-bg-dark border border-secondary-subtle px-3 py-2">Auto refresh 20s</span>
+            </div>
+
+            <div id="background-activity-card">
+                {% include "_background_activity_card.html" %}
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script>
+    (function () {
+        const refreshUrl = "/ui/cards/background-activity";
+        const target = document.getElementById("background-activity-card");
+
+        if (!target) {
+            return;
+        }
+
+        async function refreshBackgroundCard() {
+            try {
+                const response = await fetch(refreshUrl, {
+                    headers: { "X-Requested-With": "fetch" }
+                });
+                if (!response.ok) {
+                    return;
+                }
+                target.innerHTML = await response.text();
+            } catch (_) {
+                // Keep the last rendered card if refresh fails.
+            }
+        }
+
+        window.setInterval(refreshBackgroundCard, 20000);
+    })();
+</script>
+{% endblock %}

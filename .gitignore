@@ -29,6 +29,7 @@ data/plex_probe.json
 data/tmdb_backfill.log
 data/*.log
 data/*.pid
+data/*.signal
 tmp/
 output/playwright/
 Screenshot *.png

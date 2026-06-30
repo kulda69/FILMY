@@ -13,7 +13,15 @@ from typing import Any
 
 import duckdb
 
-from filmy.paths import ASSETS_DIR, DATA_DIR, DB_PATH, PROJECT_ROOT
+from filmy.paths import ASSETS_DIR, DATA_DIR, DB_PATH, METADATA_PIPELINE_SIGNAL_PATH, PROJECT_ROOT
+
+
+def signal_background_activity(reason: str) -> None:
+    """Wake the metadata pipeline after a user or admin write action."""
+
+    METADATA_PIPELINE_SIGNAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"ts": time.time(), "reason": reason}
+    METADATA_PIPELINE_SIGNAL_PATH.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 TMDB_TARGET_COUNTS_SQL = """
@@ -191,8 +199,12 @@ class BackgroundJobSupervisor:
                         "20",
                         "--person-detail-batch-size",
                         "20",
-                        "--sleep-seconds",
+                        "--active-sleep-seconds",
                         "2",
+                        "--idle-sleep-seconds",
+                        "180",
+                        "--wake-check-seconds",
+                        "5",
                     ),
                     log_path=DATA_DIR / "metadata_pipeline.log",
                     pid_path=DATA_DIR / "metadata_pipeline.pid",

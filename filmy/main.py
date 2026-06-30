@@ -14,7 +14,7 @@ from starlette.responses import HTMLResponse
 from starlette.responses import PlainTextResponse
 from starlette.templating import Jinja2Templates
 
-from filmy.background_jobs import BackgroundJobSupervisor
+from filmy.background_jobs import BackgroundJobSupervisor, signal_background_activity
 from filmy.config import get_ui_config
 from filmy.db import (
     ASSETS_DIR,
@@ -88,6 +88,7 @@ from filmy.integrations.tmdb import (
     sync_title_from_imdb,
 )
 from filmy.paths import PEOPLE_ASSETS_DIR, PROJECT_ROOT
+from filmy.scripts.materialize_title_details import materialize_title_detail_cache
 
 background_supervisor = BackgroundJobSupervisor()
 templates = Jinja2Templates(directory=(PROJECT_ROOT / "templates").as_posix())
@@ -210,6 +211,14 @@ def _launch_person_portrait_warmup(main_cast: list[dict[str, object]]) -> None:
 
 def _count_missing_portraits(main_cast: list[dict[str, object]]) -> int:
     return sum(1 for person in main_cast if not person.get("has_portrait"))
+
+
+def _signal_metadata_pipeline(reason: str) -> None:
+    try:
+        signal_background_activity(reason)
+    except OSError:
+        # Metadata wake-up is best-effort; the write action itself must still succeed.
+        pass
 
 
 def _alias_bucket(alias: dict[str, object]) -> str | None:
@@ -703,6 +712,25 @@ async def favorite_traits_page(
     return response
 
 
+@app.get("/system/background-jobs", response_class=HTMLResponse)
+async def background_jobs_page(
+    request: Request,
+    return_to: str | None = Query(default=None),
+):
+    safe_return_to = _request_back_target(request, return_to)
+    response = templates.TemplateResponse(
+        request,
+        "background_jobs.html",
+        {
+            "back_url": safe_return_to,
+            "background": background_supervisor.homepage_snapshot(),
+        },
+    )
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    return response
+
+
 @app.post("/system/favorite-traits")
 async def favorite_traits_save(request: Request):
     form = await request.form()
@@ -849,6 +877,7 @@ async def ui_list_action_delete(
         delete_group_from_user_list(list_id, display_tconst)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _signal_metadata_pipeline("ui_list_delete")
     return _redirect_back(return_to)
 
 
@@ -863,6 +892,7 @@ async def ui_list_action_move(
         move_group_between_user_lists(source_list_id, target_list_id, display_tconst)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _signal_metadata_pipeline("ui_list_move")
     return _redirect_back(return_to)
 
 
@@ -877,6 +907,7 @@ async def ui_list_action_copy(
         copy_group_to_user_list(source_list_id, target_list_id, display_tconst)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _signal_metadata_pipeline("ui_list_copy")
     return _redirect_back(return_to)
 
 
@@ -893,6 +924,7 @@ async def ui_list_action_watched(
             delete_group_from_user_list(list_id, display_tconst)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _signal_metadata_pipeline("ui_mark_watched")
     return _redirect_back(return_to)
 
 
@@ -906,6 +938,7 @@ async def ui_list_action_rating(
         set_user_rating(tconst, rating)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _signal_metadata_pipeline("ui_rating_set")
     return _redirect_back(return_to)
 
 
@@ -918,6 +951,7 @@ async def ui_list_action_rating_clear(
         clear_user_rating(tconst)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _signal_metadata_pipeline("ui_rating_clear")
     return _redirect_back(return_to)
 
 
@@ -930,6 +964,7 @@ async def ui_title_episode_watched_through(
         record_watch_events_through_episode(episode_tconst)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _signal_metadata_pipeline("ui_episode_watched_through")
     return _redirect_back(return_to)
 
 
@@ -939,6 +974,7 @@ async def ui_create_list(name: str = Form(), description: str | None = Form(defa
         created = create_user_list(name, description)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _signal_metadata_pipeline("ui_list_create")
     response = RedirectResponse(url=f"/?list_id={created['id']}#lists-section", status_code=303)
     response.headers["Cache-Control"] = "no-store, max-age=0"
     response.headers["Pragma"] = "no-cache"
@@ -955,6 +991,7 @@ async def ui_update_list_description(
         update_user_list_description(list_id, description)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _signal_metadata_pipeline("ui_list_update_description")
     return _redirect_back(return_to)
 
 
@@ -1003,9 +1040,11 @@ async def admin_imdb_lists_inspect(export_dir: str = Query(default="imdb_lists")
 @app.post("/api/admin/imdb/lists/sync")
 async def admin_imdb_lists_sync(export_dir: str = Query(default="imdb_lists")):
     try:
-        return sync_imdb_lists(export_dir)
+        result = sync_imdb_lists(export_dir)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _signal_metadata_pipeline("admin_imdb_lists_sync")
+    return result
 
 
 @app.get("/api/admin/imdb/lists/status")
@@ -1054,9 +1093,11 @@ async def admin_plex_sync(
     item_limit_per_section: int | None = Query(default=None, ge=1, le=10000),
 ):
     try:
-        return sync_plex_source(section_limit=section_limit, item_limit_per_section=item_limit_per_section)
+        result = sync_plex_source(section_limit=section_limit, item_limit_per_section=item_limit_per_section)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _signal_metadata_pipeline("admin_plex_sync")
+    return result
 
 
 @app.get("/api/admin/plex/status")
@@ -1128,7 +1169,9 @@ async def catalog_person_lookup_text(q: str = Query(min_length=1)):
 
 @app.post("/api/admin/imdb/rebuild")
 async def admin_imdb_rebuild():
-    return {"status": "ok", "stats": refresh_catalog()}
+    result = {"status": "ok", "stats": refresh_catalog()}
+    _signal_metadata_pipeline("admin_imdb_rebuild")
+    return result
 
 
 @app.get("/api/admin/content/{tconst}")
@@ -1155,41 +1198,51 @@ async def admin_update_content_state(
     detail = get_content_detail(tconst)
     if detail is None:
         raise HTTPException(status_code=404, detail="Titul nebyl nalezen.")
-    return update_content_state(tconst, interest_state)
+    result = update_content_state(tconst, interest_state)
+    _signal_metadata_pipeline("admin_content_state")
+    return result
 
 
 @app.post("/api/library/content/{tconst}/watchlist")
 async def library_update_watchlist(tconst: str, payload: WatchlistUpdateRequest):
     try:
-        return set_watchlist_state(tconst, in_watchlist=payload.in_watchlist, notes=payload.notes)
+        result = set_watchlist_state(tconst, in_watchlist=payload.in_watchlist, notes=payload.notes)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _signal_metadata_pipeline("api_watchlist_update")
+    return result
 
 
 @app.post("/api/library/content/{tconst}/rating")
 async def library_set_rating(tconst: str, payload: RatingUpdateRequest):
     try:
-        return set_user_rating(tconst, payload.rating)
+        result = set_user_rating(tconst, payload.rating)
     except ValueError as exc:
         detail = str(exc)
         status_code = 404 if "nebyl nalezen" in detail else 400
         raise HTTPException(status_code=status_code, detail=detail) from exc
+    _signal_metadata_pipeline("api_rating_set")
+    return result
 
 
 @app.delete("/api/library/content/{tconst}/rating")
 async def library_clear_rating(tconst: str):
     try:
-        return clear_user_rating(tconst)
+        result = clear_user_rating(tconst)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _signal_metadata_pipeline("api_rating_clear")
+    return result
 
 
 @app.post("/api/library/content/{tconst}/watch")
 async def library_record_watch(tconst: str, payload: WatchEventCreateRequest):
     try:
-        return record_watch_event(tconst, watched_on=payload.watched_on, notes=payload.notes)
+        result = record_watch_event(tconst, watched_on=payload.watched_on, notes=payload.notes)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _signal_metadata_pipeline("api_watch_record")
+    return result
 
 
 @app.post("/api/admin/tmdb/sync/{tconst}")
@@ -1230,6 +1283,16 @@ async def admin_tmdb_library_enrich(limit: int | None = Query(default=None, ge=1
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+@app.post("/api/admin/cache/title-details/materialize")
+async def admin_materialize_title_details(
+    limit: int | None = Query(default=None, ge=1, le=50000),
+    rewrite: bool = Query(default=False),
+):
+    """Archival one-shot repair for older title detail JSON cache files."""
+
+    return materialize_title_detail_cache(limit=limit, rewrite=rewrite)
+
+
 @app.post("/api/admin/import/netflix/preview")
 async def admin_import_netflix_preview(
     file: UploadFile = File(...),
@@ -1259,9 +1322,11 @@ async def admin_import_batch(batch_id: str):
 @app.post("/api/admin/import/commit/{batch_id}")
 async def admin_import_commit(batch_id: str):
     try:
-        return commit_import_batch(batch_id)
+        result = commit_import_batch(batch_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _signal_metadata_pipeline("admin_import_commit")
+    return result
 
 
 @app.get("/api/admin/import/trakt-export/inspect")
@@ -1275,9 +1340,11 @@ async def admin_trakt_export_inspect(export_dir: str = Query(default="trakt-expo
 @app.post("/api/admin/import/trakt-export/sync")
 async def admin_trakt_export_sync(export_dir: str = Query(default="trakt-export")):
     try:
-        return sync_trakt_export(export_dir)
+        result = sync_trakt_export(export_dir)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _signal_metadata_pipeline("admin_trakt_export_sync")
+    return result
 
 
 @app.get("/api/admin/trakt/syncs")
