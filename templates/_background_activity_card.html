@@ -18,8 +18,14 @@
             <div class="col-12 col-md-4">
                 <div class="rounded-4 border border-secondary-subtle bg-body h-100 p-3">
                     <div class="text-secondary small text-uppercase mb-2">TMDB Remaining</div>
-                    <div class="h3 mb-1">{{ background.tmdb_remaining_targets }}</div>
-                    <div class="small text-secondary">of {{ background.tmdb_total_targets }} targets</div>
+                    <div class="h3 mb-1">{{ background.tmdb_remaining_targets if background.tmdb_remaining_targets is not none else "n/a" }}</div>
+                    <div class="small text-secondary">
+                        {% if background.tmdb_total_targets is not none %}
+                        of {{ background.tmdb_total_targets }} targets
+                        {% else %}
+                        DuckDB temporarily busy
+                        {% endif %}
+                    </div>
                 </div>
             </div>
             <div class="col-12 col-md-4">

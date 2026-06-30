@@ -270,7 +270,13 @@ class BackgroundJobSupervisor:
 
     def homepage_snapshot(self) -> dict[str, Any]:
         status = self.status()
-        tmdb_total, tmdb_complete = self._tmdb_target_counts()
+        tmdb_total: int | None = None
+        tmdb_complete: int | None = None
+        try:
+            tmdb_total, tmdb_complete = self._tmdb_target_counts()
+        except duckdb.Error:
+            tmdb_total = None
+            tmdb_complete = None
         detail_files = sum(1 for _ in ASSETS_DIR.rglob("detail.json")) if ASSETS_DIR.exists() else 0
         jobs: list[dict[str, Any]] = []
         for item in status["jobs"]:
@@ -291,7 +297,7 @@ class BackgroundJobSupervisor:
             "detail_cache_files": detail_files,
             "tmdb_total_targets": tmdb_total,
             "tmdb_complete_targets": tmdb_complete,
-            "tmdb_remaining_targets": max(tmdb_total - tmdb_complete, 0),
+            "tmdb_remaining_targets": max(tmdb_total - tmdb_complete, 0) if tmdb_total is not None and tmdb_complete is not None else None,
             "jobs": jobs,
         }
 

@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+
+{% block title %}Filmy | IMDb Refresh{% endblock %}
+
+{% block content %}
+{% set current_label = "IMDb Refresh" %}
+{% include "_top_breadcrumbs.html" %}
+
+<section class="mb-4">
+    <div class="card bg-black border-secondary-subtle">
+        <div class="card-body p-4 p-lg-5">
+            <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4">
+                <div>
+                    <h1 class="h2 mb-2" style="color: #b56a33;">IMDb Refresh</h1>
+                    <p class="text-secondary mb-0">Stahne aktualni IMDb TSV dumpy, pripravi je bokem a az na konci prepne aktivni `imdb/` a znovu postavi katalog.</p>
+                </div>
+                <form method="post" action="/system/imdb-refresh/start" class="m-0">
+                    <input type="hidden" name="return_to" value="{{ return_to }}">
+                    <button type="submit" class="btn btn-light text-dark" {% if refresh_snapshot.status.is_running %}disabled{% endif %}>
+                        {% if refresh_snapshot.status.is_running %}Refresh Bezi{% else %}Start Refresh{% endif %}
+                    </button>
+                </form>
+            </div>
+
+            {% if started %}
+            <div class="alert alert-success border-0 mb-4" role="alert">
+                IMDb refresh byl spusten.
+            </div>
+            {% endif %}
+
+            <div class="small text-secondary mb-4">
+                Je to jednorazovy servisni job. Stary obsah `imdb/` se po uspesnem dokonceni nezachovava.
+            </div>
+
+            <div id="imdb-refresh-status-card">
+                {% include "_imdb_refresh_status.html" %}
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script>
+    (function () {
+        const refreshUrl = "/ui/cards/imdb-refresh-status";
+        const target = document.getElementById("imdb-refresh-status-card");
+
+        if (!target) {
+            return;
+        }
+
+        async function refreshCard() {
+            try {
+                const response = await fetch(refreshUrl, {
+                    headers: { "X-Requested-With": "fetch" }
+                });
+                if (!response.ok) {
+                    return;
+                }
+                target.innerHTML = await response.text();
+            } catch (_) {
+                // Keep the last rendered card if refresh fails.
+            }
+        }
+
+        window.setInterval(refreshCard, 5000);
+    })();
+</script>
+{% endblock %}

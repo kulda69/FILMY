@@ -1,0 +1,361 @@
+{% extends "base.html" %}
+
+{% block title %}Filmy | Search{% endblock %}
+
+{% block content %}
+{% set current_label = "Search" %}
+{% set nav_search_query = search_query %}
+{% include "_top_breadcrumbs.html" %}
+
+<section class="mb-4">
+    <div class="card bg-black border-secondary-subtle">
+        <div class="card-body p-4 p-lg-5">
+            <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4">
+                <div>
+                    <h1 class="h2 mb-2" style="color: #b56a33;">Search Results</h1>
+                    {% if search_query %}
+                    <div class="text-secondary">
+                        Query <span class="text-light">"{{ search_query }}"</span>
+                        {% if search_mode == "wide" %}
+                        · wider candidate sweep
+                        {% else %}
+                        · standard lookup
+                        {% endif %}
+                    </div>
+                    {% else %}
+                    <div class="text-secondary">Zadej dotaz nahoře v navbaru.</div>
+                    {% endif %}
+                </div>
+                {% if search_lookup or person_search_lookup %}
+                    <div class="d-flex flex-wrap gap-2">
+                        {% if search_lookup %}
+                        <span class="badge text-bg-dark border border-secondary-subtle px-3 py-2">{{ search_lookup.candidate_count }} candidates</span>
+                        {% endif %}
+                        {% if person_search_lookup %}
+                        <span class="badge text-bg-dark border border-secondary-subtle px-3 py-2">{{ person_search_lookup.candidate_count }} people</span>
+                        {% endif %}
+                        {% if search_primary_result and search_primary_result.is_exact_match %}
+                        <span class="badge text-bg-success px-3 py-2">Exact match</span>
+                        {% elif search_primary_result and search_primary_result.fuzzy_score_percent is not none %}
+                        <span class="badge px-3 py-2 text-white border-0" style="background-color: #b56a33;">{{ search_primary_result.fuzzy_score_percent }}%</span>
+                        {% endif %}
+                    </div>
+                {% endif %}
+            </div>
+
+            {% if not search_query %}
+            <div class="rounded-4 border border-secondary-subtle p-4 text-secondary">
+                Tohle bude výsledková stránka pro hledání z horního menu. Zatím čeká na první dotaz.
+            </div>
+            {% elif not search_primary_result and not person_search_primary_result %}
+            <div class="rounded-4 border border-secondary-subtle p-4 text-secondary">
+                Pro zadaný dotaz jsme nenašli žádný přesvědčivý titul ani osobu.
+            </div>
+            {% else %}
+            {% if person_search_primary_result %}
+            <div class="card bg-body border border-secondary-subtle overflow-hidden mb-4">
+                <div class="card-body p-4">
+                    <div class="row g-4 align-items-start">
+                        <div class="col-12 col-md-4 col-xl-3">
+                            {% if person_search_primary_result.portrait_url %}
+                            <a href="{{ person_search_primary_result.detail_url }}" class="text-decoration-none">
+                                <img src="{{ person_search_primary_result.portrait_url }}" alt="Portrait of {{ person_search_primary_result.name }}" class="img-fluid rounded-4 border border-secondary-subtle w-100">
+                            </a>
+                            {% else %}
+                            <a href="{{ person_search_primary_result.detail_url }}" class="rounded-4 border border-secondary-subtle bg-black text-secondary text-decoration-none d-flex align-items-center justify-content-center text-center p-4" style="min-height: 22rem;">
+                                Portrait not available yet.
+                            </a>
+                            {% endif %}
+                        </div>
+                        <div class="col-12 col-md-8 col-xl-9">
+                            <div class="d-flex flex-wrap gap-2 mb-3">
+                                <span class="badge text-bg-light text-dark px-3 py-2">Person</span>
+                                {% if person_search_primary_result.birth_year %}
+                                <span class="badge text-bg-secondary px-3 py-2">{{ person_search_primary_result.birth_year }}</span>
+                                {% endif %}
+                                {% if person_search_primary_result.death_year %}
+                                <span class="badge text-bg-dark border border-secondary-subtle px-3 py-2">{{ person_search_primary_result.death_year }}</span>
+                                {% endif %}
+                                {% if person_search_primary_result.credit_count %}
+                                <span class="badge text-bg-dark border border-secondary-subtle px-3 py-2">{{ person_search_primary_result.credit_count }} credits</span>
+                                {% endif %}
+                                {% if person_search_primary_result.fuzzy_score_percent is not none %}
+                                <span class="badge px-3 py-2 text-white border-0" style="background-color: #b56a33;">{{ person_search_primary_result.fuzzy_score_percent }}%</span>
+                                {% endif %}
+                            </div>
+
+                            <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-3">
+                                <div>
+                                    <h2 class="h1 mb-2">
+                                        <a href="{{ person_search_primary_result.detail_url }}" class="link-light text-decoration-none">{{ person_search_primary_result.name }}</a>
+                                    </h2>
+                                    {% if person_search_primary_result.primary_profession %}
+                                    <div class="text-secondary fs-5">{{ person_search_primary_result.primary_profession }}</div>
+                                    {% endif %}
+                                </div>
+                                <a href="{{ person_search_primary_result.detail_url }}" class="btn btn-outline-light">Open person</a>
+                            </div>
+
+                            <div class="row g-3 mb-4">
+                                <div class="col-12 col-lg-6">
+                                    <div class="rounded-4 border border-secondary-subtle p-3 bg-black h-100">
+                                        <div class="small mb-2" style="color: #b56a33;">Known for</div>
+                                        <div class="d-flex flex-wrap gap-2">
+                                            {% for item in person_search_primary_result.known_for_items %}
+                                            <a href="{{ item.detail_url }}" class="badge text-bg-dark border border-secondary-subtle text-decoration-none">
+                                                {{ item.title }}{% if item.year %} · {{ item.year }}{% endif %}
+                                            </a>
+                                            {% endfor %}
+                                            {% if not person_search_primary_result.known_for_items %}
+                                            <span class="text-secondary small">Neni doplneno.</span>
+                                            {% endif %}
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col-12 col-lg-6">
+                                    <div class="rounded-4 border border-secondary-subtle p-3 bg-black h-100">
+                                        <div class="small mb-2" style="color: #b56a33;">Credits snapshot</div>
+                                        <div class="small text-secondary">
+                                            Acted {{ person_search_primary_result.acted_count }}
+                                            · Directed {{ person_search_primary_result.directed_count }}
+                                            · Written {{ person_search_primary_result.written_count }}
+                                            {% if person_search_primary_result.created_count %}
+                                            · Created {{ person_search_primary_result.created_count }}
+                                            {% endif %}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {% if person_search_alternate_results %}
+                            <div class="text-uppercase small mb-3" style="color: #b56a33;">Other people matches</div>
+                            <div class="row g-3">
+                                {% for item in person_search_alternate_results %}
+                                <div class="col-12 col-xl-6">
+                                    <div class="rounded-4 border border-secondary-subtle p-3 bg-black h-100">
+                                        <div class="d-flex gap-3 align-items-start">
+                                            {% if item.portrait_url %}
+                                            <img src="{{ item.portrait_url }}" alt="{{ item.name }}" class="rounded-4 border border-secondary-subtle object-fit-cover flex-shrink-0" style="width: 5.5rem; height: 8rem;">
+                                            {% else %}
+                                            <div class="rounded-4 border border-secondary-subtle bg-body text-secondary d-flex align-items-center justify-content-center text-center small flex-shrink-0" style="width: 5.5rem; height: 8rem;">
+                                                No portrait
+                                            </div>
+                                            {% endif %}
+                                            <div class="min-w-0 flex-grow-1">
+                                                <div class="d-flex flex-wrap gap-2 mb-2">
+                                                    {% if item.birth_year %}
+                                                    <span class="badge text-bg-secondary">{{ item.birth_year }}</span>
+                                                    {% endif %}
+                                                    {% if item.fuzzy_score_percent is not none %}
+                                                    <span class="badge text-white border-0" style="background-color: #b56a33;">{{ item.fuzzy_score_percent }}%</span>
+                                                    {% endif %}
+                                                </div>
+                                                <div class="fw-semibold fs-5">
+                                                    <a href="{{ item.detail_url }}" class="link-light text-decoration-none">{{ item.name }}</a>
+                                                </div>
+                                                {% if item.primary_profession %}
+                                                <div class="small text-secondary mb-2">{{ item.primary_profession }}</div>
+                                                {% endif %}
+                                                <div class="small text-secondary">{{ item.known_for_line or "No known-for preview." }}</div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                {% endfor %}
+                            </div>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+
+            {% if search_primary_result %}
+            <div class="card bg-body border border-secondary-subtle overflow-hidden mb-4">
+                <div class="card-body p-4">
+                    <div class="row g-4 align-items-start">
+                        <div class="col-12 col-md-4 col-xl-3">
+                            {% if search_primary_result.poster_url %}
+                            <a href="{{ search_primary_result.detail_url }}" class="text-decoration-none">
+                                <img src="{{ search_primary_result.poster_url }}" alt="Poster for {{ search_primary_result.title }}" class="img-fluid rounded-4 border border-secondary-subtle w-100">
+                            </a>
+                            {% else %}
+                            <a href="{{ search_primary_result.detail_url }}" class="rounded-4 border border-secondary-subtle bg-black text-secondary text-decoration-none d-flex align-items-center justify-content-center text-center p-4" style="min-height: 22rem;">
+                                Poster not available yet.
+                            </a>
+                            {% endif %}
+                        </div>
+                        <div class="col-12 col-md-8 col-xl-9">
+                            <div class="d-flex flex-wrap gap-2 mb-3">
+                                <span class="badge text-bg-light text-dark px-3 py-2">{{ search_primary_result.kind_label }}</span>
+                                {% if search_primary_result.year %}
+                                <span class="badge text-bg-secondary px-3 py-2">{{ search_primary_result.year }}</span>
+                                {% endif %}
+                                {% if search_primary_result.runtime_minutes %}
+                                <span class="badge text-bg-dark border border-secondary-subtle px-3 py-2">{{ search_primary_result.runtime_minutes }} min</span>
+                                {% endif %}
+                                {% if search_primary_result.imdb_rating %}
+                                <span class="badge text-bg-warning text-dark px-3 py-2">IMDb {{ "%.1f"|format(search_primary_result.imdb_rating) }}</span>
+                                {% endif %}
+                                {% if search_primary_result.user_rating %}
+                                <span class="badge px-3 py-2 text-dark border-0" style="background-color: #d7b1aa;">You: {{ search_primary_result.user_rating }}</span>
+                                {% endif %}
+                                <span class="badge text-bg-dark border border-secondary-subtle px-3 py-2">{{ search_primary_result.match_kind }}</span>
+                                {% if search_primary_result.fuzzy_score_percent is not none %}
+                                <span class="badge px-3 py-2 text-white border-0" style="background-color: #b56a33;">{{ search_primary_result.fuzzy_score_percent }}%</span>
+                                {% endif %}
+                            </div>
+
+                            <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-3">
+                                <div>
+                                    <h2 class="h1 mb-2">
+                                        <a href="{{ search_primary_result.detail_url }}" class="link-light text-decoration-none">{{ search_primary_result.title }}</a>
+                                    </h2>
+                                    {% if search_primary_result.original_title and search_primary_result.original_title != search_primary_result.title %}
+                                    <div class="text-secondary fs-5">{{ search_primary_result.original_title }}</div>
+                                    {% endif %}
+                                </div>
+                                <a href="{{ search_primary_result.detail_url }}" class="btn btn-outline-light">Open detail</a>
+                            </div>
+
+                            {% if search_primary_result.genres %}
+                            <div class="d-flex flex-wrap gap-2 mb-4">
+                                {% for genre in search_primary_result.genres %}
+                                <span class="badge rounded-pill text-bg-secondary px-3 py-2">{{ genre }}</span>
+                                {% endfor %}
+                            </div>
+                            {% endif %}
+
+                            <div class="row g-3 mb-4">
+                                <div class="col-12">
+                                    <div class="rounded-4 border border-secondary-subtle p-3 bg-black">
+                                        <div class="small mb-2" style="color: #b56a33;">Main cast</div>
+                                        <div>{{ search_primary_result.main_cast_line or "Neni doplneno." }}</div>
+                                    </div>
+                                </div>
+                                <div class="col-12 col-lg-6">
+                                    <div class="rounded-4 border border-secondary-subtle p-3 bg-black h-100">
+                                        <div class="small mb-2" style="color: #b56a33;">Directed by</div>
+                                        <div>{{ search_primary_result.directed_by_line or "Neni doplneno." }}</div>
+                                    </div>
+                                </div>
+                                <div class="col-12 col-lg-6">
+                                    <div class="rounded-4 border border-secondary-subtle p-3 bg-black h-100">
+                                        <div class="small mb-2" style="color: #b56a33;">Written by</div>
+                                        <div>{{ search_primary_result.written_by_line or "Neni doplneno." }}</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="row g-3 mb-4">
+                                <div class="col-12 col-lg-6">
+                                    <div class="rounded-4 border border-secondary-subtle p-3 bg-black h-100">
+                                        <div class="small mb-2" style="color: #b56a33;">Why this looks right</div>
+                                        <div class="small text-secondary">
+                                            {% if search_primary_result.is_exact_match %}
+                                            Presna shoda nazvu.
+                                            {% elif search_primary_result.fuzzy_score is not none %}
+                                            Nejblizsi match podle fuzzy score {{ "%.2f"|format(search_primary_result.fuzzy_score) }}.
+                                            {% else %}
+                                            Nejlepsi kandidat z dostupneho shortlistu.
+                                            {% endif %}
+                                            {% if search_primary_result.imdb_votes %}
+                                            · {{ search_primary_result.imdb_votes }} IMDb votes
+                                            {% endif %}
+                                            {% if search_primary_result.watched_count %}
+                                            · watched {{ search_primary_result.watched_count }}x
+                                            {% endif %}
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col-12 col-lg-6">
+                                    <div class="rounded-4 border border-secondary-subtle p-3 bg-black h-100">
+                                        <div class="small mb-2" style="color: #b56a33;">Local context</div>
+                                        <div class="d-flex flex-wrap gap-2">
+                                            {% if search_primary_result.user_lists %}
+                                            {% for user_list in search_primary_result.user_lists %}
+                                            <span class="badge text-dark border-0" style="background-color: #9fb6c9;">{{ user_list.name }}</span>
+                                            {% endfor %}
+                                            {% else %}
+                                            <span class="text-secondary small">Neni v lokalnich seznamech.</span>
+                                            {% endif %}
+                                            {% if search_primary_result.available_in_czechia %}
+                                            {% for provider in search_primary_result.available_in_czechia %}
+                                            <span class="badge text-bg-dark border border-secondary-subtle">{{ provider }}</span>
+                                            {% endfor %}
+                                            {% endif %}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {% if search_primary_result.overview %}
+                            <div class="rounded-4 border border-secondary-subtle p-3 bg-black">
+                                <div class="small mb-2" style="color: #b56a33;">Overview</div>
+                                <div class="small lh-lg text-secondary">{{ search_primary_result.overview }}</div>
+                            </div>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            {% if search_alternate_results %}
+            <div class="mb-3">
+                <div class="text-uppercase small mb-3" style="color: #b56a33;">Other possible matches</div>
+                <div class="row g-3">
+                    {% for item in search_alternate_results %}
+                    <div class="col-12 col-xl-6">
+                        <div class="rounded-4 border border-secondary-subtle p-3 bg-body h-100">
+                            <div class="d-flex gap-3 align-items-start">
+                                <a href="{{ item.detail_url }}" class="flex-shrink-0 text-decoration-none">
+                                    {% if item.poster_url %}
+                                    <img src="{{ item.poster_url }}" alt="Poster for {{ item.title }}" class="rounded-4 border border-secondary-subtle object-fit-cover" style="width: 5.5rem; height: 8rem;">
+                                    {% else %}
+                                    <div class="rounded-4 border border-secondary-subtle bg-black text-secondary d-flex align-items-center justify-content-center text-center small" style="width: 5.5rem; height: 8rem;">
+                                        No poster
+                                    </div>
+                                    {% endif %}
+                                </a>
+                                <div class="min-w-0 flex-grow-1">
+                                    <div class="d-flex flex-wrap gap-2 mb-2">
+                                        <span class="badge text-bg-dark border border-secondary-subtle">{{ item.kind_label }}</span>
+                                        {% if item.year %}
+                                        <span class="badge text-bg-secondary">{{ item.year }}</span>
+                                        {% endif %}
+                                        {% if item.imdb_rating %}
+                                        <span class="badge text-bg-warning text-dark">IMDb {{ "%.1f"|format(item.imdb_rating) }}</span>
+                                        {% endif %}
+                                        {% if item.fuzzy_score_percent is not none %}
+                                        <span class="badge text-white border-0" style="background-color: #b56a33;">{{ item.fuzzy_score_percent }}%</span>
+                                        {% endif %}
+                                    </div>
+                                    <div class="fw-semibold fs-5">
+                                        <a href="{{ item.detail_url }}" class="link-light text-decoration-none">{{ item.title }}</a>
+                                    </div>
+                                    {% if item.original_title and item.original_title != item.title %}
+                                    <div class="small text-secondary mb-2">{{ item.original_title }}</div>
+                                    {% endif %}
+                                    <div class="small text-secondary mb-1"><span style="color: #b56a33;">Cast:</span> {{ item.main_cast_line or "n/a" }}</div>
+                                    <div class="small text-secondary mb-1"><span style="color: #b56a33;">Director:</span> {{ item.directed_by_line or "n/a" }}</div>
+                                    {% if item.user_lists %}
+                                    <div class="d-flex flex-wrap gap-2 mt-2">
+                                        {% for user_list in item.user_lists %}
+                                        <span class="badge text-dark border-0" style="background-color: #9fb6c9;">{{ user_list.name }}</span>
+                                        {% endfor %}
+                                    </div>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+            {% endif %}
+            {% endif %}
+        </div>
+    </div>
+</section>
+{% endblock %}

@@ -3,9 +3,8 @@
 {% block title %}Filmy | {{ person_item.name }}{% endblock %}
 
 {% block content %}
-<section class="mb-3">
-    <a class="link-light text-decoration-none small" href="{{ back_url }}">« Back</a>
-</section>
+{% set current_label = person_item.name %}
+{% include "_top_breadcrumbs.html" %}
 
 <section class="mb-4">
     <div class="card bg-black border-secondary-subtle overflow-hidden">
@@ -40,10 +39,19 @@
                     <div class="text-secondary fs-4 mb-4">{{ person_item.primary_profession }}</div>
                     {% endif %}
 
-                    {% if person_item.known_for_titles %}
+                    {% if person_item.known_for_items %}
                     <div class="rounded-4 border border-secondary-subtle bg-body p-4">
                         <div class="text-uppercase small text-secondary mb-3">Known for</div>
-                        <p class="mb-0 fs-6 lh-lg">{{ person_item.known_for_titles }}</p>
+                        <div class="d-flex flex-wrap gap-2">
+                            {% for item in person_item.known_for_items %}
+                            <a
+                                href="/titles/{{ item.tconst }}?return_to={{ person_return_to | urlencode }}"
+                                class="badge text-bg-dark border border-secondary-subtle text-decoration-none px-3 py-2"
+                            >
+                                {{ item.title }}{% if item.start_year %} · {{ item.start_year }}{% endif %}
+                            </a>
+                            {% endfor %}
+                        </div>
                     </div>
                     {% endif %}
                 </div>
@@ -68,7 +76,7 @@
                         <div class="d-grid gap-2">
                             {% for item in section["items"][:20] %}
                             <a
-                                href="/titles/{{ item.tconst }}?return_to=/people/{{ person_item.nconst }}"
+                                href="/titles/{{ item.tconst }}?return_to={{ person_return_to | urlencode }}"
                                 class="rounded-3 border border-secondary-subtle bg-black text-decoration-none text-light p-3"
                             >
                                 <div class="d-flex flex-wrap justify-content-between gap-2">

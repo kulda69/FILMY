@@ -74,6 +74,7 @@ def ensure_database() -> None:
         _create_base_schema(conn)
         if _catalog_needs_refresh(conn):
             refresh_catalog(conn)
+        _ensure_title_alias_lookup(conn)
         _migrate_watched_alias_list(conn)
 
 
@@ -140,6 +141,8 @@ def refresh_catalog(conn: duckdb.DuckDBPyConnection | None = None) -> dict[str, 
             WHERE title IS NOT NULL
             """
         )
+
+        _rebuild_title_alias_lookup(conn)
 
         conn.execute(
             """
@@ -294,6 +297,7 @@ def refresh_catalog(conn: duckdb.DuckDBPyConnection | None = None) -> dict[str, 
         conn.execute("CREATE INDEX IF NOT EXISTS idx_catalog_episodes_primary_title ON app.catalog_episodes(primary_title)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_catalog_people_name ON app.catalog_people(primary_name)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_title_credits_tconst_group_ordering ON app.title_credits(tconst, credit_group, ordering)")
+        _ensure_title_alias_lookup_indexes(conn)
 
         conn.execute(
             """
@@ -384,6 +388,69 @@ def refresh_catalog(conn: duckdb.DuckDBPyConnection | None = None) -> dict[str, 
         clear_title_presentation_cache()
         if owns_connection and conn is not None:
             conn.close()
+
+
+def refresh_catalog_with_retry() -> dict[str, int]:
+    """Refresh catalog tables with the standard DuckDB write-lock retry policy."""
+
+    return _run_duckdb_write(lambda conn: refresh_catalog(conn))
+
+
+def _rebuild_title_alias_lookup(conn: duckdb.DuckDBPyConnection) -> None:
+    conn.execute(
+        f"""
+        CREATE OR REPLACE TABLE app.title_alias_lookup AS
+        SELECT
+            tconst,
+            title,
+            region,
+            language,
+            {_alias_priority_case_sql('region', 'language')} AS alias_priority,
+            {_duckdb_match_key_sql('title')} AS alias_key,
+            {_duckdb_match_key_sql('title', strip_leading_articles=True)} AS alias_key_articleless,
+            length({_duckdb_match_key_sql('title')}) AS alias_length,
+            length({_duckdb_match_key_sql('title', strip_leading_articles=True)}) AS alias_length_articleless,
+            left({_duckdb_match_key_sql('title', strip_leading_articles=True)}, 1) AS alias_prefix1_articleless,
+            left({_duckdb_match_key_sql('title', strip_leading_articles=True)}, 2) AS alias_prefix2_articleless,
+            left({_duckdb_match_key_sql('title', strip_leading_articles=True)}, 3) AS alias_prefix3_articleless
+        FROM app.title_aliases
+        WHERE title IS NOT NULL
+        """
+    )
+
+
+def _ensure_title_alias_lookup_indexes(conn: duckdb.DuckDBPyConnection) -> None:
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_title_alias_lookup_tconst ON app.title_alias_lookup(tconst)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_title_alias_lookup_alias_key ON app.title_alias_lookup(alias_key)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_title_alias_lookup_alias_key_articleless "
+        "ON app.title_alias_lookup(alias_key_articleless)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_title_alias_lookup_prefix3 "
+        "ON app.title_alias_lookup(alias_prefix3_articleless)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_title_alias_lookup_prefix2 "
+        "ON app.title_alias_lookup(alias_prefix2_articleless)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_title_alias_lookup_prefix1_len "
+        "ON app.title_alias_lookup(alias_prefix1_articleless, alias_length_articleless)"
+    )
+
+
+def _ensure_title_alias_lookup(conn: duckdb.DuckDBPyConnection) -> None:
+    table_exists = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM information_schema.tables
+        WHERE table_schema = 'app' AND table_name = 'title_alias_lookup'
+        """
+    ).fetchone()[0]
+    if not table_exists:
+        _rebuild_title_alias_lookup(conn)
+    _ensure_title_alias_lookup_indexes(conn)
 
 
 def clear_title_presentation_cache() -> None:
@@ -597,12 +664,30 @@ def lookup_title_by_query(
     candidates_limit: int = 5,
 ) -> dict[str, Any] | None:
     candidates = _search_catalog_for_lookup(query=query, title_type=title_type, limit=max(candidates_limit, 1) * 5)
+    alias_candidates = _search_catalog_aliases_for_lookup(query=query, title_type=title_type, limit=max(candidates_limit, 1) * 5)
+    candidates = _merge_lookup_candidates(candidates, alias_candidates)
     query_key = _normalize_match_key(query)
     query_tokens = _match_tokens(query_key)
-    should_expand = len(query_tokens) > 1 or not candidates or _should_expand_to_fuzzy(query, candidates)
+    if candidates:
+        direct_selected = _pick_best_title_match(query, candidates)
+        if _is_direct_enough_lookup(query, direct_selected):
+            return _build_title_lookup_result(
+                query=query,
+                title_type=title_type,
+                selected=direct_selected,
+                candidates=candidates,
+                candidates_limit=candidates_limit,
+            )
+    should_expand = not candidates or _should_expand_to_fuzzy(query, candidates)
     if should_expand:
         fuzzy_candidates = _search_catalog_for_lookup_fuzzy(query=query, title_type=title_type, limit=max(candidates_limit, 1) * 5)
         candidates = _merge_lookup_candidates(candidates, fuzzy_candidates)
+        alias_fuzzy_candidates = _search_catalog_aliases_for_lookup_fuzzy(
+            query=query,
+            title_type=title_type,
+            limit=max(candidates_limit, 1) * 5,
+        )
+        candidates = _merge_lookup_candidates(candidates, alias_fuzzy_candidates)
     if not candidates:
         return None
 
@@ -610,50 +695,30 @@ def lookup_title_by_query(
     if len(query_tokens) > 1 and not _is_confident_lookup(query, selected):
         wide_candidates = _search_catalog_for_lookup_levenshtein(query=query, title_type=title_type, limit=max(candidates_limit, 1) * 5)
         candidates = _merge_lookup_candidates(candidates, wide_candidates)
+        alias_wide_candidates = _search_catalog_aliases_for_lookup_levenshtein(
+            query=query,
+            title_type=title_type,
+            limit=max(candidates_limit, 1) * 5,
+        )
+        candidates = _merge_lookup_candidates(candidates, alias_wide_candidates)
         if not candidates:
             return None
-        selected = max(
-            candidates,
-            key=lambda item: (
-                item.get("fuzzy_score") or 0.0,
-                (item.get("library") or {}).get("watched_count") or 0,
-                item.get("num_votes") or 0,
-                item.get("start_year") or 0,
-            ),
-        )
+        selected = _pick_best_title_match(query, candidates)
     else:
         selected = _pick_best_title_match(query, candidates)
-    source_presentation = get_title_presentation(selected["tconst"])
-    if source_presentation is None:
-        return None
-    presentation = dict(source_presentation)
-
-    presentation["query"] = query
-    presentation["match"] = _build_lookup_candidate(selected, query=query, is_selected=True)
-
-    selected_key = selected["tconst"]
-    ordered_candidates = sorted(
-        candidates,
-        key=lambda item: (0 if item["tconst"] == selected_key else 1, -(item.get("start_year") or 0), item["primary_title"]),
+    return _build_title_lookup_result(
+        query=query,
+        title_type=title_type,
+        selected=selected,
+        candidates=candidates,
+        candidates_limit=candidates_limit,
     )
-    return {
-        "query": query,
-        "title_type": title_type,
-        "selected_tconst": selected_key,
-        "selected": presentation,
-        "candidates": [
-            _build_lookup_candidate(candidate, query=query, is_selected=(candidate["tconst"] == selected_key))
-            for candidate in ordered_candidates[: max(candidates_limit, 1)]
-        ],
-        "candidate_count": len(candidates),
-    }
 
 
 def lookup_person_by_query(query: str, candidates_limit: int = 5) -> dict[str, Any] | None:
     candidates = _search_people_for_lookup(query=query, limit=max(candidates_limit, 1) * 5)
     query_key = _normalize_match_key(query)
-    query_tokens = _match_tokens(query_key)
-    should_expand = len(query_tokens) > 1 or not candidates or _should_expand_people_to_fuzzy(query, candidates)
+    should_expand = not candidates or _should_expand_people_to_fuzzy(query, candidates)
     if should_expand:
         fuzzy_candidates = _search_people_for_lookup_fuzzy(query=query, limit=max(candidates_limit, 1) * 5)
         candidates = _merge_lookup_candidates(candidates, fuzzy_candidates)
@@ -661,19 +726,12 @@ def lookup_person_by_query(query: str, candidates_limit: int = 5) -> dict[str, A
         return None
 
     selected = _pick_best_person_match(query, candidates)
-    if len(query_tokens) > 1 and not _is_confident_person_lookup(query, selected):
+    if not _is_confident_person_lookup(query, selected):
         wide_candidates = _search_people_for_lookup_levenshtein(query=query, limit=max(candidates_limit, 1) * 5)
         candidates = _merge_lookup_candidates(candidates, wide_candidates)
         if not candidates:
             return None
-        selected = max(
-            candidates,
-            key=lambda item: (
-                item.get("fuzzy_score") or 0.0,
-                (item.get("filmography") or {}).get("credit_count") or 0,
-                item.get("birth_year") or 0,
-            ),
-        )
+        selected = _pick_best_person_match(query, candidates)
     else:
         selected = _pick_best_person_match(query, candidates)
 
@@ -716,6 +774,37 @@ def get_person_presentation(nconst: str) -> dict[str, Any] | None:
     return presentation
 
 
+def _fetch_known_for_items(conn: duckdb.DuckDBPyConnection, known_for_titles: str | None) -> list[dict[str, Any]]:
+    if not known_for_titles:
+        return []
+
+    ordered_tconsts = [item.strip() for item in str(known_for_titles).split(",") if item.strip()]
+    if not ordered_tconsts:
+        return []
+
+    placeholders = ", ".join("?" for _ in ordered_tconsts)
+    rows = conn.execute(
+        f"""
+        SELECT
+            tconst,
+            primary_title,
+            start_year
+        FROM app.catalog_titles
+        WHERE tconst IN ({placeholders})
+        """,
+        ordered_tconsts,
+    ).fetchall()
+    items_by_tconst = {
+        row[0]: {
+            "tconst": row[0],
+            "title": row[1],
+            "start_year": row[2],
+        }
+        for row in rows
+    }
+    return [items_by_tconst[tconst] for tconst in ordered_tconsts if tconst in items_by_tconst]
+
+
 def render_person_presentation(presentation: dict[str, Any]) -> str:
     lines: list[str] = []
     lines.append(str(presentation["name"]))
@@ -730,8 +819,13 @@ def render_person_presentation(presentation: dict[str, Any]) -> str:
     if meta_bits:
         lines.append(", ".join(meta_bits))
 
+    known_for_items = presentation.get("known_for_items") or []
     known_for = presentation.get("known_for_titles") or ""
-    if known_for:
+    if known_for_items:
+        lines.append("")
+        lines.append("Known for")
+        lines.append(", ".join(item["title"] for item in known_for_items))
+    elif known_for:
         lines.append("")
         lines.append("Known for")
         lines.append(known_for)
@@ -1242,6 +1336,7 @@ def _fetch_person_cache_source_detail(conn: duckdb.DuckDBPyConnection, nconst: s
         "death_year": person[3],
         "primary_profession": person[4],
         "known_for_titles": person[5],
+        "known_for_items": _fetch_known_for_items(conn, person[5]),
         "filmography": filmography,
         "credit_count": credit_count,
         "portrait_url": _person_portrait_url(person[0]),
@@ -2763,7 +2858,7 @@ def _pick_best_title_match(query: str, candidates: list[dict[str, Any]]) -> dict
         fuzzy_matches.sort(
             key=lambda item: (
                 item.get("fuzzy_score") or 0.0,
-                (item.get("library") or {}).get("watched_count") or 0,
+                -int(item.get("alias_priority") or 99),
                 item.get("num_votes") or 0,
                 item.get("start_year") or 0,
             ),
@@ -2771,6 +2866,22 @@ def _pick_best_title_match(query: str, candidates: list[dict[str, Any]]) -> dict
         )
         strongest = fuzzy_matches[0]
         if (strongest.get("fuzzy_score") or 0.0) >= 0.72:
+            strongest_score = strongest.get("fuzzy_score") or 0.0
+            near_top = [
+                item
+                for item in fuzzy_matches
+                if (item.get("fuzzy_score") or 0.0) >= strongest_score - 0.08
+            ]
+            if len(near_top) > 1:
+                near_top.sort(
+                    key=lambda item: (
+                        item.get("num_votes") or 0,
+                        item.get("start_year") or 0,
+                        item.get("fuzzy_score") or 0.0,
+                    ),
+                    reverse=True,
+                )
+                return near_top[0]
             return strongest
 
     query_key = _normalize_match_key(query)
@@ -2783,22 +2894,67 @@ def _pick_best_title_match(query: str, candidates: list[dict[str, Any]]) -> dict
         if _normalize_match_key(candidate.get("original_title")) == query_key:
             exact_matches.append(candidate)
             continue
+        if _normalize_match_key(candidate.get("matched_alias_title")) == query_key:
+            exact_matches.append(candidate)
+            continue
         if _normalize_match_key(candidate.get("primary_title"), strip_leading_articles=True) == query_key_articleless:
             exact_matches.append(candidate)
             continue
         if _normalize_match_key(candidate.get("original_title"), strip_leading_articles=True) == query_key_articleless:
             exact_matches.append(candidate)
+            continue
+        if _normalize_match_key(candidate.get("matched_alias_title"), strip_leading_articles=True) == query_key_articleless:
+            exact_matches.append(candidate)
     if exact_matches:
         exact_matches.sort(
             key=lambda item: (
-                (item.get("library") or {}).get("watched_count") or 0,
-                item.get("start_year") or 0,
+                -int(item.get("alias_priority") or 99),
                 item.get("num_votes") or 0,
+                item.get("start_year") or 0,
             ),
             reverse=True,
         )
         return exact_matches[0]
     return candidates[0]
+
+
+def _build_title_lookup_result(
+    *,
+    query: str,
+    title_type: str | None,
+    selected: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    candidates_limit: int,
+) -> dict[str, Any] | None:
+    source_presentation = get_title_presentation(selected["tconst"])
+    if source_presentation is None:
+        return None
+    presentation = dict(source_presentation)
+    presentation["query"] = query
+    presentation["match"] = _build_lookup_candidate(selected, query=query, is_selected=True)
+
+    selected_key = selected["tconst"]
+    ordered_candidates = sorted(
+        candidates,
+        key=lambda item: (
+            0 if item["tconst"] == selected_key else 1,
+            -(item.get("fuzzy_score") or 0.0),
+            int(item.get("alias_priority") or 99),
+            -(item.get("start_year") or 0),
+            item["primary_title"],
+        ),
+    )
+    return {
+        "query": query,
+        "title_type": title_type,
+        "selected_tconst": selected_key,
+        "selected": presentation,
+        "candidates": [
+            _build_lookup_candidate(candidate, query=query, is_selected=(candidate["tconst"] == selected_key))
+            for candidate in ordered_candidates[: max(candidates_limit, 1)]
+        ],
+        "candidate_count": len(candidates),
+    }
 
 
 def _pick_best_person_match(query: str, candidates: list[dict[str, Any]]) -> dict[str, Any]:
@@ -2807,13 +2963,29 @@ def _pick_best_person_match(query: str, candidates: list[dict[str, Any]]) -> dic
         fuzzy_matches.sort(
             key=lambda item: (
                 item.get("fuzzy_score") or 0.0,
-                item.get("birth_year") or 0,
                 item.get("credit_count") or 0,
+                item.get("birth_year") or 0,
             ),
             reverse=True,
         )
         strongest = fuzzy_matches[0]
         if (strongest.get("fuzzy_score") or 0.0) >= 0.72:
+            strongest_score = strongest.get("fuzzy_score") or 0.0
+            near_top = [
+                item
+                for item in fuzzy_matches
+                if (item.get("fuzzy_score") or 0.0) >= strongest_score - 0.08
+            ]
+            if len(near_top) > 1:
+                near_top.sort(
+                    key=lambda item: (
+                        item.get("credit_count") or 0,
+                        item.get("birth_year") or 0,
+                        item.get("fuzzy_score") or 0.0,
+                    ),
+                    reverse=True,
+                )
+                return near_top[0]
             return strongest
 
     query_key = _normalize_match_key(query)
@@ -2824,7 +2996,7 @@ def _pick_best_person_match(query: str, candidates: list[dict[str, Any]]) -> dic
     if exact_matches:
         exact_matches.sort(
             key=lambda item: (
-                (item.get("filmography") or {}).get("credit_count") or 0,
+                item.get("credit_count") or 0,
                 item.get("birth_year") or 0,
             ),
             reverse=True,
@@ -2850,12 +3022,16 @@ def _build_lookup_candidate(candidate: dict[str, Any], *, query: str, is_selecte
         "is_exact_match": (
             _normalize_match_key(candidate.get("primary_title")) == _normalize_match_key(query)
             or _normalize_match_key(candidate.get("original_title")) == _normalize_match_key(query)
+            or _normalize_match_key(candidate.get("matched_alias_title")) == _normalize_match_key(query)
             or _normalize_match_key(candidate.get("primary_title"), strip_leading_articles=True)
             == _normalize_match_key(query, strip_leading_articles=True)
             or _normalize_match_key(candidate.get("original_title"), strip_leading_articles=True)
             == _normalize_match_key(query, strip_leading_articles=True)
+            or _normalize_match_key(candidate.get("matched_alias_title"), strip_leading_articles=True)
+            == _normalize_match_key(query, strip_leading_articles=True)
         ),
         "fuzzy_score": candidate.get("fuzzy_score"),
+        "matched_alias_title": candidate.get("matched_alias_title"),
     }
 
 
@@ -2890,42 +3066,54 @@ def _should_expand_people_to_fuzzy(query: str, candidates: list[dict[str, Any]])
             return False
 
     best_direct_score = max(
-        _best_title_similarity(query_key, [candidate.get("primary_name")]) for candidate in candidates[:5]
+        _best_person_name_similarity(query_key, candidate.get("primary_name")) for candidate in candidates[:5]
     )
     return best_direct_score < 0.72
 
 
+def _person_lookup_item_from_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "nconst": row[0],
+        "primary_name": row[1],
+        "birth_year": row[2],
+        "death_year": row[3],
+        "primary_profession": row[4],
+        "known_for_titles": row[5],
+        "credit_count": row[6] or 0,
+    }
+
+
 def _search_people_for_lookup(query: str, limit: int) -> list[dict[str, Any]]:
     sql = """
+        WITH credit_counts AS (
+            SELECT nconst, COUNT(*) AS credit_count
+            FROM app.title_credits
+            GROUP BY nconst
+        )
         SELECT
-            nconst,
-            primary_name,
-            birth_year,
-            death_year,
-            primary_profession,
-            known_for_titles
-        FROM app.catalog_people
-        WHERE primary_name ILIKE '%' || ? || '%'
+            p.nconst,
+            p.primary_name,
+            p.birth_year,
+            p.death_year,
+            p.primary_profession,
+            p.known_for_titles,
+            COALESCE(c.credit_count, 0) AS credit_count
+        FROM app.catalog_people AS p
+        LEFT JOIN credit_counts AS c USING (nconst)
+        WHERE p.primary_name ILIKE '%' || ? || '%'
         ORDER BY
-            CASE WHEN lower(primary_name) = lower(?) THEN 0 ELSE 1 END,
-            birth_year DESC NULLS LAST,
-            primary_name
+            CASE WHEN lower(p.primary_name) = lower(?) THEN 0 ELSE 1 END,
+            COALESCE(c.credit_count, 0) DESC,
+            p.birth_year DESC NULLS LAST,
+            p.primary_name
         LIMIT ?
     """
     with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
         rows = conn.execute(sql, [query, query, limit]).fetchall()
         items: list[dict[str, Any]] = []
         for row in rows:
-            item = {
-                "nconst": row[0],
-                "primary_name": row[1],
-                "birth_year": row[2],
-                "death_year": row[3],
-                "primary_profession": row[4],
-                "known_for_titles": row[5],
-            }
-            item["filmography"] = _fetch_person_filmography_summary(conn, item["nconst"])
-            item["fuzzy_score"] = _best_title_similarity(_normalize_match_key(query), [item["primary_name"]])
+            item = _person_lookup_item_from_row(row)
+            item["fuzzy_score"] = _best_person_name_similarity(_normalize_match_key(query), item["primary_name"])
             items.append(item)
     return items
 
@@ -2939,46 +3127,88 @@ def _search_people_for_lookup_fuzzy(query: str, limit: int) -> list[dict[str, An
     length_floor = max(len(query_key) - 2, 1)
     length_ceiling = len(query_key) + 3
     sql = f"""
+        WITH credit_counts AS (
+            SELECT nconst, COUNT(*) AS credit_count
+            FROM app.title_credits
+            GROUP BY nconst
+        ),
+        people_keys AS (
+            SELECT
+                p.nconst,
+                p.primary_name,
+                p.birth_year,
+                p.death_year,
+                p.primary_profession,
+                p.known_for_titles,
+                COALESCE(c.credit_count, 0) AS credit_count,
+                {_duckdb_match_key_sql("p.primary_name")} AS name_key,
+                regexp_extract({_duckdb_match_key_sql("p.primary_name")}, '^([a-z0-9]+)', 1) AS first_token_key,
+                regexp_extract({_duckdb_match_key_sql("p.primary_name")}, '([a-z0-9]+)$', 1) AS last_token_key,
+                replace({_duckdb_match_key_sql("p.primary_name")}, ' ', '') AS compact_name_key
+            FROM app.catalog_people AS p
+            LEFT JOIN credit_counts AS c USING (nconst)
+        )
         SELECT
             nconst,
             primary_name,
             birth_year,
             death_year,
             primary_profession,
-            known_for_titles
-        FROM app.catalog_people
+            known_for_titles,
+            credit_count
+        FROM people_keys
         WHERE (
-            left({_duckdb_match_key_sql("primary_name")}, 3) = ?
-            OR left({_duckdb_match_key_sql("primary_name")}, 2) = ?
+            left(name_key, 3) = ?
+            OR left(first_token_key, 3) = ?
+            OR left(last_token_key, 3) = ?
+            OR left(compact_name_key, 3) = ?
+            OR left(name_key, 2) = ?
+            OR left(first_token_key, 2) = ?
+            OR left(last_token_key, 2) = ?
+            OR left(compact_name_key, 2) = ?
         )
-          AND length({_duckdb_match_key_sql("primary_name")}) BETWEEN ? AND ?
-        ORDER BY birth_year DESC NULLS LAST, primary_name
+          AND (
+            length(name_key) BETWEEN ? AND ?
+            OR length(last_token_key) BETWEEN ? AND ?
+            OR length(compact_name_key) BETWEEN ? AND ?
+          )
+        ORDER BY credit_count DESC, birth_year DESC NULLS LAST, primary_name
         LIMIT 500
     """
     with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
-        rows = conn.execute(sql, [prefix3, prefix2, length_floor, length_ceiling]).fetchall()
+        rows = conn.execute(
+            sql,
+            [
+                prefix3,
+                prefix3,
+                prefix3,
+                prefix3,
+                prefix2,
+                prefix2,
+                prefix2,
+                prefix2,
+                length_floor,
+                length_ceiling,
+                length_floor,
+                length_ceiling,
+                length_floor,
+                length_ceiling,
+            ],
+        ).fetchall()
         items: list[dict[str, Any]] = []
         for row in rows:
-            item = {
-                "nconst": row[0],
-                "primary_name": row[1],
-                "birth_year": row[2],
-                "death_year": row[3],
-                "primary_profession": row[4],
-                "known_for_titles": row[5],
-            }
-            item["filmography"] = _fetch_person_filmography_summary(conn, item["nconst"])
-            item["fuzzy_score"] = _best_title_similarity(query_key, [item["primary_name"]])
+            item = _person_lookup_item_from_row(row)
+            item["fuzzy_score"] = _best_person_name_similarity(query_key, item["primary_name"])
             items.append(item)
     items.sort(
         key=lambda item: (
             item.get("fuzzy_score") or 0.0,
-            (item.get("filmography") or {}).get("credit_count") or 0,
+            item.get("credit_count") or 0,
             item.get("birth_year") or 0,
         ),
         reverse=True,
     )
-    return [item for item in items if (item.get("fuzzy_score") or 0.0) >= 0.55][:limit]
+    return [item for item in items if (item.get("fuzzy_score") or 0.0) >= 0.65][:limit]
 
 
 def _search_people_for_lookup_levenshtein(query: str, limit: int) -> list[dict[str, Any]]:
@@ -2990,6 +3220,27 @@ def _search_people_for_lookup_levenshtein(query: str, limit: int) -> list[dict[s
     length_floor = max(query_len - 4, 1)
     length_ceiling = query_len + 4
     sql = f"""
+        WITH credit_counts AS (
+            SELECT nconst, COUNT(*) AS credit_count
+            FROM app.title_credits
+            GROUP BY nconst
+        ),
+        people_keys AS (
+            SELECT
+                p.nconst,
+                p.primary_name,
+                p.birth_year,
+                p.death_year,
+                p.primary_profession,
+                p.known_for_titles,
+                COALESCE(c.credit_count, 0) AS credit_count,
+                {_duckdb_match_key_sql("p.primary_name")} AS name_key,
+                regexp_extract({_duckdb_match_key_sql("p.primary_name")}, '^([a-z0-9]+)', 1) AS first_token_key,
+                regexp_extract({_duckdb_match_key_sql("p.primary_name")}, '([a-z0-9]+)$', 1) AS last_token_key,
+                replace({_duckdb_match_key_sql("p.primary_name")}, ' ', '') AS compact_name_key
+            FROM app.catalog_people AS p
+            LEFT JOIN credit_counts AS c USING (nconst)
+        )
         SELECT
             nconst,
             primary_name,
@@ -2997,37 +3248,60 @@ def _search_people_for_lookup_levenshtein(query: str, limit: int) -> list[dict[s
             death_year,
             primary_profession,
             known_for_titles,
-            levenshtein(?, {_duckdb_match_key_sql("primary_name")}) AS edit_distance
-        FROM app.catalog_people
-        WHERE left({_duckdb_match_key_sql("primary_name")}, 1) = ?
-          AND length({_duckdb_match_key_sql("primary_name")}) BETWEEN ? AND ?
-        ORDER BY edit_distance ASC, birth_year DESC NULLS LAST, primary_name
+            credit_count,
+            least(
+                levenshtein(?, name_key),
+                levenshtein(?, last_token_key),
+                levenshtein(?, compact_name_key)
+            ) AS edit_distance
+        FROM people_keys
+        WHERE (
+            left(name_key, 1) = ?
+            OR left(first_token_key, 1) = ?
+            OR left(last_token_key, 1) = ?
+            OR left(compact_name_key, 1) = ?
+        )
+          AND (
+            length(name_key) BETWEEN ? AND ?
+            OR length(last_token_key) BETWEEN ? AND ?
+            OR length(compact_name_key) BETWEEN ? AND ?
+          )
+        ORDER BY edit_distance ASC, credit_count DESC, birth_year DESC NULLS LAST, primary_name
         LIMIT 500
     """
     with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
-        rows = conn.execute(sql, [query_key, first_letter, length_floor, length_ceiling]).fetchall()
+        rows = conn.execute(
+            sql,
+            [
+                query_key,
+                query_key,
+                query_key,
+                first_letter,
+                first_letter,
+                first_letter,
+                first_letter,
+                length_floor,
+                length_ceiling,
+                length_floor,
+                length_ceiling,
+                length_floor,
+                length_ceiling,
+            ],
+        ).fetchall()
         items: list[dict[str, Any]] = []
         for row in rows:
-            item = {
-                "nconst": row[0],
-                "primary_name": row[1],
-                "birth_year": row[2],
-                "death_year": row[3],
-                "primary_profession": row[4],
-                "known_for_titles": row[5],
-            }
-            item["filmography"] = _fetch_person_filmography_summary(conn, item["nconst"])
-            item["fuzzy_score"] = _best_title_similarity(query_key, [item["primary_name"]])
+            item = _person_lookup_item_from_row(row[:7])
+            item["fuzzy_score"] = _best_person_name_similarity(query_key, item["primary_name"])
             items.append(item)
     items.sort(
         key=lambda item: (
             item.get("fuzzy_score") or 0.0,
-            (item.get("filmography") or {}).get("credit_count") or 0,
+            item.get("credit_count") or 0,
             item.get("birth_year") or 0,
         ),
         reverse=True,
     )
-    return [item for item in items if (item.get("fuzzy_score") or 0.0) >= 0.55][:limit]
+    return [item for item in items if (item.get("fuzzy_score") or 0.0) >= 0.65][:limit]
 
 
 def _fetch_person_filmography_summary(conn: duckdb.DuckDBPyConnection, nconst: str) -> dict[str, Any]:
@@ -3070,6 +3344,8 @@ def _is_confident_lookup(query: str, candidate: dict[str, Any]) -> bool:
         return True
     if _normalize_match_key(candidate.get("original_title")) == _normalize_match_key(query):
         return True
+    if _normalize_match_key(candidate.get("matched_alias_title")) == _normalize_match_key(query):
+        return True
     if _normalize_match_key(candidate.get("primary_title"), strip_leading_articles=True) == _normalize_match_key(
         query, strip_leading_articles=True
     ):
@@ -3078,7 +3354,29 @@ def _is_confident_lookup(query: str, candidate: dict[str, Any]) -> bool:
         query, strip_leading_articles=True
     ):
         return True
+    if _normalize_match_key(candidate.get("matched_alias_title"), strip_leading_articles=True) == _normalize_match_key(
+        query, strip_leading_articles=True
+    ):
+        return True
     return (candidate.get("fuzzy_score") or 0.0) >= 0.82
+
+
+def _is_direct_enough_lookup(query: str, candidate: dict[str, Any]) -> bool:
+    query_key = _normalize_match_key(query)
+    query_key_articleless = _normalize_match_key(query, strip_leading_articles=True)
+    if not query_key:
+        return False
+
+    for variant in [
+        candidate.get("primary_title"),
+        candidate.get("original_title"),
+        candidate.get("matched_alias_title"),
+    ]:
+        if _normalize_match_key(variant) == query_key:
+            return True
+        if _normalize_match_key(variant, strip_leading_articles=True) == query_key_articleless:
+            return True
+    return False
 
 
 def _should_expand_to_fuzzy(query: str, candidates: list[dict[str, Any]]) -> bool:
@@ -3091,13 +3389,20 @@ def _should_expand_to_fuzzy(query: str, candidates: list[dict[str, Any]]) -> boo
             return False
         if _normalize_match_key(candidate.get("original_title")) == query_key:
             return False
+        if _normalize_match_key(candidate.get("matched_alias_title")) == query_key:
+            return False
         if _normalize_match_key(candidate.get("primary_title"), strip_leading_articles=True) == query_key_articleless:
             return False
         if _normalize_match_key(candidate.get("original_title"), strip_leading_articles=True) == query_key_articleless:
             return False
+        if _normalize_match_key(candidate.get("matched_alias_title"), strip_leading_articles=True) == query_key_articleless:
+            return False
 
     best_direct_score = max(
-        _best_title_similarity(query_key, [candidate.get("primary_title"), candidate.get("original_title")])
+        _best_title_similarity(
+            query_key,
+            [candidate.get("primary_title"), candidate.get("original_title"), candidate.get("matched_alias_title")],
+        )
         for candidate in candidates[:5]
     )
     return best_direct_score < 0.72
@@ -3121,6 +3426,211 @@ def _merge_lookup_candidates(primary: list[dict[str, Any]], secondary: list[dict
 
 def _lookup_identity_key(item: dict[str, Any]) -> str:
     return str(item.get("tconst") or item.get("nconst") or "")
+
+
+def _alias_priority_case_sql(region_column: str, language_column: str) -> str:
+    return f"""
+        CASE
+            WHEN lower(coalesce({language_column}, '')) = 'cs' OR upper(coalesce({region_column}, '')) = 'CZ' THEN 0
+            WHEN lower(coalesce({language_column}, '')) = 'en'
+                 OR upper(coalesce({region_column}, '')) IN ('US', 'GB', 'CA', 'IE', 'AU', 'NZ', 'IN') THEN 1
+            ELSE 2
+        END
+    """
+
+
+def _catalog_row_from_alias_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    item = _catalog_row_to_dict(row[:9])
+    item["matched_alias_title"] = row[9]
+    item["alias_region"] = row[10]
+    item["alias_language"] = row[11]
+    item["alias_priority"] = row[12]
+    return item
+
+
+def _search_catalog_aliases_for_lookup(query: str, title_type: str | None, limit: int) -> list[dict[str, Any]]:
+    query_key = _normalize_match_key(query)
+    query_key_articleless = _normalize_match_key(query, strip_leading_articles=True)
+    if not query_key:
+        return []
+    sql = f"""
+        SELECT
+            t.tconst,
+            t.title_type,
+            t.primary_title,
+            t.original_title,
+            t.start_year,
+            t.runtime_minutes,
+            t.genres,
+            t.average_rating,
+            t.num_votes,
+            a.title AS matched_alias_title,
+            a.region,
+            a.language,
+            a.alias_priority
+        FROM app.title_alias_lookup AS a
+        JOIN app.catalog_titles AS t ON t.tconst = a.tconst
+        WHERE (
+            a.alias_key LIKE '%' || ? || '%'
+            OR a.alias_key_articleless LIKE '%' || ? || '%'
+        )
+          AND (? IS NULL OR t.title_type = ?)
+        ORDER BY
+            a.alias_priority,
+            CASE
+                WHEN a.alias_key = ? THEN 0
+                WHEN a.alias_key_articleless = ? THEN 1
+                WHEN a.alias_key LIKE ? || '%' THEN 2
+                WHEN a.alias_key_articleless LIKE ? || '%' THEN 3
+                ELSE 4
+            END,
+            t.start_year DESC NULLS LAST,
+            t.num_votes DESC NULLS LAST,
+            t.primary_title
+        LIMIT ?
+    """
+    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
+        rows = conn.execute(
+            sql,
+            [
+                query_key,
+                query_key_articleless or query_key,
+                title_type,
+                title_type,
+                query_key,
+                query_key_articleless or query_key,
+                query_key,
+                query_key_articleless or query_key,
+                limit,
+            ],
+        ).fetchall()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            item = _catalog_row_from_alias_row(row)
+            item["fuzzy_score"] = _best_title_similarity(query_key, [item.get("matched_alias_title")])
+            items.append(item)
+    return items
+
+
+def _search_catalog_aliases_for_lookup_fuzzy(query: str, title_type: str | None, limit: int) -> list[dict[str, Any]]:
+    query_key = _normalize_match_key(query, strip_leading_articles=True)
+    if len(query_key) < 3:
+        return []
+
+    prefix3 = query_key[:3]
+    prefix2 = query_key[:2]
+    length_floor = max(len(query_key) - 2, 1)
+    length_ceiling = len(query_key) + 3
+
+    sql = f"""
+        SELECT
+            t.tconst,
+            t.title_type,
+            t.primary_title,
+            t.original_title,
+            t.start_year,
+            t.runtime_minutes,
+            t.genres,
+            t.average_rating,
+            t.num_votes,
+            a.title AS matched_alias_title,
+            a.region,
+            a.language,
+            a.alias_priority
+        FROM app.title_alias_lookup AS a
+        JOIN app.catalog_titles AS t ON t.tconst = a.tconst
+        WHERE (? IS NULL OR t.title_type = ?)
+          AND (
+            a.alias_prefix3_articleless = ?
+            OR a.alias_prefix2_articleless = ?
+          )
+          AND a.alias_length_articleless BETWEEN ? AND ?
+        ORDER BY
+            a.alias_priority,
+            t.num_votes DESC NULLS LAST,
+            t.average_rating DESC NULLS LAST,
+            t.start_year DESC NULLS LAST
+        LIMIT 500
+    """
+    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
+        rows = conn.execute(
+            sql,
+            [title_type, title_type, prefix3, prefix2, length_floor, length_ceiling],
+        ).fetchall()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            item = _catalog_row_from_alias_row(row)
+            item["fuzzy_score"] = _best_title_similarity(query_key, [item.get("matched_alias_title")])
+            items.append(item)
+    items.sort(
+        key=lambda item: (
+            item.get("fuzzy_score") or 0.0,
+            -int(item.get("alias_priority") or 99),
+            item.get("num_votes") or 0,
+            item.get("start_year") or 0,
+        ),
+        reverse=True,
+    )
+    return [item for item in items if (item.get("fuzzy_score") or 0.0) >= 0.55][:limit]
+
+
+def _search_catalog_aliases_for_lookup_levenshtein(query: str, title_type: str | None, limit: int) -> list[dict[str, Any]]:
+    query_key = _normalize_match_key(query, strip_leading_articles=True)
+    if len(query_key) < 4:
+        return []
+
+    first_letter = query_key[0]
+    query_len = len(query_key)
+    length_floor = max(query_len - 4, 1)
+    length_ceiling = query_len + 4
+
+    sql = f"""
+        SELECT
+            t.tconst,
+            t.title_type,
+            t.primary_title,
+            t.original_title,
+            t.start_year,
+            t.runtime_minutes,
+            t.genres,
+            t.average_rating,
+            t.num_votes,
+            a.title AS matched_alias_title,
+            a.region,
+            a.language,
+            a.alias_priority
+        FROM app.title_alias_lookup AS a
+        JOIN app.catalog_titles AS t ON t.tconst = a.tconst
+        WHERE (? IS NULL OR t.title_type = ?)
+          AND a.alias_prefix1_articleless = ?
+          AND a.alias_length_articleless BETWEEN ? AND ?
+        ORDER BY
+            levenshtein(?, a.alias_key_articleless) ASC,
+            a.alias_priority,
+            t.num_votes DESC NULLS LAST,
+            t.start_year DESC NULLS LAST
+        LIMIT 500
+    """
+    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
+        rows = conn.execute(
+            sql,
+            [title_type, title_type, first_letter, length_floor, length_ceiling, query_key],
+        ).fetchall()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            item = _catalog_row_from_alias_row(row)
+            item["fuzzy_score"] = _best_title_similarity(query_key, [item.get("matched_alias_title")])
+            items.append(item)
+    items.sort(
+        key=lambda item: (
+            item.get("fuzzy_score") or 0.0,
+            -int(item.get("alias_priority") or 99),
+            item.get("num_votes") or 0,
+            item.get("start_year") or 0,
+        ),
+        reverse=True,
+    )
+    return [item for item in items if (item.get("fuzzy_score") or 0.0) >= 0.55][:limit]
 
 
 def _search_catalog_for_lookup_fuzzy(query: str, title_type: str | None, limit: int) -> list[dict[str, Any]]:
@@ -3198,7 +3708,6 @@ def _search_catalog_for_lookup_fuzzy(query: str, title_type: str | None, limit: 
         scored: list[dict[str, Any]] = []
         for row in rows:
             item = _catalog_row_to_dict(row)
-            item["library"] = _fetch_library_summary(conn, item["tconst"], item["title_type"])
             variants = [item.get("primary_title"), item.get("original_title")]
             item["fuzzy_score"] = _best_title_similarity(query_key, variants)
             scored.append(item)
@@ -3206,7 +3715,6 @@ def _search_catalog_for_lookup_fuzzy(query: str, title_type: str | None, limit: 
     scored.sort(
         key=lambda item: (
             item.get("fuzzy_score") or 0.0,
-            (item.get("library") or {}).get("watched_count") or 0,
             item.get("num_votes") or 0,
             item.get("start_year") or 0,
         ),
@@ -3289,14 +3797,12 @@ def _search_catalog_for_lookup_levenshtein(query: str, title_type: str | None, l
         scored: list[dict[str, Any]] = []
         for row in rows:
             item = _catalog_row_to_dict(row[:9])
-            item["library"] = _fetch_library_summary(conn, item["tconst"], item["title_type"])
             item["fuzzy_score"] = _best_title_similarity(query_key, [item.get("primary_title"), item.get("original_title")])
             scored.append(item)
 
     scored.sort(
         key=lambda item: (
             item.get("fuzzy_score") or 0.0,
-            (item.get("library") or {}).get("watched_count") or 0,
             item.get("num_votes") or 0,
             item.get("start_year") or 0,
         ),
@@ -3325,6 +3831,27 @@ def _best_title_similarity(query_key: str, variants: list[Any]) -> float:
                 score = max(score, 0.8)
             best = max(best, score)
     return best
+
+
+def _best_person_name_similarity(query_key: str, primary_name: Any) -> float:
+    """Return the best fuzzy score for a person name across full-name and token variants."""
+    name_key = _normalize_match_key(primary_name)
+    if not query_key or not name_key:
+        return 0.0
+
+    name_tokens = _match_tokens(name_key)
+    variants: list[str] = [name_key, name_key.replace(" ", "")]
+    variants.extend(name_tokens)
+    if len(name_tokens) > 1:
+        variants.append(name_tokens[-1])
+
+    seen: set[str] = set()
+    ordered_variants: list[str] = []
+    for variant in variants:
+        if variant and variant not in seen:
+            seen.add(variant)
+            ordered_variants.append(variant)
+    return _best_title_similarity(query_key, ordered_variants)
 
 
 def _token_similarity_score(query_key: str, variant_key: str) -> float:
@@ -3400,7 +3927,6 @@ def _search_catalog_for_lookup(query: str, title_type: str | None, limit: int) -
         items: list[dict[str, Any]] = []
         for row in rows:
             item = _catalog_row_to_dict(row)
-            item["library"] = _fetch_library_summary(conn, item["tconst"], item["title_type"])
             items.append(item)
     return items
 
@@ -3485,6 +4011,12 @@ def _title_type_label(title_type: str | None) -> str:
 def _is_duckdb_lock_error(exc: duckdb.Error) -> bool:
     message = str(exc).lower()
     return "could not set lock on file" in message or "can't open a connection to same database file" in message
+
+
+def is_duckdb_lock_error(exc: duckdb.Error) -> bool:
+    """Public wrapper for callers that need to detect transient DuckDB lock collisions."""
+
+    return _is_duckdb_lock_error(exc)
 
 
 def _run_duckdb_write(action: Callable[[duckdb.DuckDBPyConnection], Any]) -> Any:
@@ -9252,8 +9784,12 @@ def _normalize_match_key(value: Any, *, strip_leading_articles: bool = False) ->
         return ""
     text = re.sub(r"\(\s*\d{4}\s*\)", " ", text)
     text = text.replace("&", " and ")
+    text = text.replace("%", " percent ")
     text = unicodedata.normalize("NFKD", text)
     text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = re.sub(r"\bper\s+cent\b", " percent ", text)
+    text = re.sub(r"\bpct\b", " percent ", text)
+    text = re.sub(r"\bprocent[a-z]*\b", " percent ", text)
     text = re.sub(r"[^a-z0-9]+", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     if strip_leading_articles:
@@ -9262,12 +9798,14 @@ def _normalize_match_key(value: Any, *, strip_leading_articles: bool = False) ->
 
 
 def _duckdb_match_key_sql(column: str, strip_leading_articles: bool = False) -> str:
-    base = (
-        f"trim(regexp_replace(regexp_replace(regexp_replace(lower({column}), "
-        "'\\(\\s*[0-9]{4}\\s*\\)', ' ', 'g'), "
-        "'[^[:alnum:]]+', ' ', 'g'), "
-        "'\\s+', ' ', 'g'))"
-    )
+    base = f"lower({column})"
+    base = f"regexp_replace({base}, '%', ' percent ', 'g')"
+    base = f"regexp_replace({base}, '\\\\bper\\\\s+cent\\\\b', ' percent ', 'g')"
+    base = f"regexp_replace({base}, '\\\\bpct\\\\b', ' percent ', 'g')"
+    base = f"regexp_replace({base}, '\\\\bprocent[a-z]*\\\\b', ' percent ', 'g')"
+    base = f"regexp_replace({base}, '\\\\(\\\\s*[0-9]{{4}}\\\\s*\\\\)', ' ', 'g')"
+    base = f"regexp_replace({base}, '[^[:alnum:]]+', ' ', 'g')"
+    base = f"trim(regexp_replace({base}, '\\\\s+', ' ', 'g'))"
     if strip_leading_articles:
         return f"trim(regexp_replace({base}, '^(the|a|an)\\s+', '', 'g'))"
     return base

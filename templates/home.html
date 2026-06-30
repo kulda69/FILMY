@@ -22,7 +22,7 @@
                             <div class="rounded-4 border border-secondary-subtle p-3 h-100 {% if loop.first %}bg-body-tertiary{% endif %}">
                                 <div class="d-flex flex-column gap-3">
                                     <a class="d-flex align-items-center justify-content-center rounded-4 bg-secondary-subtle text-dark text-decoration-none overflow-hidden poster-rail-image"
-                                       href="/titles/{{ item.tconst }}"
+                                       href="/titles/{{ item.tconst }}?return_to={{ continue_watching_return_to | urlencode }}"
                                        aria-label="Open detail for {{ item.title }}">
                                         {% if item.poster_url %}
                                         <img src="{{ item.poster_url }}" alt="Poster for {{ item.title }}" class="img-fluid w-100 h-100 object-fit-cover">
@@ -30,7 +30,9 @@
                                     </a>
                                     <div class="min-w-0">
                                         <div class="d-flex flex-wrap align-items-center gap-2 mb-1">
-                                            <h2 class="h6 mb-0 text-truncate">{{ item.title }}</h2>
+                                            <h2 class="h6 mb-0 text-truncate">
+                                                <a class="text-decoration-none text-body" href="/titles/{{ item.tconst }}?return_to={{ continue_watching_return_to | urlencode }}">{{ item.title }}</a>
+                                            </h2>
                                             <span class="badge text-bg-secondary">{{ item.title_type }}</span>
                                             <span class="badge text-bg-dark border border-secondary-subtle">{{ item.interest_state }}</span>
                                         </div>

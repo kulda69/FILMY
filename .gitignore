@@ -30,6 +30,8 @@ data/tmdb_backfill.log
 data/*.log
 data/*.pid
 data/*.signal
+data/imdb_refresh/
+data/imdb_refresh_status.json
 tmp/
 output/playwright/
 Screenshot *.png

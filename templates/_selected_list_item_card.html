@@ -1,12 +1,12 @@
 <div class="h-100 rounded-4 border border-secondary-subtle p-2 bg-body">
     <div class="d-flex flex-column gap-2 h-100">
-        <a class="rounded-4 overflow-hidden bg-secondary-subtle text-decoration-none" href="/titles/{{ item.tconst }}" aria-label="Open detail for {{ item.title }}">
+        <a class="rounded-4 overflow-hidden bg-secondary-subtle text-decoration-none" href="/titles/{{ item.tconst }}?return_to={{ selected_list_detail_return_to | urlencode }}" aria-label="Open detail for {{ item.title }}">
             <div class="rounded-4 overflow-hidden bg-secondary-subtle poster-grid-image">
                 <img src="{{ item.poster_url }}" alt="Poster for {{ item.title }}" class="img-fluid w-100 h-100 object-fit-cover">
             </div>
         </a>
         <div class="min-w-0">
-            <a class="fw-semibold text-truncate text-decoration-none text-body d-block" href="/titles/{{ item.tconst }}">{{ item.title }}</a>
+            <a class="fw-semibold text-truncate text-decoration-none text-body d-block" href="/titles/{{ item.tconst }}?return_to={{ selected_list_detail_return_to | urlencode }}">{{ item.title }}</a>
             <div class="d-flex align-items-center gap-2 small text-secondary">
                 <div class="text-truncate">
                     {% if item.year %}{{ item.year }}{% endif %}

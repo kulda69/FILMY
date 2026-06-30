@@ -1,0 +1,89 @@
+{% set status = refresh_snapshot.status %}
+{% set state_label = {
+    "idle": "idle",
+    "starting": "spousti se",
+    "running": "bezi",
+    "completed": "hotovo",
+    "error": "chyba",
+    "unknown": "neznamy stav"
+}.get(status.state, status.state) %}
+{% set stage_label = {
+    "idle": "idle",
+    "starting": "spousteni",
+    "download": "stahovani",
+    "extract": "rozbalovani",
+    "validate": "kontrola",
+    "swap": "prepnuti souboru",
+    "refresh_catalog": "obnova katalogu",
+    "completed": "dokonceno",
+    "error": "chyba"
+}.get(status.stage, status.stage or "idle") %}
+<div class="card bg-black border-secondary-subtle">
+    <div class="card-body p-4">
+        <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4">
+            <div>
+                <h2 class="h4 mb-2" style="color: #b56a33;">IMDb Refresh Status</h2>
+                <p class="text-secondary mb-0">{{ status.message }}</p>
+            </div>
+            <span class="badge {% if status.state == 'completed' %}text-bg-success{% elif status.is_running %}text-bg-warning{% elif status.state == 'error' %}text-bg-danger{% else %}text-bg-dark border border-secondary-subtle{% endif %} px-3 py-2">
+                {{ state_label }}
+            </span>
+        </div>
+
+        <div class="row g-3 mb-4">
+            <div class="col-12 col-md-3">
+                <div class="rounded-4 border border-secondary-subtle bg-body h-100 p-3">
+                    <div class="text-secondary small text-uppercase mb-2">Faze</div>
+                    <div class="fw-semibold">{{ stage_label }}</div>
+                </div>
+            </div>
+            <div class="col-12 col-md-3">
+                <div class="rounded-4 border border-secondary-subtle bg-body h-100 p-3">
+                    <div class="text-secondary small text-uppercase mb-2">Stazeno</div>
+                    <div class="fw-semibold">{{ status.files_downloaded }} / {{ status.files_total }}</div>
+                </div>
+            </div>
+            <div class="col-12 col-md-3">
+                <div class="rounded-4 border border-secondary-subtle bg-body h-100 p-3">
+                    <div class="text-secondary small text-uppercase mb-2">Rozbaleno</div>
+                    <div class="fw-semibold">{{ status.files_extracted }} / {{ status.files_total }}</div>
+                </div>
+            </div>
+            <div class="col-12 col-md-3">
+                <div class="rounded-4 border border-secondary-subtle bg-body h-100 p-3">
+                    <div class="text-secondary small text-uppercase mb-2">PID</div>
+                    <div class="fw-semibold">{{ status.pid if status.pid else "n/a" }}</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="rounded-4 border border-secondary-subtle bg-body p-3 mb-4">
+            <div class="small text-secondary mb-2">Aktualni soubor</div>
+            <div class="fw-semibold">{{ status.current_file or "zadny" }}</div>
+            {% if status.updated_at %}
+            <div class="small text-secondary mt-2">Aktualizovano {{ format_czech_datetime(status.updated_at) }}</div>
+            {% endif %}
+            {% if status.error %}
+            <div class="small text-danger mt-2">{{ status.error }}</div>
+            {% endif %}
+        </div>
+
+        {% if status.stats %}
+        <div class="rounded-4 border border-secondary-subtle bg-body p-3 mb-4">
+            <div class="small text-secondary mb-2">Vysledek obnovy katalogu</div>
+            <div class="d-flex flex-wrap gap-2">
+                <span class="badge text-bg-dark border border-secondary-subtle">Titles {{ status.stats.titles }}</span>
+                <span class="badge text-bg-dark border border-secondary-subtle">Episodes {{ status.stats.episodes }}</span>
+                <span class="badge text-bg-dark border border-secondary-subtle">Aliases {{ status.stats.aliases }}</span>
+                <span class="badge text-bg-dark border border-secondary-subtle">People {{ status.stats.people }}</span>
+                <span class="badge text-bg-dark border border-secondary-subtle">Credits {{ status.stats.credits }}</span>
+            </div>
+        </div>
+        {% endif %}
+
+        <div class="rounded-4 border border-secondary-subtle bg-body p-3">
+            <div class="small text-secondary mb-2">Posledni log</div>
+            <pre class="small text-light mb-0" style="white-space: pre-wrap;">{% if refresh_snapshot.log_lines %}{{ refresh_snapshot.log_lines | join('\n') }}{% else %}Zatim bez logu.{% endif %}</pre>
+        </div>
+    </div>
+</div>

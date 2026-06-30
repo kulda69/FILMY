@@ -1,0 +1,18 @@
+<section class="mb-3">
+    <nav aria-label="Breadcrumb">
+        <ol class="breadcrumb small mb-0">
+            {% if breadcrumb_items %}
+            {% for item in breadcrumb_items %}
+            <li class="breadcrumb-item">
+                <a class="link-light text-decoration-none" href="{{ item.url }}">{{ item.label }}</a>
+            </li>
+            {% endfor %}
+            {% elif back_url %}
+            <li class="breadcrumb-item">
+                <a class="link-light text-decoration-none" href="{{ back_url }}">Back</a>
+            </li>
+            {% endif %}
+            <li class="breadcrumb-item active text-secondary" aria-current="page">{{ current_label }}</li>
+        </ol>
+    </nav>
+</section>

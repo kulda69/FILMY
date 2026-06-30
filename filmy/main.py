@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import json
 import threading
 import time
 from math import ceil
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote_plus, urlencode, urlsplit, urlunsplit
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.staticfiles import StaticFiles
@@ -78,6 +79,7 @@ from filmy.db import (
     update_user_list_description,
     describe_title_by_query,
 )
+from filmy.imdb_refresh import get_imdb_refresh_snapshot, start_imdb_refresh_job
 from filmy.integrations.tmdb import (
     TmdbApiError,
     TmdbConfigError,
@@ -96,6 +98,9 @@ _homepage_warmup_lock = threading.Lock()
 _homepage_warmup_thread: threading.Thread | None = None
 _person_portrait_warmup_lock = threading.Lock()
 _person_portrait_warmup_active: set[str] = set()
+_BREADCRUMB_TRAIL_PARAM = "_trail"
+_BREADCRUMB_LABEL_PARAM = "_label"
+_BREADCRUMB_TS_PARAM = "_ts"
 
 
 @asynccontextmanager
@@ -213,6 +218,94 @@ def _count_missing_portraits(main_cast: list[dict[str, object]]) -> int:
     return sum(1 for person in main_cast if not person.get("has_portrait"))
 
 
+def _search_result_people_line(people: list[dict[str, object]] | None, limit: int = 4) -> str | None:
+    names = [str(person.get("name") or "").strip() for person in (people or []) if str(person.get("name") or "").strip()]
+    if not names:
+        return None
+    visible = names[:limit]
+    suffix = f" +{len(names) - limit}" if len(names) > limit else ""
+    return ", ".join(visible) + suffix
+
+
+def _present_search_result_card(
+    presentation: dict[str, object],
+    *,
+    match: dict[str, object] | None = None,
+    return_to: str,
+) -> dict[str, object]:
+    library_state = presentation.get("library_state") or {}
+    available_in_czechia = presentation.get("available_in_czechia") or []
+    available_preview = list(available_in_czechia[:3])
+    if len(available_in_czechia) > 3:
+        available_preview.append(f"+{len(available_in_czechia) - 3}")
+    fuzzy_score = match.get("fuzzy_score") if match else None
+    return {
+        "tconst": presentation.get("tconst"),
+        "title": presentation.get("title"),
+        "original_title": presentation.get("original_title"),
+        "kind_label": presentation.get("kind_label"),
+        "year": presentation.get("year"),
+        "runtime_minutes": presentation.get("runtime_minutes"),
+        "genres": presentation.get("genres") or [],
+        "imdb_rating": presentation.get("imdb_rating"),
+        "imdb_votes": presentation.get("imdb_votes"),
+        "poster_url": presentation.get("poster_url"),
+        "overview": presentation.get("overview"),
+        "directed_by_line": _search_result_people_line(presentation.get("directed_by")),
+        "written_by_line": _search_result_people_line(presentation.get("written_by")),
+        "main_cast_line": _search_result_people_line(presentation.get("main_cast"), limit=5),
+        "created_by_line": _search_result_people_line(presentation.get("created_by")),
+        "available_in_czechia": available_preview,
+        "watched_count": library_state.get("watched_count") or 0,
+        "user_lists": library_state.get("lists") or [],
+        "user_rating": (library_state.get("rating") or {}).get("value"),
+        "detail_url": f"/titles/{presentation.get('tconst')}?return_to={quote_plus(return_to)}",
+        "is_exact_match": bool(match and match.get("is_exact_match")),
+        "fuzzy_score": fuzzy_score,
+        "fuzzy_score_percent": round(float(fuzzy_score) * 100) if fuzzy_score is not None else None,
+        "match_kind": "Exact" if match and match.get("is_exact_match") else "Closest",
+    }
+
+
+def _present_person_search_result_card(
+    presentation: dict[str, object],
+    *,
+    match: dict[str, object] | None = None,
+    return_to: str,
+) -> dict[str, object]:
+    known_for_items = presentation.get("known_for_items") or []
+    known_for_preview = [
+        {
+            "title": item.get("title"),
+            "year": item.get("start_year"),
+            "detail_url": f"/titles/{item.get('tconst')}?return_to={quote_plus(return_to)}",
+        }
+        for item in known_for_items[:4]
+        if item.get("tconst") and item.get("title")
+    ]
+    filmography = presentation.get("filmography") or {}
+    fuzzy_score = match.get("fuzzy_score") if match else None
+    return {
+        "nconst": presentation.get("nconst"),
+        "name": presentation.get("name"),
+        "birth_year": presentation.get("birth_year"),
+        "death_year": presentation.get("death_year"),
+        "primary_profession": presentation.get("primary_profession"),
+        "credit_count": presentation.get("credit_count") or 0,
+        "portrait_url": presentation.get("portrait_url"),
+        "known_for_items": known_for_preview,
+        "known_for_line": ", ".join(str(item.get("title")) for item in known_for_preview if item.get("title")),
+        "acted_count": len(filmography.get("acted") or []),
+        "directed_count": len(filmography.get("directed") or []),
+        "written_count": len(filmography.get("written") or []),
+        "created_count": len(filmography.get("created") or []),
+        "detail_url": f"/people/{presentation.get('nconst')}?return_to={quote_plus(return_to)}",
+        "is_exact_match": bool(match and match.get("is_exact_match")),
+        "fuzzy_score": fuzzy_score,
+        "fuzzy_score_percent": round(float(fuzzy_score) * 100) if fuzzy_score is not None else None,
+    }
+
+
 def _signal_metadata_pipeline(reason: str) -> None:
     try:
         signal_background_activity(reason)
@@ -327,7 +420,7 @@ def _redirect_back(return_to: str | None) -> RedirectResponse:
     target = return_to or "/"
     parts = urlsplit(target)
     query_pairs = parse_qsl(parts.query, keep_blank_values=True)
-    query_pairs.append(("_ts", str(time.time_ns())))
+    query_pairs.append((_BREADCRUMB_TS_PARAM, str(time.time_ns())))
     refreshed = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query_pairs), parts.fragment))
     response = RedirectResponse(url=refreshed, status_code=303)
     response.headers["Cache-Control"] = "no-store, max-age=0"
@@ -359,11 +452,175 @@ def _request_back_target(request: Request, return_to: str | None = None) -> str:
     return "/"
 
 
-def _detail_return_target(path: str, parent_return_to: str, *, season: int | None = None, fragment: str | None = None) -> str:
-    query_pairs: list[tuple[str, str]] = [("return_to", parent_return_to)]
+def _sanitize_breadcrumb_label(label: str | None) -> str | None:
+    text = str(label or "").strip()
+    if not text:
+        return None
+    return text[:80]
+
+
+def _normalize_breadcrumb_item(url: str | None, label: str | None) -> dict[str, str] | None:
+    safe_url = _safe_back_target(url)
+    safe_label = _sanitize_breadcrumb_label(label)
+    if not safe_url or not safe_label:
+        return None
+    return {"url": safe_url, "label": safe_label}
+
+
+def _decode_breadcrumb_trail(value: str | None) -> list[dict[str, str]]:
+    if not value:
+        return []
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, list):
+        return []
+
+    trail: list[dict[str, str]] = []
+    for entry in payload:
+        if not isinstance(entry, dict):
+            continue
+        item = _normalize_breadcrumb_item(entry.get("url"), entry.get("label"))
+        if item is None:
+            continue
+        if trail and trail[-1] == item:
+            continue
+        trail.append(item)
+    return trail[:8]
+
+
+def _encode_breadcrumb_trail(trail: list[dict[str, str]]) -> str:
+    return json.dumps(trail, separators=(",", ":"), ensure_ascii=True)
+
+
+def _split_navigation_query(target: str) -> tuple[list[dict[str, str]], str | None, list[tuple[str, str]]]:
+    parts = urlsplit(target)
+    functional_pairs: list[tuple[str, str]] = []
+    trail: list[dict[str, str]] = []
+    label: str | None = None
+    for key, value in parse_qsl(parts.query, keep_blank_values=True):
+        if key == _BREADCRUMB_TRAIL_PARAM:
+            trail = _decode_breadcrumb_trail(value)
+            continue
+        if key == _BREADCRUMB_LABEL_PARAM:
+            label = _sanitize_breadcrumb_label(value)
+            continue
+        if key == _BREADCRUMB_TS_PARAM:
+            continue
+        functional_pairs.append((key, value))
+    return trail, label, functional_pairs
+
+
+def _strip_navigation_params(target: str) -> str:
+    parts = urlsplit(target)
+    _, _, functional_pairs = _split_navigation_query(target)
+    return urlunsplit(("", "", parts.path, urlencode(functional_pairs), parts.fragment))
+
+
+def _strip_ephemeral_params(target: str) -> str:
+    safe_target = _safe_back_target(target) or "/"
+    parts = urlsplit(safe_target)
+    query_pairs = [
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if key != _BREADCRUMB_TS_PARAM
+    ]
+    return urlunsplit(("", "", parts.path, urlencode(query_pairs), parts.fragment))
+
+
+def _breadcrumb_items_from_target(target: str | None) -> list[dict[str, str]]:
+    safe_target = _safe_back_target(target)
+    if not safe_target:
+        return []
+
+    trail, label, _ = _split_navigation_query(safe_target)
+    if label:
+        current_item = _normalize_breadcrumb_item(_strip_ephemeral_params(safe_target), label)
+        if current_item and (not trail or trail[-1] != current_item):
+            trail.append(current_item)
+    return trail
+
+
+def _build_breadcrumb_target(
+    path: str,
+    *,
+    trail: list[dict[str, str]] | None = None,
+    label: str | None = None,
+    season: int | None = None,
+    fragment: str | None = None,
+) -> str:
+    safe_path = _safe_back_target(path) or "/"
+    parts = urlsplit(safe_path)
+    query_pairs = list(parse_qsl(parts.query, keep_blank_values=True))
+    query_pairs = [
+        (key, value)
+        for key, value in query_pairs
+        if key not in {_BREADCRUMB_TRAIL_PARAM, _BREADCRUMB_LABEL_PARAM, _BREADCRUMB_TS_PARAM}
+    ]
     if season is not None:
+        query_pairs = [(key, value) for key, value in query_pairs if key != "season"]
         query_pairs.append(("season", str(season)))
-    return urlunsplit(("", "", path, urlencode(query_pairs), fragment or ""))
+    clean_trail = [item for item in (trail or []) if _normalize_breadcrumb_item(item.get("url"), item.get("label"))]
+    if clean_trail:
+        query_pairs.append((_BREADCRUMB_TRAIL_PARAM, _encode_breadcrumb_trail(clean_trail)))
+    safe_label = _sanitize_breadcrumb_label(label)
+    if safe_label:
+        query_pairs.append((_BREADCRUMB_LABEL_PARAM, safe_label))
+    return urlunsplit(("", "", parts.path, urlencode(query_pairs), fragment if fragment is not None else parts.fragment))
+
+
+def _build_breadcrumb_context(
+    request: Request,
+    current_label: str,
+    *,
+    return_to: str | None = None,
+    default_trail: list[dict[str, str]] | None = None,
+) -> dict[str, object]:
+    current_target = str(request.url.path if not request.url.query else f"{request.url.path}?{request.url.query}")
+    current_trail, current_embedded_label, _ = _split_navigation_query(current_target)
+    parent_target = _request_back_target(request, return_to)
+
+    if return_to:
+        breadcrumb_items = _breadcrumb_items_from_target(parent_target)
+    elif current_embedded_label or current_trail:
+        breadcrumb_items = current_trail
+    else:
+        breadcrumb_items = _breadcrumb_items_from_target(parent_target)
+
+    if not breadcrumb_items and default_trail:
+        breadcrumb_items = [item for item in default_trail if _normalize_breadcrumb_item(item.get("url"), item.get("label"))]
+
+    functional_current = _strip_navigation_params(current_target)
+    functional_current = _strip_return_to_param(functional_current)
+    page_return_to = _build_breadcrumb_target(
+        functional_current,
+        trail=breadcrumb_items,
+        label=current_label,
+    )
+    back_url = breadcrumb_items[-1]["url"] if breadcrumb_items else parent_target
+    return {
+        "back_url": back_url,
+        "breadcrumb_items": breadcrumb_items,
+        "page_return_to": page_return_to,
+    }
+
+
+def _strip_return_to_param(target: str) -> str:
+    safe_target = _safe_back_target(target) or "/"
+    parts = urlsplit(safe_target)
+    query_pairs = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True) if key != "return_to"]
+    return urlunsplit(("", "", parts.path, urlencode(query_pairs), parts.fragment))
+
+
+def _detail_return_target(path: str, parent_return_to: str, *, season: int | None = None, fragment: str | None = None) -> str:
+    breadcrumb_items = _breadcrumb_items_from_target(parent_return_to)
+    return _build_breadcrumb_target(
+        path,
+        trail=breadcrumb_items,
+        season=season,
+        fragment=fragment,
+    )
 
 
 def _tmdb_asset_url(detail: dict[str, object] | None, asset_kind: str) -> str | None:
@@ -440,6 +697,22 @@ async def root(request: Request, list_id: str | None = Query(default=None)):
             selected_list_show_all_url = "/views/recently-watched"
         else:
             selected_list_show_all_url = f"/lists/{selected_list['id']}"
+    home_crumb = {"url": "/", "label": "Home"}
+    selected_list_return_to = (
+        _build_breadcrumb_target(
+            f"/?list_id={selected_list['id']}#lists-section",
+            trail=[home_crumb],
+            label=str(selected_list["name"]),
+        )
+        if selected_list
+        else _build_breadcrumb_target("/#lists-section", trail=[home_crumb], label="Home")
+    )
+    continue_watching_return_to = _build_breadcrumb_target(
+        "/",
+        trail=[home_crumb],
+        label="Continue Watching",
+        fragment="continue-watching-rail",
+    )
     response = templates.TemplateResponse(
         request,
         "home.html",
@@ -453,12 +726,114 @@ async def root(request: Request, list_id: str | None = Query(default=None)):
             "selected_list_show_all_url": selected_list_show_all_url,
             "selected_list_move_targets": _card_action_move_targets(visible_lists, selected_list),
             "selected_list_actions_enabled": bool(selected_list and selected_list.get("item_type") == "list"),
-            "selected_list_return_to": f"/?list_id={selected_list['id']}#lists-section" if selected_list else "/#lists-section",
+            "selected_list_return_to": selected_list_return_to,
+            "selected_list_detail_return_to": selected_list_return_to,
             "continue_watching": continue_watching,
+            "continue_watching_return_to": continue_watching_return_to,
             "suggestion_scores": latest_genre_scores["items"] if latest_genre_scores else [],
             "suggestion_scores_generated_at": latest_genre_scores["generated_at"] if latest_genre_scores else None,
             "background": background_supervisor.homepage_snapshot(),
             "format_czech_datetime": format_czech_datetime,
+        },
+    )
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    return response
+
+
+@app.get("/search", response_class=HTMLResponse)
+async def search_results_page(
+    request: Request,
+    q: str | None = Query(default=None, min_length=1),
+    mode: str = Query(default="auto", pattern="^(auto|wide)$"),
+    title_type: str | None = Query(default=None, pattern="^(movie|tvMovie|tvSeries|tvMiniSeries)$"),
+):
+    breadcrumb_context = _build_breadcrumb_context(
+        request,
+        "Search",
+        default_trail=[{"url": "/", "label": "Home"}],
+    )
+    page_return_to = str(breadcrumb_context["page_return_to"])
+
+    lookup = None
+    primary_result = None
+    alternate_results: list[dict[str, object]] = []
+    person_lookup = None
+    person_primary_result = None
+    person_alternate_results: list[dict[str, object]] = []
+    searched_query = (q or "").strip()
+    candidates_limit = 8 if mode == "wide" else 5
+
+    if searched_query:
+        lookup = lookup_title_by_query(query=searched_query, title_type=title_type, candidates_limit=candidates_limit)
+        if lookup is not None:
+            selected = dict(lookup["selected"])
+            primary_result = _present_search_result_card(
+                selected,
+                match=selected.get("match"),
+                return_to=page_return_to,
+            )
+
+            scored_candidates = sorted(
+                [candidate for candidate in lookup["candidates"] if candidate.get("fuzzy_score") is not None],
+                key=lambda item: float(item.get("fuzzy_score") or 0.0),
+                reverse=True,
+            )
+            for candidate in scored_candidates:
+                if candidate["tconst"] == lookup["selected_tconst"]:
+                    continue
+                candidate_presentation = get_title_presentation(candidate["tconst"])
+                if candidate_presentation is None:
+                    continue
+                alternate_results.append(
+                    _present_search_result_card(
+                        candidate_presentation,
+                        match=candidate,
+                        return_to=page_return_to,
+                    )
+                )
+        person_lookup = lookup_person_by_query(query=searched_query, candidates_limit=candidates_limit)
+        if person_lookup is not None:
+            selected_person = dict(person_lookup["selected"])
+            person_primary_result = _present_person_search_result_card(
+                selected_person,
+                match=selected_person.get("match"),
+                return_to=page_return_to,
+            )
+            scored_people = sorted(
+                [candidate for candidate in person_lookup["candidates"] if candidate.get("fuzzy_score") is not None],
+                key=lambda item: float(item.get("fuzzy_score") or 0.0),
+                reverse=True,
+            )
+            for candidate in scored_people:
+                if candidate["nconst"] == person_lookup["selected_nconst"]:
+                    continue
+                candidate_presentation = get_person_presentation(candidate["nconst"])
+                if candidate_presentation is None:
+                    continue
+                person_alternate_results.append(
+                    _present_person_search_result_card(
+                        candidate_presentation,
+                        match=candidate,
+                        return_to=page_return_to,
+                    )
+                )
+
+    response = templates.TemplateResponse(
+        request,
+        "search_results.html",
+        {
+            **breadcrumb_context,
+            "nav_search_query": searched_query,
+            "search_query": searched_query,
+            "search_mode": mode,
+            "search_title_type": title_type,
+            "search_lookup": lookup,
+            "search_primary_result": primary_result,
+            "search_alternate_results": alternate_results,
+            "person_search_lookup": person_lookup,
+            "person_search_primary_result": person_primary_result,
+            "person_search_alternate_results": person_alternate_results,
         },
     )
     response.headers["Cache-Control"] = "no-store, max-age=0"
@@ -483,6 +858,11 @@ async def list_detail(request: Request, list_id: str, page: int = Query(default=
         list_page = get_user_list_items_page(list_id, limit=limit, offset=offset)
 
     _launch_homepage_warmup([item["tconst"] for item in list_page["items"]])
+    list_return_to = _build_breadcrumb_target(
+        f"/lists/{list_id}?page={current_page}",
+        trail=[{"url": "/", "label": "Home"}],
+        label=str(selected_list["name"]),
+    )
     response = templates.TemplateResponse(
         request,
         "list_detail.html",
@@ -499,7 +879,8 @@ async def list_detail(request: Request, list_id: str, page: int = Query(default=
             "selected_list_next_url": f"/lists/{list_id}?page={current_page + 1}" if current_page < total_pages else None,
             "selected_list_move_targets": _card_action_move_targets(get_local_library_status()["visible_lists"], selected_list),
             "selected_list_actions_enabled": True,
-            "selected_list_return_to": f"/lists/{list_id}?page={current_page}",
+            "selected_list_return_to": list_return_to,
+            "selected_list_detail_return_to": list_return_to,
             "format_czech_datetime": format_czech_datetime,
         },
     )
@@ -522,6 +903,11 @@ async def recently_watched_detail(request: Request, page: int = Query(default=1,
         list_page = get_recently_watched_page(limit=limit, offset=offset)
 
     _launch_homepage_warmup([item["tconst"] for item in list_page["items"]])
+    list_return_to = _build_breadcrumb_target(
+        f"/views/recently-watched?page={current_page}",
+        trail=[{"url": "/", "label": "Home"}],
+        label="Recently Watched",
+    )
     response = templates.TemplateResponse(
         request,
         "list_detail.html",
@@ -538,7 +924,8 @@ async def recently_watched_detail(request: Request, page: int = Query(default=1,
             "selected_list_next_url": f"/views/recently-watched?page={current_page + 1}" if current_page < total_pages else None,
             "selected_list_move_targets": [],
             "selected_list_actions_enabled": False,
-            "selected_list_return_to": f"/views/recently-watched?page={current_page}",
+            "selected_list_return_to": list_return_to,
+            "selected_list_detail_return_to": list_return_to,
             "format_czech_datetime": format_czech_datetime,
         },
     )
@@ -561,6 +948,11 @@ async def watched_detail(request: Request, page: int = Query(default=1, ge=1)):
         list_page = get_watched_page(limit=limit, offset=offset)
 
     _launch_homepage_warmup([item["tconst"] for item in list_page["items"]])
+    list_return_to = _build_breadcrumb_target(
+        f"/views/watched?page={current_page}",
+        trail=[{"url": "/", "label": "Home"}],
+        label="Watched",
+    )
     response = templates.TemplateResponse(
         request,
         "list_detail.html",
@@ -577,7 +969,8 @@ async def watched_detail(request: Request, page: int = Query(default=1, ge=1)):
             "selected_list_next_url": f"/views/watched?page={current_page + 1}" if current_page < total_pages else None,
             "selected_list_move_targets": [],
             "selected_list_actions_enabled": False,
-            "selected_list_return_to": f"/views/watched?page={current_page}",
+            "selected_list_return_to": list_return_to,
+            "selected_list_detail_return_to": list_return_to,
             "format_czech_datetime": format_czech_datetime,
         },
     )
@@ -614,17 +1007,65 @@ async def favorite_genres_page(
         )
     )
 
-    safe_return_to = _request_back_target(request, return_to)
+    breadcrumb_context = _build_breadcrumb_context(
+        request,
+        "Favorite Genres",
+        return_to=return_to,
+        default_trail=[{"url": "/", "label": "Home"}],
+    )
     response = templates.TemplateResponse(
         request,
         "favorite_genres.html",
         {
-            "back_url": safe_return_to,
-            "return_to": safe_return_to,
+            **breadcrumb_context,
+            "return_to": breadcrumb_context["page_return_to"],
             "saved": bool(saved),
             "genre_rows": genre_rows,
             "favorite_count": sum(1 for item in genre_rows if item["priority"] is not None),
         },
+    )
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    return response
+
+
+@app.get("/system/imdb-refresh", response_class=HTMLResponse)
+async def imdb_refresh_page(
+    request: Request,
+    return_to: str | None = Query(default=None),
+    started: int = Query(default=0),
+):
+    breadcrumb_context = _build_breadcrumb_context(
+        request,
+        "IMDb Refresh",
+        return_to=return_to,
+        default_trail=[{"url": "/", "label": "Home"}],
+    )
+    snapshot = get_imdb_refresh_snapshot()
+    response = templates.TemplateResponse(
+        request,
+        "imdb_refresh.html",
+        {
+            **breadcrumb_context,
+            "return_to": breadcrumb_context["page_return_to"],
+            "started": bool(started),
+            "refresh_snapshot": snapshot,
+            "format_czech_datetime": format_czech_datetime,
+        },
+    )
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    return response
+
+
+@app.post("/system/imdb-refresh/start")
+async def imdb_refresh_start(request: Request):
+    form = await request.form()
+    return_to = _safe_back_target(str(form.get("return_to") or "")) or "/system/imdb-refresh"
+    start_imdb_refresh_job()
+    response = RedirectResponse(
+        url=f"/system/imdb-refresh?{urlencode({'return_to': return_to, 'started': 1})}",
+        status_code=303,
     )
     response.headers["Cache-Control"] = "no-store, max-age=0"
     response.headers["Pragma"] = "no-cache"
@@ -695,13 +1136,18 @@ async def favorite_traits_page(
             }
         )
 
-    safe_return_to = _request_back_target(request, return_to)
+    breadcrumb_context = _build_breadcrumb_context(
+        request,
+        "Favorite Traits",
+        return_to=return_to,
+        default_trail=[{"url": "/", "label": "Home"}],
+    )
     response = templates.TemplateResponse(
         request,
         "favorite_traits.html",
         {
-            "back_url": safe_return_to,
-            "return_to": safe_return_to,
+            **breadcrumb_context,
+            "return_to": breadcrumb_context["page_return_to"],
             "saved": bool(saved),
             "trait_rows": trait_rows,
             "favorite_count": sum(1 for item in trait_rows if item.get("trait") and item.get("preference_rank") is not None),
@@ -717,12 +1163,17 @@ async def background_jobs_page(
     request: Request,
     return_to: str | None = Query(default=None),
 ):
-    safe_return_to = _request_back_target(request, return_to)
+    breadcrumb_context = _build_breadcrumb_context(
+        request,
+        "Background Jobs",
+        return_to=return_to,
+        default_trail=[{"url": "/", "label": "Home"}],
+    )
     response = templates.TemplateResponse(
         request,
         "background_jobs.html",
         {
-            "back_url": safe_return_to,
+            **breadcrumb_context,
             "background": background_supervisor.homepage_snapshot(),
         },
     )
@@ -786,7 +1237,8 @@ async def title_detail_page(request: Request, tconst: str, return_to: str | None
     if presentation is None or detail is None:
         raise HTTPException(status_code=404, detail="Titul nebyl nalezen.")
 
-    parent_return_to = _request_back_target(request, return_to)
+    breadcrumb_context = _build_breadcrumb_context(request, str(presentation["title"]), return_to=return_to)
+    parent_return_to = str(breadcrumb_context["page_return_to"])
     main_cast = _present_main_cast(presentation.get("main_cast") or [])
     _launch_person_portrait_warmup(main_cast)
     main_cast_pending_count = _count_missing_portraits(main_cast)
@@ -802,7 +1254,7 @@ async def title_detail_page(request: Request, tconst: str, return_to: str | None
             "title_main_cast": main_cast,
             "title_main_cast_pending_count": main_cast_pending_count,
             "title_detail": detail,
-            "back_url": parent_return_to,
+            **breadcrumb_context,
             "title_return_to": _detail_return_target(f"/titles/{tconst}", parent_return_to),
             "poster_url": presentation.get("poster_url"),
             "backdrop_url": _tmdb_asset_url(detail, "backdrop"),
@@ -819,7 +1271,7 @@ async def title_detail_page(request: Request, tconst: str, return_to: str | None
 
 
 @app.get("/titles/{tconst}/main-cast", response_class=HTMLResponse)
-async def title_main_cast_partial(request: Request, tconst: str):
+async def title_main_cast_partial(request: Request, tconst: str, return_to: str | None = Query(default=None)):
     presentation = get_title_presentation(tconst)
     if presentation is None:
         raise HTTPException(status_code=404, detail="Titul nebyl nalezen.")
@@ -833,6 +1285,10 @@ async def title_main_cast_partial(request: Request, tconst: str):
             "title_item": presentation,
             "title_main_cast": main_cast,
             "title_main_cast_pending_count": _count_missing_portraits(main_cast),
+            "title_return_to": _detail_return_target(
+                f"/titles/{tconst}",
+                return_to or _build_breadcrumb_target(f"/titles/{tconst}", label=str(presentation["title"])),
+            ),
         },
     )
     response.headers["Cache-Control"] = "no-store, max-age=0"
@@ -847,12 +1303,14 @@ async def person_detail_page(request: Request, nconst: str, return_to: str | Non
         raise HTTPException(status_code=404, detail="Osoba nebyla nalezena.")
 
     filmography = presentation.get("filmography") or {}
+    breadcrumb_context = _build_breadcrumb_context(request, str(presentation["name"]), return_to=return_to)
     response = templates.TemplateResponse(
         request,
         "person_detail.html",
         {
             "person_item": presentation,
-            "back_url": _request_back_target(request, return_to),
+            **breadcrumb_context,
+            "person_return_to": breadcrumb_context["page_return_to"],
             "filmography_sections": [
                 {"title": "Directed", "items": filmography.get("directed") or []},
                 {"title": "Created by", "items": filmography.get("created") or []},
@@ -1002,6 +1460,18 @@ async def ui_background_activity_card(request: Request):
         "_background_activity_card.html",
         {
             "background": background_supervisor.homepage_snapshot(),
+            "format_czech_datetime": format_czech_datetime,
+        },
+    )
+
+
+@app.get("/ui/cards/imdb-refresh-status", response_class=HTMLResponse)
+async def ui_imdb_refresh_status_card(request: Request):
+    return templates.TemplateResponse(
+        request,
+        "_imdb_refresh_status.html",
+        {
+            "refresh_snapshot": get_imdb_refresh_snapshot(),
             "format_czech_datetime": format_czech_datetime,
         },
     )

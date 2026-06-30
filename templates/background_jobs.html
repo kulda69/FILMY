@@ -3,9 +3,8 @@
 {% block title %}Filmy | Background Jobs{% endblock %}
 
 {% block content %}
-<section class="mb-3">
-    <a class="link-light text-decoration-none small" href="{{ back_url }}">« Back</a>
-</section>
+{% set current_label = "Background Jobs" %}
+{% include "_top_breadcrumbs.html" %}
 
 <section class="mb-4">
     <div class="card bg-black border-secondary-subtle">

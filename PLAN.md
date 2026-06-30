@@ -169,6 +169,11 @@ Jak to používat:
 
 ## Checkpoint
 
+- 2026-06-30: search dostal skutečnou HTML výsledkovou stránku `GET /search` napojenou na horní navbar; stránka umí zobrazit jak nalezený titul, tak nalezenou osobu a shortlist alternativ.
+- 2026-06-30: title lookup už nepreferuje lokálně viděné tituly; z rankingu zmizel `watched_count`, protože hledání musí fungovat i pro věci, které ještě nejsou v uživatelových seznamech ani historii.
+- 2026-06-30: title search nově bere výrazněji v úvahu aliasy a normalizaci lokálních názvů; dotazy typu `3 procenta` se mapují i na názvy se znakem `%`.
+- 2026-06-30: person search se rozšířil z pouhého full-name matchingu na víc variant jména. Fuzzy a levenshtein vrstva teď pracují i s příjmením a s kompaktní variantou bez mezer, takže jednoslovný překlep typu `Gylenhal` už najde `Jake Gyllenhaal`.
+- 2026-06-30: person lookup už pro shortlist kandidátů netahá plnou filmografii každé osoby; místo toho používá levnější `credit_count` agregaci z `app.title_credits`. Další krok, pokud se k tomu vrátíme, je hlavně změřit rychlost celé search pipeline na reálných dotazech a případně ještě zúžit DB shortlist před Python fuzzy scoringem.
 - 2026-06-29: detail titulu je znovu složený do tří vrstev pod hero blokem. `Main cast` je zpátky jako samostatný panel, `Directed by` a `Written by` mají vlastní nadpisy a badge jména, `Created by` je pod tím, aliasy jsou omezené jen na `en/cs/es/de` a nadpisy sekcí používají stejnou barvu jako název filmu.
 - 2026-06-29: přidána druhá ruční preference vrstva `favorite_traits` pro volné výrazy typu `cerebral`, `dark` nebo `slow-burn`; je dostupná v `System` jako samostatná stránka a zatím slouží jen ke sběru explicitních preferencí bez navazující výpočetní logiky.
 - 2026-06-27: vytvořen sdílený `PLAN.md` v rootu projektu jako jedno místo pro další kroky a průběžné odškrtávání.
@@ -214,9 +219,11 @@ Jak to používat:
 - 2026-06-30: homepage sekce nahoře s `Your Lists` a vybraným seznamem je po doladění schválená a má se brát jako zmrazená proti dalším úpravám; výjimkou je jen samostatná sekce `Suggestions`, kterou lze dál měnit odděleně.
 - 2026-06-30: `metadata_pipeline` už nemá běžet agresivně každé 2 sekundy i bez práce. Nově má aktivní krátký sleep jen při skutečném postupu, jinak přechází do idle wait režimu s delší periodickou kontrolou a probuzením přes signal soubor po write akcích z UI/API.
 - 2026-06-30: background provoz je zjednodušený na `metadata_pipeline` + `background supervisor`. Staré `tmdb_backfill`, `title_details_cache` rewrite a `refresh_stale_title_caches` se mají brát už jen jako archivní servisní nástroje, ne jako běžné background procesy.
+- 2026-06-30: přidána první verze `System > IMDb Refresh`. Je to jednorázový servisní subprocess se stavem a logem, který stáhne IMDb TSV dumpy bokem, rozbalí je do `data/imdb_refresh/<timestamp>/`, krátce přepne aktivní `imdb/` a pak spustí standardní `refresh_catalog()`.
 - 2026-06-28: pro osoby vzniká stejný materializovaný detail princip jako pro tituly: lokální `detail.json` pod `data/assets/people/<nconst>/detail.json`, klíčovaný přes IMDb `nconst`, aby budoucí UI detail osoby nečekal na skládání dat za běhu.
 - 2026-06-28: metadata pipeline nově po TMDB a title detail cache průběžně materializuje i person `detail.json`, takže i detaily lidí se mají doplňovat na pozadí stejným supervised loopem.
 - 2026-06-28: background pipeline nově dohledává i TMDB portréty lidí přes IMDb `nconst` a ukládá je do `data/assets/people/<nconst>/portrait.*`; navazující person `detail.json` pak umí hned nést `portrait_url`.
 - 2026-06-28: detail titulu nově zobrazuje u `Main cast` malé portréty z lokálních person assetů; při otevření detailu se chybějící portréty herců dohledávají přednostně na pozadí.
 - 2026-06-28: `Main cast` se po otevření detailu průběžně sám obnovuje malým lokálním partial refreshem, takže nově stažené portréty naskakují bez ručního reloadu celé stránky.
 - 2026-06-29: `Main cast` chipy na detailu titulu nově vedou na HTML detail osoby `/people/{nconst}`; detail osoby se skládá z materializovaných person dat a filmografie a linkuje zpět do detailů titulů přes IMDb identitu bez dalšího fuzzy lookup mezikroku.
+- 2026-06-30: horní `Back` navigace je nahrazená delšími breadcrumbs. Stopa se nově přenáší v URL mezi homepage/listy, detailem titulu a detailem osoby, takže se dá vracet i přes několik mezikroků zpět bez rozbití layoutu.
