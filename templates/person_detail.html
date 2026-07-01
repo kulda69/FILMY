@@ -9,53 +9,136 @@
 <section class="mb-4">
     <div class="card bg-black border-secondary-subtle overflow-hidden">
         <div class="card-body p-4 p-lg-5">
-            <div class="row g-4 g-xl-5 align-items-start">
-                <div class="col-12 col-lg-4 col-xl-3">
-                    {% if person_item.portrait_url %}
-                    <img src="{{ person_item.portrait_url }}" alt="Portrait of {{ person_item.name }}" class="img-fluid rounded-4 border border-secondary-subtle w-100 title-hero-poster">
-                    {% else %}
-                    <div class="rounded-4 border border-secondary-subtle bg-body-tertiary d-flex align-items-center justify-content-center text-secondary text-center px-3 title-hero-poster">
-                        Portrait not available yet.
-                    </div>
+            <div class="float-lg-start me-lg-5 mb-4" style="width: min(100%, 19rem);">
+                {% if person_item.portrait_url %}
+                <img src="{{ person_item.portrait_url }}" alt="Portrait of {{ person_item.name }}" class="img-fluid rounded-4 border border-secondary-subtle w-100 title-hero-poster">
+                {% else %}
+                <div class="rounded-4 border border-secondary-subtle bg-body-tertiary d-flex align-items-center justify-content-center text-secondary text-center px-3 title-hero-poster">
+                    Portrait not available yet.
+                </div>
+                {% endif %}
+            </div>
+
+            <div class="overflow-hidden">
+                <div class="d-flex flex-wrap gap-2 mb-4">
+                    <span class="badge text-bg-light text-dark px-3 py-2">{{ person_item.nconst }}</span>
+                    {% if person_item.birth_year %}
+                    <span class="badge text-bg-secondary px-3 py-2">{{ person_item.birth_year }}</span>
+                    {% endif %}
+                    {% if person_item.death_year %}
+                    <span class="badge text-bg-dark border border-secondary-subtle px-3 py-2">{{ person_item.death_year }}</span>
+                    {% endif %}
+                    {% if person_item.credit_count %}
+                    <span class="badge text-bg-dark border border-secondary-subtle px-3 py-2">{{ person_item.credit_count }} credits</span>
+                    {% endif %}
+                    {% set affinity_value = person_item.affinity_rating or 0 %}
+                    {% set affinity_full_stars = affinity_value // 2 %}
+                    {% set affinity_has_half_star = affinity_value % 2 == 1 %}
+                    {% set affinity_empty_stars = 5 - affinity_full_stars - (1 if affinity_has_half_star else 0) %}
+                    {% if affinity_value > 0 %}
+                    <span class="d-inline-flex align-items-center gap-2 px-1">
+                        <span style="color: #f5c26b;">You:</span>
+                        <span class="fs-5 lh-1" style="color: #f5c26b;">{{ "★" * affinity_full_stars }}{% if affinity_has_half_star %}½{% endif %}{{ "☆" * affinity_empty_stars }}</span>
+                    </span>
                     {% endif %}
                 </div>
-                <div class="col-12 col-lg-8 col-xl-9">
-                    <div class="d-flex flex-wrap gap-2 mb-4">
-                        <span class="badge text-bg-light text-dark px-3 py-2">{{ person_item.nconst }}</span>
-                        {% if person_item.birth_year %}
-                        <span class="badge text-bg-secondary px-3 py-2">{{ person_item.birth_year }}</span>
-                        {% endif %}
-                        {% if person_item.death_year %}
-                        <span class="badge text-bg-dark border border-secondary-subtle px-3 py-2">{{ person_item.death_year }}</span>
-                        {% endif %}
-                        {% if person_item.credit_count %}
-                        <span class="badge text-bg-dark border border-secondary-subtle px-3 py-2">{{ person_item.credit_count }} credits</span>
-                        {% endif %}
-                    </div>
 
-                    <h1 class="display-4 mb-3 lh-1" style="color: #b56a33;">{{ person_item.name }}</h1>
+                <div class="d-flex align-items-start gap-3 mb-3">
+                    <h1 class="display-4 mb-0 lh-1 flex-grow-1" style="color: #b56a33;">{{ person_item.name }}</h1>
+                    {% set person_menu_id = "person-menu-" ~ person_item.nconst %}
+                    <div class="ms-auto">
+                        <button
+                            type="button"
+                            class="card-menu-trigger text-secondary border-0 bg-transparent p-0"
+                            popovertarget="{{ person_menu_id }}"
+                            aria-label="Person affinity actions for {{ person_item.name }}"
+                        >...</button>
+                        <div id="{{ person_menu_id }}" popover class="card-menu-panel">
+                            <div class="card-menu-view" data-menu-view="root">
+                                <button
+                                    type="button"
+                                    class="card-menu-item d-flex justify-content-between align-items-center"
+                                    data-menu-open="rating"
+                                >
+                                    <span>Affinity</span>
+                                    {% if person_item.affinity_rating %}
+                                    <span class="small text-secondary">{{ "%.1f"|format(person_item.affinity_rating / 2) }}★</span>
+                                    {% else %}
+                                    <span class="text-secondary">›</span>
+                                    {% endif %}
+                                </button>
+                            </div>
 
-                    {% if person_item.primary_profession %}
-                    <div class="text-secondary fs-4 mb-4">{{ person_item.primary_profession }}</div>
-                    {% endif %}
-
-                    {% if person_item.known_for_items %}
-                    <div class="rounded-4 border border-secondary-subtle bg-body p-4">
-                        <div class="text-uppercase small text-secondary mb-3">Known for</div>
-                        <div class="d-flex flex-wrap gap-2">
-                            {% for item in person_item.known_for_items %}
-                            <a
-                                href="/titles/{{ item.tconst }}?return_to={{ person_return_to | urlencode }}"
-                                class="badge text-bg-dark border border-secondary-subtle text-decoration-none px-3 py-2"
-                            >
-                                {{ item.title }}{% if item.start_year %} · {{ item.start_year }}{% endif %}
-                            </a>
-                            {% endfor %}
+                            <div class="card-menu-view d-none" data-menu-view="rating">
+                                <button type="button" class="card-menu-item d-flex align-items-center gap-2" data-menu-back>
+                                    <span class="text-secondary">‹</span>
+                                    <span>Back</span>
+                                </button>
+                                <div class="card-menu-label">Your affinity</div>
+                                {% if person_item.affinity_rating %}
+                                <div class="card-menu-current-rating">
+                                    Current {{ person_item.affinity_rating }}/10
+                                </div>
+                                {% endif %}
+                                {% for rating_value in range(10, 0, -1) %}
+                                {% set full_stars = rating_value // 2 %}
+                                {% set has_half_star = rating_value % 2 == 1 %}
+                                {% set empty_stars = 5 - full_stars - (1 if has_half_star else 0) %}
+                                <form action="/ui/people/rating" method="post" class="m-0">
+                                    <input type="hidden" name="nconst" value="{{ person_item.nconst }}">
+                                    <input type="hidden" name="rating" value="{{ rating_value }}">
+                                    <input type="hidden" name="return_to" value="{{ person_return_to }}">
+                                    <button type="submit" class="card-menu-item d-flex justify-content-between align-items-center">
+                                        <span class="card-rating-stars">
+                                            {{ "★" * full_stars }}{% if has_half_star %}½{% endif %}{{ "☆" * empty_stars }}
+                                        </span>
+                                        <span class="small text-secondary">{{ "%.1f"|format(rating_value / 2) }}</span>
+                                    </button>
+                                </form>
+                                {% endfor %}
+                                {% if person_item.affinity_rating %}
+                                <div class="border-top border-secondary-subtle my-1"></div>
+                                <form action="/ui/people/rating" method="post" class="m-0">
+                                    <input type="hidden" name="nconst" value="{{ person_item.nconst }}">
+                                    <input type="hidden" name="rating" value="0">
+                                    <input type="hidden" name="return_to" value="{{ person_return_to }}">
+                                    <button type="submit" class="card-menu-item text-secondary">Clear affinity</button>
+                                </form>
+                                {% endif %}
+                            </div>
                         </div>
                     </div>
-                    {% endif %}
                 </div>
+
+                {% if person_item.primary_profession %}
+                <div class="text-secondary fs-4 mb-4">{{ person_item.primary_profession | replace(", ", ",") | replace(",", ", ") }}</div>
+                {% endif %}
+
+                {% if person_item.known_for_items %}
+                <div class="rounded-4 border border-secondary-subtle bg-body p-4 mb-4">
+                    <div class="text-uppercase small mb-3" style="color: #b56a33;">Known for</div>
+                    <div class="d-flex flex-wrap gap-2">
+                        {% for item in person_item.known_for_items %}
+                        <a
+                            href="/titles/{{ item.tconst }}?return_to={{ person_return_to | urlencode }}"
+                            class="badge text-bg-dark border border-secondary-subtle text-decoration-none px-3 py-2"
+                        >
+                            {{ item.title }}{% if item.start_year %} · {{ item.start_year }}{% endif %}
+                        </a>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endif %}
             </div>
+
+            {% if person_item.biography and person_item.biography.text %}
+            <div class="mb-2">
+                <div class="text-uppercase small mb-3" style="color: #b56a33;">BIOGRAPHY</div>
+                <div class="fs-6 lh-lg" style="color: #b8bec5; white-space: pre-line;">{{ person_item.biography.text }}</div>
+            </div>
+            {% endif %}
+
+            <div class="clearfix"></div>
         </div>
     </div>
 </section>
@@ -64,7 +147,7 @@
     <div class="card bg-black border-secondary-subtle">
         <div class="card-body p-4">
             <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-4">
-                <div class="text-uppercase small text-secondary">Filmography</div>
+                <div class="text-uppercase small" style="color: #b56a33;">Filmography</div>
                 <span class="badge text-bg-dark border border-secondary-subtle">{{ person_item.credit_count or 0 }} total credits</span>
             </div>
 
@@ -72,7 +155,7 @@
                 {% for section in filmography_sections if section["items"] %}
                 <div class="col-12 col-xl-6">
                     <div class="rounded-4 border border-secondary-subtle bg-body h-100 p-3">
-                        <div class="text-uppercase small text-secondary mb-3">{{ section["title"] }}</div>
+                        <div class="text-uppercase small mb-3" style="color: #b56a33;">{{ section["title"] }}</div>
                         <div class="d-grid gap-2">
                             {% for item in section["items"][:20] %}
                             <a

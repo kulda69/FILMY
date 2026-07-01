@@ -15,6 +15,8 @@ class UiConfig:
     continue_watching_limit: int = 12
     my_lists_selected_limit: int = 50
     recently_watched_days: int = 183
+    hot_watchlist_limit: int = 50
+    search_recall_limit: int = 500
     tmdb_primary_language: str = "EN"
 
     @property
@@ -49,6 +51,8 @@ def load_ui_config(path: Path = CONFIG_PATH) -> UiConfig:
         continue_watching_limit=max(1, int(raw.get("continue_watching_limit", 12))),
         my_lists_selected_limit=max(1, int(raw.get("my_lists_selected_limit", 50))),
         recently_watched_days=max(1, int(raw.get("recently_watched_days", 183))),
+        hot_watchlist_limit=max(1, int(raw.get("hot_watchlist_limit", 50))),
+        search_recall_limit=max(1, int(raw.get("search_recall_limit", 500))),
         tmdb_primary_language=primary_language,
     )
 

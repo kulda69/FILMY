@@ -453,6 +453,98 @@ def _ensure_title_alias_lookup(conn: duckdb.DuckDBPyConnection) -> None:
     _ensure_title_alias_lookup_indexes(conn)
 
 
+def _normalize_search_query_text(value: str | None) -> str:
+    return " ".join(str(value or "").strip().split())
+
+
+def _search_recall_entry_id(entity_type: str, query_text_fold: str, target_id: str) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"search-recall|{entity_type}|{query_text_fold}|{target_id}"))
+
+
+def _prune_search_recall_entries(conn: duckdb.DuckDBPyConnection, limit: int) -> None:
+    conn.execute(
+        """
+        DELETE FROM app.search_recall
+        WHERE id IN (
+            SELECT id
+            FROM app.search_recall
+            ORDER BY last_searched_at DESC, hit_count DESC, first_searched_at DESC, id DESC
+            OFFSET ?
+        )
+        """,
+        [max(limit, 0)],
+    )
+
+
+def _record_search_recall_entry(
+    *,
+    entity_type: str,
+    query: str,
+    target_id: str,
+    target_label: str | None,
+    target_title_type: str | None = None,
+    matched_alias_title: str | None = None,
+    fuzzy_score: float | None = None,
+) -> None:
+    """Remember one successful query-to-target mapping for fast repeated lookup.
+
+    The table is intentionally small and lossy: it is not meant to be a full
+    search log, only a shortcut layer for repeated searches that recently led
+    to a concrete IMDb title or person.
+    """
+    query_text = _normalize_search_query_text(query)
+    query_key = _normalize_match_key(query)
+    if not query_text or not query_key or not target_id:
+        return
+
+    now = _now_iso()
+    query_text_fold = query_text.casefold()
+    recall_id = _search_recall_entry_id(entity_type, query_text_fold, target_id)
+    recall_limit = get_ui_config().search_recall_limit
+
+    def write(conn: duckdb.DuckDBPyConnection) -> None:
+        conn.execute(
+            """
+            INSERT INTO app.search_recall (
+                id, entity_type, query_text, query_text_fold, query_key, target_id, target_label,
+                target_title_type, matched_alias_title, fuzzy_score, first_searched_at, last_searched_at, hit_count
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            ON CONFLICT (id) DO UPDATE SET
+                query_text = excluded.query_text,
+                query_key = excluded.query_key,
+                target_label = excluded.target_label,
+                target_title_type = excluded.target_title_type,
+                matched_alias_title = excluded.matched_alias_title,
+                fuzzy_score = excluded.fuzzy_score,
+                last_searched_at = excluded.last_searched_at,
+                hit_count = app.search_recall.hit_count + 1
+            """,
+            [
+                recall_id,
+                entity_type,
+                query_text,
+                query_text_fold,
+                query_key,
+                target_id,
+                target_label,
+                target_title_type,
+                matched_alias_title,
+                fuzzy_score,
+                now,
+                now,
+            ],
+        )
+        _prune_search_recall_entries(conn, recall_limit)
+
+    try:
+        _run_duckdb_write(write)
+    except duckdb.Error:
+        # Search recall is only a speed-up layer. Lookup itself must stay usable
+        # even when a transient write lock prevents updating the recall table.
+        return
+
+
 def clear_title_presentation_cache() -> None:
     _get_title_presentation_cached.cache_clear()
 
@@ -652,10 +744,128 @@ def describe_title_by_query(query: str, title_type: str | None = None) -> dict[s
 
 
 def describe_person_by_query(query: str) -> dict[str, Any] | None:
-    lookup = lookup_person_by_query(query=query, candidates_limit=5)
-    if lookup is None:
+    from filmy.db_people import describe_person_by_query as _impl
+
+    return _impl(query)
+
+
+def _title_candidate_from_presentation(
+    presentation: dict[str, Any],
+    *,
+    fuzzy_score: float | None = None,
+    matched_alias_title: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "tconst": presentation["tconst"],
+        "primary_title": presentation.get("title"),
+        "original_title": presentation.get("original_title"),
+        "title_type": presentation.get("title_type"),
+        "start_year": presentation.get("year"),
+        "runtime_minutes": presentation.get("runtime_minutes"),
+        "genres": presentation.get("genres") or [],
+        "average_rating": presentation.get("imdb_rating"),
+        "num_votes": presentation.get("imdb_votes"),
+        "library": presentation.get("library_state") or {},
+        "matched_alias_title": matched_alias_title,
+        "fuzzy_score": fuzzy_score,
+    }
+
+
+def _person_candidate_from_presentation(
+    presentation: dict[str, Any],
+    *,
+    fuzzy_score: float | None = None,
+) -> dict[str, Any]:
+    return {
+        "nconst": presentation["nconst"],
+        "primary_name": presentation.get("name"),
+        "birth_year": presentation.get("birth_year"),
+        "death_year": presentation.get("death_year"),
+        "primary_profession": presentation.get("primary_profession"),
+        "known_for_titles": presentation.get("known_for_titles"),
+        "filmography": presentation.get("filmography") or {},
+        "credit_count": presentation.get("credit_count") or 0,
+        "fuzzy_score": fuzzy_score,
+    }
+
+
+def _lookup_title_from_search_recall(
+    query: str,
+    *,
+    title_type: str | None,
+    candidates_limit: int,
+) -> dict[str, Any] | None:
+    """Try to satisfy title lookup from the small recent-search recall table first."""
+    query_key = _normalize_match_key(query)
+    query_text = _normalize_search_query_text(query)
+    if not query_key or not query_text:
         return None
-    return lookup["selected"]
+
+    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
+        row = conn.execute(
+            """
+            SELECT
+                s.target_id,
+                s.fuzzy_score,
+                s.matched_alias_title
+            FROM app.search_recall AS s
+            JOIN app.catalog_titles AS t ON t.tconst = s.target_id
+            WHERE s.entity_type = 'title'
+              AND s.query_key = ?
+              AND (? IS NULL OR t.title_type = ?)
+            ORDER BY
+                CASE WHEN s.query_text_fold = ? THEN 0 ELSE 1 END,
+                s.last_searched_at DESC,
+                s.hit_count DESC,
+                s.first_searched_at DESC
+            LIMIT 1
+            """,
+            [query_key, title_type, title_type, query_text.casefold()],
+        ).fetchone()
+    if row is None:
+        return None
+
+    presentation = get_title_presentation(row[0])
+    if presentation is None:
+        return None
+
+    candidate = _title_candidate_from_presentation(
+        presentation,
+        fuzzy_score=row[1],
+        matched_alias_title=row[2],
+    )
+    result = _build_title_lookup_result(
+        query=query,
+        title_type=title_type,
+        selected=candidate,
+        candidates=[candidate],
+        candidates_limit=candidates_limit,
+    )
+    if result is not None:
+        _record_search_recall_entry(
+            entity_type="title",
+            query=query,
+            target_id=str(candidate["tconst"]),
+            target_label=str(candidate.get("primary_title") or ""),
+            target_title_type=str(candidate.get("title_type") or ""),
+            matched_alias_title=candidate.get("matched_alias_title"),
+            fuzzy_score=candidate.get("fuzzy_score"),
+        )
+    return result
+
+
+def _remember_title_lookup(query: str, selected: dict[str, Any]) -> None:
+    if not _is_confident_lookup(query, selected) and not _is_direct_enough_lookup(query, selected):
+        return
+    _record_search_recall_entry(
+        entity_type="title",
+        query=query,
+        target_id=str(selected["tconst"]),
+        target_label=str(selected.get("primary_title") or ""),
+        target_title_type=str(selected.get("title_type") or ""),
+        matched_alias_title=selected.get("matched_alias_title"),
+        fuzzy_score=selected.get("fuzzy_score"),
+    )
 
 
 def lookup_title_by_query(
@@ -663,6 +873,10 @@ def lookup_title_by_query(
     title_type: str | None = None,
     candidates_limit: int = 5,
 ) -> dict[str, Any] | None:
+    recalled = _lookup_title_from_search_recall(query, title_type=title_type, candidates_limit=candidates_limit)
+    if recalled is not None:
+        return recalled
+
     candidates = _search_catalog_for_lookup(query=query, title_type=title_type, limit=max(candidates_limit, 1) * 5)
     alias_candidates = _search_catalog_aliases_for_lookup(query=query, title_type=title_type, limit=max(candidates_limit, 1) * 5)
     candidates = _merge_lookup_candidates(candidates, alias_candidates)
@@ -671,13 +885,16 @@ def lookup_title_by_query(
     if candidates:
         direct_selected = _pick_best_title_match(query, candidates)
         if _is_direct_enough_lookup(query, direct_selected):
-            return _build_title_lookup_result(
+            result = _build_title_lookup_result(
                 query=query,
                 title_type=title_type,
                 selected=direct_selected,
                 candidates=candidates,
                 candidates_limit=candidates_limit,
             )
+            if result is not None:
+                _remember_title_lookup(query, direct_selected)
+            return result
     should_expand = not candidates or _should_expand_to_fuzzy(query, candidates)
     if should_expand:
         fuzzy_candidates = _search_catalog_for_lookup_fuzzy(query=query, title_type=title_type, limit=max(candidates_limit, 1) * 5)
@@ -706,72 +923,28 @@ def lookup_title_by_query(
         selected = _pick_best_title_match(query, candidates)
     else:
         selected = _pick_best_title_match(query, candidates)
-    return _build_title_lookup_result(
+    result = _build_title_lookup_result(
         query=query,
         title_type=title_type,
         selected=selected,
         candidates=candidates,
         candidates_limit=candidates_limit,
     )
+    if result is not None:
+        _remember_title_lookup(query, selected)
+    return result
 
 
 def lookup_person_by_query(query: str, candidates_limit: int = 5) -> dict[str, Any] | None:
-    candidates = _search_people_for_lookup(query=query, limit=max(candidates_limit, 1) * 5)
-    query_key = _normalize_match_key(query)
-    should_expand = not candidates or _should_expand_people_to_fuzzy(query, candidates)
-    if should_expand:
-        fuzzy_candidates = _search_people_for_lookup_fuzzy(query=query, limit=max(candidates_limit, 1) * 5)
-        candidates = _merge_lookup_candidates(candidates, fuzzy_candidates)
-    if not candidates:
-        return None
+    from filmy.db_people import lookup_person_by_query as _impl
 
-    selected = _pick_best_person_match(query, candidates)
-    if not _is_confident_person_lookup(query, selected):
-        wide_candidates = _search_people_for_lookup_levenshtein(query=query, limit=max(candidates_limit, 1) * 5)
-        candidates = _merge_lookup_candidates(candidates, wide_candidates)
-        if not candidates:
-            return None
-        selected = _pick_best_person_match(query, candidates)
-    else:
-        selected = _pick_best_person_match(query, candidates)
-
-    presentation = get_person_presentation(selected["nconst"])
-    if presentation is None:
-        return None
-
-    presentation["query"] = query
-    presentation["match"] = _build_person_lookup_candidate(selected, query=query, is_selected=True)
-
-    selected_key = selected["nconst"]
-    ordered_candidates = sorted(
-        candidates,
-        key=lambda item: (0 if item["nconst"] == selected_key else 1, -(item.get("birth_year") or 0), item["primary_name"]),
-    )
-    return {
-        "query": query,
-        "selected_nconst": selected_key,
-        "selected": presentation,
-        "candidates": [
-            _build_person_lookup_candidate(candidate, query=query, is_selected=(candidate["nconst"] == selected_key))
-            for candidate in ordered_candidates[: max(candidates_limit, 1)]
-        ],
-        "candidate_count": len(candidates),
-    }
+    return _impl(query, candidates_limit=candidates_limit)
 
 
 def get_person_presentation(nconst: str) -> dict[str, Any] | None:
-    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
-        cached = _load_cached_person_presentation(conn, nconst)
-        if cached is not None:
-            return cached
-        presentation = _fetch_person_cache_source_detail(conn, nconst)
-        if presentation is None:
-            return None
+    from filmy.db_people import get_person_presentation as _impl
 
-    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
-        cache_fingerprint = _person_cache_source_fingerprint(conn, nconst, presentation)
-    _store_cached_person_presentation(nconst, presentation, cache_fingerprint)
-    return presentation
+    return _impl(nconst)
 
 
 def _fetch_known_for_items(conn: duckdb.DuckDBPyConnection, known_for_titles: str | None) -> list[dict[str, Any]]:
@@ -806,58 +979,9 @@ def _fetch_known_for_items(conn: duckdb.DuckDBPyConnection, known_for_titles: st
 
 
 def render_person_presentation(presentation: dict[str, Any]) -> str:
-    lines: list[str] = []
-    lines.append(str(presentation["name"]))
+    from filmy.db_people import render_person_presentation as _impl
 
-    meta_bits: list[str] = []
-    if presentation.get("birth_year") is not None:
-        meta_bits.append(str(presentation["birth_year"]))
-    if presentation.get("death_year") is not None:
-        meta_bits.append(str(presentation["death_year"]))
-    if presentation.get("primary_profession"):
-        meta_bits.append(str(presentation["primary_profession"]))
-    if meta_bits:
-        lines.append(", ".join(meta_bits))
-
-    known_for_items = presentation.get("known_for_items") or []
-    known_for = presentation.get("known_for_titles") or ""
-    if known_for_items:
-        lines.append("")
-        lines.append("Known for")
-        lines.append(", ".join(item["title"] for item in known_for_items))
-    elif known_for:
-        lines.append("")
-        lines.append("Known for")
-        lines.append(known_for)
-
-    filmography = presentation.get("filmography") or {}
-    sections = [
-        ("Directed", filmography.get("directed") or []),
-        ("Created by", filmography.get("created") or []),
-        ("Written", filmography.get("written") or []),
-        ("Acted in", filmography.get("acted") or []),
-    ]
-    for section_title, items in sections:
-        if not items:
-            continue
-        lines.append("")
-        lines.append(section_title)
-        for item in items[:20]:
-            year = f" ({item['start_year']})" if item.get("start_year") is not None else ""
-            role = f" as {item['character']}" if item.get("character") else ""
-            lines.append(f"{item['title']}{year}{role}")
-
-    other_items = filmography.get("other") or []
-    if other_items:
-        lines.append("")
-        lines.append("Other credits")
-        for item in other_items[:10]:
-            year = f" ({item['start_year']})" if item.get("start_year") is not None else ""
-            lines.append(f"{item['title']}{year}")
-
-    lines.append("")
-    lines.append(f"Total credits: {presentation.get('credit_count') or 0}")
-    return "\n".join(lines)
+    return _impl(presentation)
 
 
 @lru_cache(maxsize=256)
@@ -1063,6 +1187,36 @@ def _person_portrait_url(nconst: str) -> str | None:
         return None
 
 
+def _person_biography_path(nconst: str) -> Path:
+    return PEOPLE_ASSETS_DIR / nconst / "biography.json"
+
+
+def _person_biography_meta(nconst: str) -> dict[str, Any] | None:
+    path = _person_biography_path(nconst)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _person_biography_payload(nconst: str) -> dict[str, Any] | None:
+    meta = _person_biography_meta(nconst)
+    if not meta or str(meta.get("status") or "") != "fetched":
+        return None
+    biography = str(meta.get("biography") or "").strip()
+    if not biography:
+        return None
+    return {
+        "text": biography,
+        "locale": meta.get("locale"),
+        "tmdb_person_id": meta.get("tmdb_person_id"),
+        "updated_at": meta.get("updated_at"),
+    }
+
+
 def _title_detail_cache_status(tconst: str, source_fingerprint: str) -> str:
     cache_path = _title_detail_cache_path(tconst)
     if not cache_path.exists():
@@ -1095,6 +1249,22 @@ def _person_detail_cache_status(nconst: str, source_fingerprint: str) -> str:
     if cached.get("source_fingerprint") != source_fingerprint:
         return "stale"
     return "ready"
+
+
+def _get_person_affinity_rating(conn: duckdb.DuckDBPyConnection, nconst: str) -> int:
+    row = conn.execute(
+        """
+        SELECT affinity_rating
+        FROM app.user_people
+        WHERE nconst = ?
+        ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
+        LIMIT 1
+        """,
+        [nconst],
+    ).fetchone()
+    if row is None or row[0] is None:
+        return 0
+    return int(row[0])
 
 
 def _load_cached_title_presentation(
@@ -1242,6 +1412,8 @@ def _person_cache_source_fingerprint(
             "credit_count": presentation.get("credit_count"),
             "portrait_url": presentation.get("portrait_url"),
             "has_portrait": presentation.get("has_portrait"),
+            "affinity_rating": presentation.get("affinity_rating") or 0,
+            "biography": presentation.get("biography") or None,
         },
     }
     digest = hashlib.sha256(json.dumps(_jsonify_for_cache(payload), sort_keys=True, ensure_ascii=False).encode("utf-8"))
@@ -1292,6 +1464,8 @@ def _fetch_person_cache_source_detail(conn: duckdb.DuckDBPyConnection, nconst: s
         [nconst],
     ).fetchall()
 
+    affinity_rating = _get_person_affinity_rating(conn, person[0])
+
     filmography: dict[str, list[dict[str, Any]]] = {
         "directed": [],
         "written": [],
@@ -1329,6 +1503,19 @@ def _fetch_person_cache_source_detail(conn: duckdb.DuckDBPyConnection, nconst: s
         else:
             filmography["other"].append(entry)
 
+    if affinity_rating > 0:
+        for episode_series_entry in _fetch_person_episode_series_credits(conn, nconst, existing_tconsts=seen_titles):
+            filmography["acted"].append(episode_series_entry)
+            seen_titles.add(str(episode_series_entry["tconst"]))
+
+        filmography["acted"].sort(
+            key=lambda item: (
+                item.get("start_year") or 0,
+                item.get("title") or "",
+            ),
+            reverse=True,
+        )
+
     presentation = {
         "nconst": person[0],
         "name": person[1],
@@ -1341,9 +1528,79 @@ def _fetch_person_cache_source_detail(conn: duckdb.DuckDBPyConnection, nconst: s
         "credit_count": credit_count,
         "portrait_url": _person_portrait_url(person[0]),
         "has_portrait": _person_portrait_path(person[0]) is not None,
+        "affinity_rating": affinity_rating,
+        "biography": _person_biography_payload(person[0]),
     }
     presentation["display_text"] = render_person_presentation(presentation)
     return presentation
+
+
+def _fetch_person_episode_series_credits(
+    conn: duckdb.DuckDBPyConnection,
+    nconst: str,
+    *,
+    existing_tconsts: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Aggregate episode-only acting credits to their parent series.
+
+    This is intentionally reserved for affinity-rated people. The common person
+    detail path keeps using the faster `app.title_credits` materialization,
+    while rated people get a richer filmography that can surface TV series
+    where the actor appears only on episode rows in IMDb data.
+    """
+
+    rows = conn.execute(
+        """
+        WITH existing_series AS (
+            SELECT DISTINCT tconst
+            FROM app.title_credits
+            WHERE nconst = ? AND credit_group = 'cast'
+        )
+        SELECT
+            e.parent_tconst AS series_tconst,
+            s.primary_title,
+            s.original_title,
+            s.start_year,
+            s.title_type,
+            COUNT(*) AS episode_count,
+            MIN(p.ordering) AS best_ordering
+        FROM raw.title_principals AS p
+        JOIN raw.title_episode AS e ON e.tconst = p.tconst
+        JOIN app.catalog_titles AS s ON s.tconst = e.parent_tconst
+        LEFT JOIN existing_series AS x ON x.tconst = e.parent_tconst
+        WHERE p.nconst = ?
+          AND p.category IN ('actor', 'actress')
+          AND x.tconst IS NULL
+        GROUP BY 1, 2, 3, 4, 5
+        ORDER BY s.start_year DESC NULLS LAST, best_ordering, s.primary_title
+        LIMIT 200
+        """,
+        [nconst, nconst],
+    ).fetchall()
+
+    blocked = existing_tconsts or set()
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        series_tconst = str(row[0])
+        if series_tconst in blocked:
+            continue
+        episode_count = int(row[5] or 0)
+        if episode_count <= 0:
+            continue
+        items.append(
+            {
+                "tconst": series_tconst,
+                "title": row[1],
+                "original_title": row[2],
+                "start_year": row[3],
+                "title_type": row[4],
+                "credit_group": "cast",
+                "category": "actor",
+                "job": f"{episode_count} episodes",
+                "character": None,
+            }
+        )
+    return items
 
 
 def _fetch_title_cache_source_detail(conn: duckdb.DuckDBPyConnection, tconst: str) -> dict[str, Any] | None:
@@ -1462,29 +1719,9 @@ def _jsonify_for_cache(value: Any) -> Any:
 
 
 def update_content_state(tconst: str, interest_state: str) -> dict[str, Any]:
-    now = _now_iso()
-    def write(conn: duckdb.DuckDBPyConnection) -> None:
-        conn.execute(
-            """
-            INSERT INTO app.content_state (tconst, interest_state, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT (tconst) DO UPDATE SET
-                interest_state = excluded.interest_state,
-                updated_at = excluded.updated_at,
-                last_previewed_at = CASE
-                    WHEN excluded.interest_state = 'previewed' THEN excluded.updated_at
-                    ELSE app.content_state.last_previewed_at
-                END,
-                last_watched_at = CASE
-                    WHEN excluded.interest_state = 'watched' THEN excluded.updated_at
-                    ELSE app.content_state.last_watched_at
-                END
-            """,
-            [tconst, interest_state, now],
-        )
-    _run_duckdb_write(write)
-    clear_title_presentation_cache()
-    return {"tconst": tconst, "interest_state": interest_state, "updated_at": now}
+    from filmy.db_library import update_content_state as _impl
+
+    return _impl(tconst, interest_state)
 
 
 def set_watchlist_state(
@@ -1493,148 +1730,33 @@ def set_watchlist_state(
     in_watchlist: bool,
     notes: str | None = None,
 ) -> dict[str, Any]:
-    """Add or remove a title or episode from the local watchlist."""
-    detail = get_content_detail(tconst)
-    if detail is None:
-        raise ValueError("Titul nebyl nalezen.")
+    from filmy.db_library import set_watchlist_state as _impl
 
-    now = _now_iso()
-    media = _build_local_media_identity(detail)
-    canonical_key = _canonical_media_key(
-        media["media_type"],
-        media["tconst"],
-        media["imdb_id"],
-        media["tmdb_id"],
-        None,
-        media["season_number"],
-        media["episode_number"],
-    )
+    return _impl(tconst, in_watchlist=in_watchlist, notes=notes)
 
-    def write(conn: duckdb.DuckDBPyConnection) -> None:
-        _ensure_user_list(conn, "watchlist", "Watchlist", "watchlist", "local_app", "system:watchlist", now)
-        if in_watchlist:
-            _upsert_user_list_item(
-                conn,
-                list_id="watchlist",
-                canonical_key=canonical_key,
-                tconst=media["tconst"],
-                media_type=media["media_type"],
-                imdb_id=media["imdb_id"],
-                tmdb_id=media["tmdb_id"],
-                trakt_id=None,
-                parent_tconst=media["parent_tconst"],
-                parent_title=media["parent_title"],
-                title=media["title"],
-                season_number=media["season_number"],
-                episode_number=media["episode_number"],
-                rank=None,
-                added_at=now,
-                notes=notes,
-                source_origin="local_app",
-                source_ref=f"manual_watchlist:{tconst}",
-                now=now,
-            )
-        else:
-            conn.execute(
-                """
-                UPDATE app.user_list_items
-                SET is_archived = TRUE, updated_at = ?
-                WHERE list_id = 'watchlist' AND canonical_key = ?
-                """,
-                [now, canonical_key],
-            )
-    _run_duckdb_write(write)
 
-    clear_title_presentation_cache()
-    return {
-        "tconst": tconst,
-        "in_watchlist": in_watchlist,
-        "updated_at": now,
-        "library": _get_library_summary_for_tconst(tconst),
-    }
+def add_title_to_user_list(tconst: str, list_id: str, *, notes: str | None = None) -> dict[str, Any]:
+    from filmy.db_library import add_title_to_user_list as _impl
+
+    return _impl(tconst, list_id, notes=notes)
 
 
 def set_user_rating(tconst: str, rating: int) -> dict[str, Any]:
-    """Create or update the local rating for a title or episode."""
-    if rating < 1 or rating > 10:
-        raise ValueError("Rating musí být mezi 1 a 10.")
+    from filmy.db_library import set_user_rating as _impl
 
-    detail = get_content_detail(tconst)
-    if detail is None:
-        raise ValueError("Titul nebyl nalezen.")
+    return _impl(tconst, rating)
 
-    now = _now_iso()
-    media = _build_local_media_identity(detail)
-    canonical_key = _canonical_media_key(
-        media["media_type"],
-        media["tconst"],
-        media["imdb_id"],
-        media["tmdb_id"],
-        None,
-        media["season_number"],
-        media["episode_number"],
-    )
 
-    def write(conn: duckdb.DuckDBPyConnection) -> None:
-        _upsert_user_rating(
-            conn,
-            canonical_key=canonical_key,
-            tconst=media["tconst"],
-            media_type=media["media_type"],
-            imdb_id=media["imdb_id"],
-            tmdb_id=media["tmdb_id"],
-            trakt_id=None,
-            parent_tconst=media["parent_tconst"],
-            parent_title=media["parent_title"],
-            title=media["title"],
-            season_number=media["season_number"],
-            episode_number=media["episode_number"],
-            rating=rating,
-            rated_at=now,
-            source_origin="local_app",
-            source_ref=f"manual_rating:{tconst}",
-            now=now,
-        )
-    _run_duckdb_write(write)
+def set_person_affinity_rating(nconst: str, rating: int) -> dict[str, Any]:
+    from filmy.db_library import set_person_affinity_rating as _impl
 
-    clear_title_presentation_cache()
-    return {
-        "tconst": tconst,
-        "rating": rating,
-        "rated_at": now,
-        "library": _get_library_summary_for_tconst(tconst),
-    }
+    return _impl(nconst, rating)
 
 
 def clear_user_rating(tconst: str) -> dict[str, Any]:
-    """Delete the local rating for a title or episode."""
-    detail = get_content_detail(tconst)
-    if detail is None:
-        raise ValueError("Titul nebyl nalezen.")
+    from filmy.db_library import clear_user_rating as _impl
 
-    media = _build_local_media_identity(detail)
-    canonical_key = _canonical_media_key(
-        media["media_type"],
-        media["tconst"],
-        media["imdb_id"],
-        media["tmdb_id"],
-        None,
-        media["season_number"],
-        media["episode_number"],
-    )
-    now = _now_iso()
-
-    def write(conn: duckdb.DuckDBPyConnection) -> None:
-        conn.execute("DELETE FROM app.user_ratings WHERE canonical_key = ?", [canonical_key])
-    _run_duckdb_write(write)
-
-    clear_title_presentation_cache()
-    return {
-        "tconst": tconst,
-        "rating": None,
-        "updated_at": now,
-        "library": _get_library_summary_for_tconst(tconst),
-    }
+    return _impl(tconst)
 
 
 def get_favorite_genres(active_only: bool = True) -> list[dict[str, Any]]:
@@ -2385,61 +2507,9 @@ def record_watch_event(
     notes: str | None = None,
     add_to_watched_list: bool = False,
 ) -> dict[str, Any]:
-    """Append a local watch event and mark the content as watched."""
-    detail = get_content_detail(tconst)
-    if detail is None:
-        raise ValueError("Titul nebyl nalezen.")
+    from filmy.db_library import record_watch_event as _impl
 
-    now = _now_iso()
-    event_id = str(uuid.uuid4())
-    event_scope = "episode" if detail["kind"] == "episode" else "title"
-    effective_watched_on = watched_on or now[:10]
-    try:
-        datetime.strptime(effective_watched_on, "%Y-%m-%d")
-    except ValueError as exc:
-        raise ValueError("watched_on musí být ISO datum ve formátu YYYY-MM-DD.") from exc
-
-    def write(conn: duckdb.DuckDBPyConnection) -> None:
-        conn.execute(
-            """
-            INSERT INTO app.watch_events (
-                id,
-                tconst,
-                event_scope,
-                watched_on,
-                source,
-                batch_id,
-                import_row_id,
-                rating,
-                notes,
-                created_at
-            )
-            VALUES (?, ?, ?, ?, 'local_app', NULL, NULL, NULL, ?, ?)
-            """,
-            [event_id, tconst, event_scope, effective_watched_on, notes, now],
-        )
-        conn.execute(
-            """
-            INSERT INTO app.content_state (tconst, interest_state, last_watched_at, updated_at)
-            VALUES (?, 'watched', ?, ?)
-            ON CONFLICT (tconst) DO UPDATE SET
-                interest_state = 'watched',
-                last_watched_at = excluded.last_watched_at,
-                updated_at = excluded.updated_at
-            """,
-            [tconst, now, now],
-        )
-    _run_duckdb_write(write)
-
-    clear_title_presentation_cache()
-    return {
-        "id": event_id,
-        "tconst": tconst,
-        "event_scope": event_scope,
-        "watched_on": effective_watched_on,
-        "created_at": now,
-        "library": _get_library_summary_for_tconst(tconst),
-    }
+    return _impl(tconst, watched_on=watched_on, notes=notes, add_to_watched_list=add_to_watched_list)
 
 
 def record_watch_events_through_episode(
@@ -2448,408 +2518,39 @@ def record_watch_events_through_episode(
     watched_on: str | None = None,
     notes: str | None = None,
 ) -> dict[str, Any]:
-    """Mark all missing episodes up to and including the target episode as watched."""
-    detail = get_content_detail(episode_tconst)
-    if detail is None or detail.get("kind") != "episode":
-        raise ValueError("Epizoda nebyla nalezena.")
+    from filmy.db_library import record_watch_events_through_episode as _impl
 
-    series_tconst = detail.get("series_tconst")
-    season_number = detail.get("season_number")
-    episode_number = detail.get("episode_number")
-    if not series_tconst or season_number is None or episode_number is None:
-        raise ValueError("Epizoda nema uplny serialovy kontext.")
-
-    now = _now_iso()
-    effective_watched_on = watched_on or now[:10]
-    try:
-        datetime.strptime(effective_watched_on, "%Y-%m-%d")
-    except ValueError as exc:
-        raise ValueError("watched_on musi byt ISO datum ve formatu YYYY-MM-DD.") from exc
-
-    def write(conn: duckdb.DuckDBPyConnection) -> list[str]:
-        episode_rows = conn.execute(
-            """
-            SELECT e.episode_tconst
-            FROM app.catalog_episodes AS e
-            WHERE e.series_tconst = ?
-              AND (
-                    e.season_number < ?
-                    OR (e.season_number = ? AND e.episode_number <= ?)
-              )
-              AND NOT EXISTS (
-                    SELECT 1
-                    FROM app.watch_events AS w
-                    WHERE w.tconst = e.episode_tconst
-              )
-            ORDER BY e.season_number NULLS LAST, e.episode_number NULLS LAST, e.episode_tconst
-            """,
-            [series_tconst, season_number, season_number, episode_number],
-        ).fetchall()
-        watched_ids = [row[0] for row in episode_rows]
-        if not watched_ids:
-            return []
-
-        conn.executemany(
-            """
-            INSERT INTO app.watch_events (
-                id,
-                tconst,
-                event_scope,
-                watched_on,
-                source,
-                batch_id,
-                import_row_id,
-                rating,
-                notes,
-                created_at
-            )
-            VALUES (?, ?, 'episode', ?, 'local_app', NULL, NULL, NULL, ?, ?)
-            """,
-            [[str(uuid.uuid4()), tconst, effective_watched_on, notes, now] for tconst in watched_ids],
-        )
-        conn.executemany(
-            """
-            INSERT INTO app.content_state (tconst, interest_state, last_watched_at, updated_at)
-            VALUES (?, 'watched', ?, ?)
-            ON CONFLICT (tconst) DO UPDATE SET
-                interest_state = 'watched',
-                last_watched_at = excluded.last_watched_at,
-                updated_at = excluded.updated_at
-            """,
-            [[tconst, now, now] for tconst in watched_ids],
-        )
-        return watched_ids
-
-    watched_ids = _run_duckdb_write(write)
-
-    clear_title_presentation_cache()
-    return {
-        "series_tconst": series_tconst,
-        "target_episode_tconst": episode_tconst,
-        "watched_on": effective_watched_on,
-        "watched_count": len(watched_ids),
-        "watched_tconsts": watched_ids,
-        "library": _get_library_summary_for_tconst(series_tconst),
-    }
+    return _impl(episode_tconst, watched_on=watched_on, notes=notes)
 
 
 def delete_group_from_user_list(list_id: str, display_tconst: str) -> dict[str, Any]:
-    now = _now_iso()
-    result: dict[str, Any] = {"affected_rows": 0}
+    from filmy.db_library import delete_group_from_user_list as _impl
 
-    def write(conn: duckdb.DuckDBPyConnection) -> None:
-        list_row = conn.execute(
-            """
-            SELECT id, name, list_kind
-            FROM app.user_lists
-            WHERE id = ?
-            """,
-            [list_id],
-        ).fetchone()
-        if list_row is None:
-            raise ValueError("Seznam nebyl nalezen.")
-
-        affected = conn.execute(
-            """
-            UPDATE app.user_list_items
-            SET is_archived = TRUE, updated_at = ?
-            WHERE id IN (
-                SELECT i.id
-                FROM app.user_list_items AS i
-                LEFT JOIN app.catalog_episodes AS e ON e.episode_tconst = i.tconst
-                WHERE i.list_id = ?
-                  AND i.is_archived = FALSE
-                  AND COALESCE(e.series_tconst, i.tconst, i.parent_tconst) = ?
-            )
-            RETURNING id
-            """,
-            [now, list_id, display_tconst],
-        ).fetchall()
-        result["affected_rows"] = len(affected)
-
-    _run_duckdb_write(write)
-    clear_title_presentation_cache()
-    return {
-        "list_id": list_id,
-        "display_tconst": display_tconst,
-        "updated_at": now,
-        "affected_rows": int(result["affected_rows"]),
-    }
+    return _impl(list_id, display_tconst)
 
 
 def move_group_between_user_lists(source_list_id: str, target_list_id: str, display_tconst: str) -> dict[str, Any]:
-    if source_list_id == target_list_id:
-        raise ValueError("Zdrojový a cílový seznam jsou stejné.")
+    from filmy.db_library import move_group_between_user_lists as _impl
 
-    now = _now_iso()
-    result: dict[str, Any] = {"moved_rows": 0}
-
-    def write(conn: duckdb.DuckDBPyConnection) -> None:
-        source_list = conn.execute(
-            "SELECT id, name, list_kind FROM app.user_lists WHERE id = ?",
-            [source_list_id],
-        ).fetchone()
-        if source_list is None:
-            raise ValueError("Zdrojový seznam nebyl nalezen.")
-
-        target_list = conn.execute(
-            "SELECT id, name, list_kind FROM app.user_lists WHERE id = ?",
-            [target_list_id],
-        ).fetchone()
-        if target_list is None:
-            raise ValueError("Cílový seznam nebyl nalezen.")
-
-        rows = conn.execute(
-            """
-            SELECT
-                i.canonical_key,
-                i.tconst,
-                i.media_type,
-                i.imdb_id,
-                i.tmdb_id,
-                i.trakt_id,
-                i.parent_tconst,
-                i.parent_title,
-                i.title,
-                i.season_number,
-                i.episode_number,
-                i.rank,
-                i.added_at,
-                i.notes,
-                i.source_origin,
-                i.source_ref
-            FROM app.user_list_items AS i
-            LEFT JOIN app.catalog_episodes AS e ON e.episode_tconst = i.tconst
-            WHERE i.list_id = ?
-              AND i.is_archived = FALSE
-              AND COALESCE(e.series_tconst, i.tconst, i.parent_tconst) = ?
-            ORDER BY i.rank NULLS LAST, i.added_at DESC NULLS LAST, i.created_at DESC
-            """,
-            [source_list_id, display_tconst],
-        ).fetchall()
-        if not rows:
-            raise ValueError("V seznamu nebyla nalezena žádná položka k přesunu.")
-
-        for row in rows:
-            _upsert_user_list_item(
-                conn,
-                list_id=target_list_id,
-                canonical_key=row[0],
-                tconst=row[1],
-                media_type=row[2],
-                imdb_id=row[3],
-                tmdb_id=row[4],
-                trakt_id=row[5],
-                parent_tconst=row[6],
-                parent_title=row[7],
-                title=row[8],
-                season_number=row[9],
-                episode_number=row[10],
-                rank=row[11],
-                added_at=row[12],
-                notes=row[13],
-                source_origin=row[14],
-                source_ref=row[15],
-                now=now,
-            )
-
-        conn.execute(
-            """
-            UPDATE app.user_list_items
-            SET is_archived = TRUE, updated_at = ?
-            WHERE id IN (
-                SELECT i.id
-                FROM app.user_list_items AS i
-                LEFT JOIN app.catalog_episodes AS e ON e.episode_tconst = i.tconst
-                WHERE i.list_id = ?
-                AND i.is_archived = FALSE
-                  AND COALESCE(e.series_tconst, i.tconst, i.parent_tconst) = ?
-            )
-            """,
-            [now, source_list_id, display_tconst],
-        )
-        result["moved_rows"] = len(rows)
-
-    _run_duckdb_write(write)
-    clear_title_presentation_cache()
-    return {
-        "source_list_id": source_list_id,
-        "target_list_id": target_list_id,
-        "display_tconst": display_tconst,
-        "moved_rows": int(result["moved_rows"]),
-        "updated_at": now,
-    }
+    return _impl(source_list_id, target_list_id, display_tconst)
 
 
 def copy_group_to_user_list(source_list_id: str, target_list_id: str, display_tconst: str) -> dict[str, Any]:
-    if source_list_id == target_list_id:
-        raise ValueError("Zdrojový a cílový seznam jsou stejné.")
+    from filmy.db_library import copy_group_to_user_list as _impl
 
-    now = _now_iso()
-    result: dict[str, Any] = {"copied_rows": 0}
-
-    def write(conn: duckdb.DuckDBPyConnection) -> None:
-        source_list = conn.execute(
-            "SELECT id, name, list_kind FROM app.user_lists WHERE id = ?",
-            [source_list_id],
-        ).fetchone()
-        if source_list is None:
-            raise ValueError("Zdrojový seznam nebyl nalezen.")
-
-        target_list = conn.execute(
-            "SELECT id, name, list_kind FROM app.user_lists WHERE id = ?",
-            [target_list_id],
-        ).fetchone()
-        if target_list is None:
-            raise ValueError("Cílový seznam nebyl nalezen.")
-
-        rows = conn.execute(
-            """
-            SELECT
-                i.canonical_key,
-                i.tconst,
-                i.media_type,
-                i.imdb_id,
-                i.tmdb_id,
-                i.trakt_id,
-                i.parent_tconst,
-                i.parent_title,
-                i.title,
-                i.season_number,
-                i.episode_number,
-                i.rank,
-                i.added_at,
-                i.notes,
-                i.source_origin,
-                i.source_ref
-            FROM app.user_list_items AS i
-            LEFT JOIN app.catalog_episodes AS e ON e.episode_tconst = i.tconst
-            WHERE i.list_id = ?
-              AND i.is_archived = FALSE
-              AND COALESCE(e.series_tconst, i.tconst, i.parent_tconst) = ?
-            ORDER BY i.rank NULLS LAST, i.added_at DESC NULLS LAST, i.created_at DESC
-            """,
-            [source_list_id, display_tconst],
-        ).fetchall()
-        if not rows:
-            raise ValueError("V seznamu nebyla nalezena žádná položka ke kopii.")
-
-        for row in rows:
-            _upsert_user_list_item(
-                conn,
-                list_id=target_list_id,
-                canonical_key=row[0],
-                tconst=row[1],
-                media_type=row[2],
-                imdb_id=row[3],
-                tmdb_id=row[4],
-                trakt_id=row[5],
-                parent_tconst=row[6],
-                parent_title=row[7],
-                title=row[8],
-                season_number=row[9],
-                episode_number=row[10],
-                rank=row[11],
-                added_at=row[12],
-                notes=row[13],
-                source_origin=row[14],
-                source_ref=row[15],
-                now=now,
-            )
-
-        result["copied_rows"] = len(rows)
-
-    _run_duckdb_write(write)
-    clear_title_presentation_cache()
-    return {
-        "source_list_id": source_list_id,
-        "target_list_id": target_list_id,
-        "display_tconst": display_tconst,
-        "copied_rows": int(result["copied_rows"]),
-        "updated_at": now,
-    }
+    return _impl(source_list_id, target_list_id, display_tconst)
 
 
 def create_user_list(name: str, description: str | None = None) -> dict[str, Any]:
-    cleaned_name = (name or "").strip()
-    if not cleaned_name:
-        raise ValueError("Název seznamu nesmí být prázdný.")
-    cleaned_description = (description or "").strip() or None
+    from filmy.db_library import create_user_list as _impl
 
-    now = _now_iso()
-    result: dict[str, Any] = {}
-
-    def write(conn: duckdb.DuckDBPyConnection) -> None:
-        list_id = f"custom-list-{uuid.uuid4()}"
-        slug_base = _slugify(cleaned_name) or "list"
-        slug = slug_base
-        suffix = 2
-        while conn.execute("SELECT 1 FROM app.user_lists WHERE slug = ? LIMIT 1", [slug]).fetchone() is not None:
-            slug = f"{slug_base}-{suffix}"
-            suffix += 1
-
-        conn.execute(
-            """
-            INSERT INTO app.user_lists (id, slug, name, description, list_kind, source_origin, source_ref, created_at, updated_at)
-            VALUES (?, ?, ?, ?, 'custom', 'local_app', ?, ?, ?)
-            """,
-            [list_id, slug, cleaned_name, cleaned_description, f"manual_list:{list_id}", now, now],
-        )
-        result.update(
-            {
-                "id": list_id,
-                "slug": slug,
-                "name": cleaned_name,
-                "description": cleaned_description,
-                "list_kind": "custom",
-                "created_at": now,
-            }
-        )
-
-    _run_duckdb_write(write)
-    return result
+    return _impl(name, description)
 
 
 def update_user_list_description(list_id: str, description: str | None = None) -> dict[str, Any]:
-    cleaned_description = (description or "").strip() or None
-    now = _now_iso()
-    result: dict[str, Any] = {}
+    from filmy.db_library import update_user_list_description as _impl
 
-    def write(conn: duckdb.DuckDBPyConnection) -> None:
-        row = conn.execute(
-            """
-            SELECT id, slug, name, list_kind
-            FROM app.user_lists
-            WHERE id = ?
-            """,
-            [list_id],
-        ).fetchone()
-        if row is None:
-            raise ValueError("Seznam nebyl nalezen.")
-        if row[3] != "custom" and row[0] != "watchlist":
-            raise ValueError("Popis lze upravit jen u uživatelských seznamů.")
-
-        conn.execute(
-            """
-            UPDATE app.user_lists
-            SET description = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            [cleaned_description, now, list_id],
-        )
-        result.update(
-            {
-                "id": row[0],
-                "slug": row[1],
-                "name": row[2],
-                "description": cleaned_description,
-                "list_kind": row[3],
-                "updated_at": now,
-            }
-        )
-
-    _run_duckdb_write(write)
-    return result
+    return _impl(list_id, description)
 
 
 def _pick_best_title_match(query: str, candidates: list[dict[str, Any]]) -> dict[str, Any]:
@@ -2955,6 +2656,70 @@ def _build_title_lookup_result(
         ],
         "candidate_count": len(candidates),
     }
+
+
+def _lookup_person_from_search_recall(query: str, *, candidates_limit: int) -> dict[str, Any] | None:
+    """Try to satisfy person lookup from the small recent-search recall table first."""
+    query_key = _normalize_match_key(query)
+    query_text = _normalize_search_query_text(query)
+    if not query_key or not query_text:
+        return None
+
+    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
+        row = conn.execute(
+            """
+            SELECT target_id, fuzzy_score
+            FROM app.search_recall
+            WHERE entity_type = 'person' AND query_key = ?
+            ORDER BY
+                CASE WHEN query_text_fold = ? THEN 0 ELSE 1 END,
+                last_searched_at DESC,
+                hit_count DESC,
+                first_searched_at DESC
+            LIMIT 1
+            """,
+            [query_key, query_text.casefold()],
+        ).fetchone()
+    if row is None:
+        return None
+
+    presentation = get_person_presentation(row[0])
+    if presentation is None:
+        return None
+
+    candidate = _person_candidate_from_presentation(presentation, fuzzy_score=row[1])
+    selected = dict(presentation)
+    selected["query"] = query
+    selected["match"] = _build_person_lookup_candidate(candidate, query=query, is_selected=True)
+    result = {
+        "query": query,
+        "selected_nconst": str(candidate["nconst"]),
+        "selected": selected,
+        "candidates": [
+            _build_person_lookup_candidate(candidate, query=query, is_selected=True),
+        ],
+        "candidate_count": 1,
+    }
+    _record_search_recall_entry(
+        entity_type="person",
+        query=query,
+        target_id=str(candidate["nconst"]),
+        target_label=str(candidate.get("primary_name") or ""),
+        fuzzy_score=candidate.get("fuzzy_score"),
+    )
+    return result
+
+
+def _remember_person_lookup(query: str, selected: dict[str, Any]) -> None:
+    if not _is_confident_person_lookup(query, selected):
+        return
+    _record_search_recall_entry(
+        entity_type="person",
+        query=query,
+        target_id=str(selected["nconst"]),
+        target_label=str(selected.get("primary_name") or ""),
+        fuzzy_score=selected.get("fuzzy_score"),
+    )
 
 
 def _pick_best_person_match(query: str, candidates: list[dict[str, Any]]) -> dict[str, Any]:
@@ -4987,181 +4752,27 @@ def commit_import_batch(batch_id: str) -> dict[str, Any]:
 
 
 def inspect_trakt_export(export_dir: str = "trakt-export") -> dict[str, Any]:
-    export_path = _resolve_export_path(export_dir)
-    files = [_describe_trakt_file(path) for path in sorted(export_path.glob("*.json"))]
-    category_counts: dict[str, int] = {}
-    importable_categories = {
-        "watched_history",
-        "ratings",
-        "custom_lists",
-        "watchlist",
-        "collection",
-        "list_metadata",
-        "last_activities",
-    }
-    for item in files:
-        category_counts[item["category"]] = category_counts.get(item["category"], 0) + 1
+    from filmy.db_legacy import inspect_trakt_export as _impl
 
-    return {
-        "export_dir": export_path.as_posix(),
-        "fingerprint": _fingerprint_trakt_files(files),
-        "file_count": len(files),
-        "categories": category_counts,
-        "supported_categories": sorted(importable_categories),
-        "files": files,
-    }
+    return _impl(export_dir)
 
 
 def sync_trakt_export(export_dir: str = "trakt-export") -> dict[str, Any]:
-    inspection = inspect_trakt_export(export_dir)
-    if inspection["file_count"] == 0:
-        raise ValueError("Adresář trakt exportu je prázdný.")
+    from filmy.db_legacy import sync_trakt_export as _impl
 
-    with duckdb.connect(DB_PATH.as_posix()) as conn:
-        _create_base_schema(conn)
-        latest = conn.execute(
-            """
-            SELECT id
-            FROM old.trakt_sync_runs
-            WHERE export_fingerprint = ? AND status = 'completed'
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            [inspection["fingerprint"]],
-        ).fetchone()
-        if latest is not None:
-            _backfill_trakt_snapshots_for_run(conn, latest[0])
-            return {
-                "status": "unchanged",
-                "sync_run_id": latest[0],
-                "export_dir": inspection["export_dir"],
-                "fingerprint": inspection["fingerprint"],
-            }
-
-        sync_run_id = str(uuid.uuid4())
-        conn.execute(
-            """
-            INSERT INTO old.trakt_sync_runs (id, export_path, export_fingerprint, status, summary_json, created_at)
-            VALUES (?, ?, ?, 'running', ?, ?)
-            """,
-            [sync_run_id, inspection["export_dir"], inspection["fingerprint"], json.dumps(inspection), _now_iso()],
-        )
-        for item in inspection["files"]:
-            conn.execute(
-                """
-                INSERT INTO old.trakt_sync_files (
-                    sync_run_id, relative_path, file_size, file_mtime, file_sha256, category, item_count, imported
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    sync_run_id,
-                    item["relative_path"],
-                    item["size"],
-                    item["mtime"],
-                    item["sha256"],
-                    item["category"],
-                    item["item_count"],
-                    item["category"] in {"watched_history", "ratings", "custom_lists", "watchlist", "collection", "list_metadata", "last_activities"},
-                ],
-            )
-
-        files_by_category: dict[str, list[dict[str, Any]]] = {}
-        for item in inspection["files"]:
-            files_by_category.setdefault(item["category"], []).append(item)
-
-        summary = {
-            "history_events": _sync_trakt_history(conn, sync_run_id, files_by_category.get("watched_history", [])),
-            "ratings": _sync_trakt_ratings(conn, sync_run_id, files_by_category.get("ratings", [])),
-            "lists": _sync_trakt_lists(
-                conn,
-                sync_run_id,
-                files_by_category.get("list_metadata", []),
-                files_by_category.get("custom_lists", []),
-                files_by_category.get("watchlist", []),
-            ),
-            "collection": _sync_trakt_collection(conn, sync_run_id, files_by_category.get("collection", [])),
-            "last_activities": _read_last_activities(files_by_category.get("last_activities", [])),
-        }
-        result = {
-            "status": "completed",
-            "sync_run_id": sync_run_id,
-            "export_dir": inspection["export_dir"],
-            "fingerprint": inspection["fingerprint"],
-            "summary": summary,
-        }
-        conn.execute(
-            "UPDATE old.trakt_sync_runs SET status = 'completed', summary_json = ? WHERE id = ?",
-            [json.dumps(result, ensure_ascii=False), sync_run_id],
-        )
-        return result
+    return _impl(export_dir)
 
 
 def get_trakt_sync_runs(limit: int = 20) -> list[dict[str, Any]]:
-    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
-        rows = conn.execute(
-            """
-            SELECT id, export_path, export_fingerprint, status, summary_json, created_at
-            FROM old.trakt_sync_runs
-            ORDER BY created_at DESC
-            LIMIT ?
-            """,
-            [limit],
-        ).fetchall()
-    return [
-        {
-            "id": row[0],
-            "export_path": row[1],
-            "export_fingerprint": row[2],
-            "status": row[3],
-            "summary": _loads_json_or_none(row[4]),
-            "created_at": row[5],
-        }
-        for row in rows
-    ]
+    from filmy.db_legacy import get_trakt_sync_runs as _impl
+
+    return _impl(limit=limit)
 
 
 def get_trakt_sync_run(sync_run_id: str) -> dict[str, Any] | None:
-    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
-        run = conn.execute(
-            """
-            SELECT id, export_path, export_fingerprint, status, summary_json, created_at
-            FROM old.trakt_sync_runs
-            WHERE id = ?
-            """,
-            [sync_run_id],
-        ).fetchone()
-        if run is None:
-            return None
-        files = conn.execute(
-            """
-            SELECT relative_path, file_size, file_mtime, file_sha256, category, item_count, imported
-            FROM old.trakt_sync_files
-            WHERE sync_run_id = ?
-            ORDER BY relative_path
-            """,
-            [sync_run_id],
-        ).fetchall()
-    return {
-        "id": run[0],
-        "export_path": run[1],
-        "export_fingerprint": run[2],
-        "status": run[3],
-        "summary": _loads_json_or_none(run[4]),
-        "created_at": run[5],
-        "files": [
-            {
-                "relative_path": row[0],
-                "file_size": row[1],
-                "file_mtime": row[2],
-                "file_sha256": row[3],
-                "category": row[4],
-                "item_count": row[5],
-                "imported": row[6],
-            }
-            for row in files
-        ],
-    }
+    from filmy.db_legacy import get_trakt_sync_run as _impl
+
+    return _impl(sync_run_id)
 
 
 def get_trakt_sync_changes(
@@ -5169,203 +4780,9 @@ def get_trakt_sync_changes(
     previous_sync_id: str | None = None,
     limit: int = 100,
 ) -> dict[str, Any]:
-    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
-        if sync_run_id is None:
-            current = conn.execute(
-                """
-                SELECT id, created_at
-                FROM old.trakt_sync_runs
-                WHERE status = 'completed'
-                ORDER BY created_at DESC
-                LIMIT 1
-                """
-            ).fetchone()
-        else:
-            current = conn.execute(
-                """
-                SELECT id, created_at
-                FROM old.trakt_sync_runs
-                WHERE id = ? AND status = 'completed'
-                """,
-                [sync_run_id],
-            ).fetchone()
-        if current is None:
-            return {"current_sync_id": sync_run_id, "previous_sync_id": None, "changes": {}}
+    from filmy.db_legacy import get_trakt_sync_changes as _impl
 
-        if previous_sync_id is not None:
-            previous = conn.execute(
-                """
-                SELECT id, created_at
-                FROM old.trakt_sync_runs
-                WHERE id = ? AND status = 'completed'
-                """,
-                [previous_sync_id],
-            ).fetchone()
-        else:
-            previous = conn.execute(
-                """
-                SELECT id, created_at
-                FROM old.trakt_sync_runs
-                WHERE status = 'completed' AND created_at < ?
-                ORDER BY created_at DESC
-                LIMIT 1
-                """,
-                [current[1]],
-            ).fetchone()
-        previous_id = previous[0] if previous else None
-        if previous_id and _has_trakt_snapshot(conn, "old.trakt_history_snapshot", current[0]):
-            changes = {
-                "history_added": _snapshot_change_rows(
-                    conn,
-                    "old.trakt_history_snapshot",
-                    "history_id",
-                    "old.trakt_history_events",
-                    "history_id",
-                    "media_type",
-                    "parent_title",
-                    "title",
-                    "watched_at",
-                    current[0],
-                    previous_id,
-                    limit,
-                ),
-                "history_removed": _snapshot_change_rows(
-                    conn,
-                    "old.trakt_history_snapshot",
-                    "history_id",
-                    "old.trakt_history_events",
-                    "history_id",
-                    "media_type",
-                    "parent_title",
-                    "title",
-                    "watched_at",
-                    previous_id,
-                    current[0],
-                    limit,
-                ),
-                "ratings_changed": _snapshot_change_rows(
-                    conn,
-                    "old.trakt_ratings_snapshot",
-                    "source_key",
-                    "old.trakt_ratings",
-                    "source_key",
-                    "media_type",
-                    "parent_title",
-                    "title",
-                    "rated_at",
-                    current[0],
-                    previous_id,
-                    limit,
-                ),
-                "list_items_changed": _snapshot_change_rows(
-                    conn,
-                    "old.trakt_list_items_snapshot",
-                    "source_key",
-                    "old.trakt_list_items",
-                    "source_key",
-                    "media_type",
-                    "list_name",
-                    "title",
-                    "listed_at",
-                    current[0],
-                    previous_id,
-                    limit,
-                ),
-                "collection_changed": _snapshot_change_rows(
-                    conn,
-                    "old.trakt_collection_snapshot",
-                    "source_key",
-                    "old.trakt_collection_items",
-                    "source_key",
-                    "media_type",
-                    "parent_title",
-                    "title",
-                    "updated_at",
-                    current[0],
-                    previous_id,
-                    limit,
-                ),
-            }
-            counts = {
-                "history_added": _snapshot_change_count(conn, "old.trakt_history_snapshot", "history_id", current[0], previous_id),
-                "history_removed": _snapshot_change_count(conn, "old.trakt_history_snapshot", "history_id", previous_id, current[0]),
-                "ratings_changed": _snapshot_change_count(conn, "old.trakt_ratings_snapshot", "source_key", current[0], previous_id),
-                "list_items_changed": _snapshot_change_count(conn, "old.trakt_list_items_snapshot", "source_key", current[0], previous_id),
-                "collection_changed": _snapshot_change_count(conn, "old.trakt_collection_snapshot", "source_key", current[0], previous_id),
-            }
-        else:
-            changes = {
-                "history_added": _fetch_change_rows(
-                    conn,
-                    """
-                    SELECT history_id AS entity_id, media_type, parent_title, title, watched_at AS changed_at
-                    FROM old.trakt_history_events
-                    WHERE is_active = TRUE AND last_seen_sync_id = ?
-                    ORDER BY watched_at DESC
-                    LIMIT ?
-                    """,
-                    [current[0], limit],
-                ),
-                "history_removed": [],
-                "ratings_changed": _fetch_change_rows(
-                    conn,
-                    """
-                    SELECT source_key AS entity_id, media_type, parent_title, title, rated_at AS changed_at
-                    FROM old.trakt_ratings
-                    WHERE is_active = TRUE AND last_seen_sync_id = ?
-                    ORDER BY rated_at DESC
-                    LIMIT ?
-                    """,
-                    [current[0], limit],
-                ),
-                "list_items_changed": _fetch_change_rows(
-                    conn,
-                    """
-                    SELECT source_key AS entity_id, media_type, list_name AS parent_title, title, listed_at AS changed_at
-                    FROM old.trakt_list_items
-                    WHERE is_active = TRUE AND last_seen_sync_id = ?
-                    ORDER BY listed_at DESC NULLS LAST, rank NULLS LAST
-                    LIMIT ?
-                    """,
-                    [current[0], limit],
-                ),
-                "collection_changed": _fetch_change_rows(
-                    conn,
-                    """
-                    SELECT source_key AS entity_id, media_type, parent_title, title, updated_at AS changed_at
-                    FROM old.trakt_collection_items
-                    WHERE is_active = TRUE AND last_seen_sync_id = ?
-                    ORDER BY updated_at DESC NULLS LAST, collected_at DESC NULLS LAST
-                    LIMIT ?
-                    """,
-                    [current[0], limit],
-                ),
-            }
-            counts = {
-                "history_added": conn.execute(
-                    "SELECT COUNT(*) FROM old.trakt_history_events WHERE is_active = TRUE AND last_seen_sync_id = ?",
-                    [current[0]],
-                ).fetchone()[0],
-                "history_removed": 0,
-                "ratings_changed": conn.execute(
-                    "SELECT COUNT(*) FROM old.trakt_ratings WHERE is_active = TRUE AND last_seen_sync_id = ?",
-                    [current[0]],
-                ).fetchone()[0],
-                "list_items_changed": conn.execute(
-                    "SELECT COUNT(*) FROM old.trakt_list_items WHERE is_active = TRUE AND last_seen_sync_id = ?",
-                    [current[0]],
-                ).fetchone()[0],
-                "collection_changed": conn.execute(
-                    "SELECT COUNT(*) FROM old.trakt_collection_items WHERE is_active = TRUE AND last_seen_sync_id = ?",
-                    [current[0]],
-                ).fetchone()[0],
-            }
-    return {
-        "current_sync_id": current[0],
-        "previous_sync_id": previous_id,
-        "counts": counts,
-        "changes": changes,
-    }
+    return _impl(sync_run_id=sync_run_id, previous_sync_id=previous_sync_id, limit=limit)
 
 
 def get_watch_history(limit: int = 100, source: str | None = None) -> list[dict[str, Any]]:
@@ -5397,6 +4814,7 @@ def get_watch_history(limit: int = 100, source: str | None = None) -> list[dict[
 
 RECENTLY_WATCHED_VIEW_ID = "view:recently-watched"
 WATCHED_VIEW_ID = "view:watched"
+HOT_WATCHLIST_VIEW_ID = "view:hot-watchlist"
 
 
 def _fetch_watch_view_page(limit: int, offset: int, *, cutoff_days: int | None) -> dict[str, Any]:
@@ -5497,597 +4915,87 @@ def _fetch_watch_view_page(limit: int, offset: int, *, cutoff_days: int | None) 
 
 
 def get_recently_watched_page(limit: int = 50, offset: int = 0) -> dict[str, Any]:
-    ui_config = get_ui_config()
-    page = _fetch_watch_view_page(limit, offset, cutoff_days=ui_config.recently_watched_days)
-    return {
-        "list": {
-            "id": RECENTLY_WATCHED_VIEW_ID,
-            "slug": "recently-watched",
-            "name": "Recently Watched",
-            "list_kind": "view",
-            "item_type": "view",
-            "view_kind": "recently_watched",
-        },
-        "total": page["total"],
-        "items": page["items"],
-        "limit": page["limit"],
-        "offset": page["offset"],
-    }
+    from filmy.db_library import get_recently_watched_page as _impl
+
+    return _impl(limit=limit, offset=offset)
 
 
 def get_watched_page(limit: int = 50, offset: int = 0) -> dict[str, Any]:
-    page = _fetch_watch_view_page(limit, offset, cutoff_days=None)
-    return {
-        "list": {
-            "id": WATCHED_VIEW_ID,
-            "slug": "watched",
-            "name": "Watched",
-            "list_kind": "view",
-            "item_type": "view",
-            "view_kind": "watched",
-        },
-        "total": page["total"],
-        "items": page["items"],
-        "limit": page["limit"],
-        "offset": page["offset"],
-    }
+    from filmy.db_library import get_watched_page as _impl
+
+    return _impl(limit=limit, offset=offset)
 
 
 def get_trakt_ratings(limit: int = 100, active_only: bool = True) -> list[dict[str, Any]]:
-    sql = """
-        SELECT source_key, media_type, trakt_id, imdb_id, tmdb_id, tconst, parent_title, title,
-               season_number, episode_number, rating, rated_at, is_active, last_seen_sync_id
-        FROM old.trakt_ratings
-        WHERE (? = FALSE OR is_active = TRUE)
-        ORDER BY rated_at DESC
-        LIMIT ?
-    """
-    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
-        rows = conn.execute(sql, [active_only, limit]).fetchall()
-    return [
-        {
-            "source_key": row[0],
-            "media_type": row[1],
-            "trakt_id": row[2],
-            "imdb_id": row[3],
-            "tmdb_id": row[4],
-            "tconst": row[5],
-            "parent_title": row[6],
-            "title": row[7],
-            "season_number": row[8],
-            "episode_number": row[9],
-            "rating": row[10],
-            "rated_at": row[11],
-            "is_active": row[12],
-            "last_seen_sync_id": row[13],
-        }
-        for row in rows
-    ]
+    from filmy.db_legacy import get_trakt_ratings as _impl
+
+    return _impl(limit=limit, active_only=active_only)
 
 
 def get_trakt_list_overview(include_items: bool = False, active_only: bool = True) -> dict[str, Any]:
-    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
-        lists = conn.execute(
-            """
-            SELECT trakt_list_id, slug, name, description, privacy, list_type, item_count, updated_at, is_active, last_seen_sync_id
-            FROM old.trakt_lists
-            WHERE (? = FALSE OR is_active = TRUE)
-            ORDER BY name
-            """,
-            [active_only],
-        ).fetchall()
-        watchlist_count = conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM old.trakt_list_items
-            WHERE list_kind = 'watchlist' AND (? = FALSE OR is_active = TRUE)
-            """,
-            [active_only],
-        ).fetchone()[0]
+    from filmy.db_legacy import get_trakt_list_overview as _impl
 
-        result_lists = []
-        for row in lists:
-            item = {
-                "trakt_list_id": row[0],
-                "slug": row[1],
-                "name": row[2],
-                "description": row[3],
-                "privacy": row[4],
-                "list_type": row[5],
-                "item_count": row[6],
-                "updated_at": row[7],
-                "is_active": row[8],
-                "last_seen_sync_id": row[9],
-            }
-            if include_items:
-                items = conn.execute(
-                    """
-                    SELECT source_key, media_type, imdb_id, tmdb_id, tconst, parent_title, title,
-                           season_number, episode_number, rank, listed_at, notes, my_rating, is_active
-                    FROM old.trakt_list_items
-                    WHERE trakt_list_id = ? AND (? = FALSE OR is_active = TRUE)
-                    ORDER BY rank NULLS LAST, listed_at DESC NULLS LAST
-                    """,
-                    [str(row[0]), active_only],
-                ).fetchall()
-                item["items"] = [_trakt_list_item_row_to_dict(r) for r in items]
-            result_lists.append(item)
-
-        watchlist_items = []
-        if include_items:
-            watchlist_rows = conn.execute(
-                """
-                SELECT source_key, media_type, imdb_id, tmdb_id, tconst, parent_title, title,
-                       season_number, episode_number, rank, listed_at, notes, my_rating, is_active
-                FROM old.trakt_list_items
-                WHERE list_kind = 'watchlist' AND (? = FALSE OR is_active = TRUE)
-                ORDER BY rank NULLS LAST, listed_at DESC NULLS LAST
-                """,
-                [active_only],
-            ).fetchall()
-            watchlist_items = [_trakt_list_item_row_to_dict(r) for r in watchlist_rows]
-
-    return {
-        "lists": result_lists,
-        "watchlist": {
-            "item_count": watchlist_count,
-            "items": watchlist_items if include_items else None,
-        },
-    }
+    return _impl(include_items=include_items, active_only=active_only)
 
 
 def get_trakt_collection(limit: int = 100, active_only: bool = True) -> list[dict[str, Any]]:
-    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
-        rows = conn.execute(
-            """
-            SELECT source_key, media_type, trakt_id, imdb_id, tmdb_id, tconst, parent_title, title,
-                   season_number, episode_number, collected_at, updated_at, is_active, last_seen_sync_id
-            FROM old.trakt_collection_items
-            WHERE (? = FALSE OR is_active = TRUE)
-            ORDER BY updated_at DESC NULLS LAST, collected_at DESC NULLS LAST
-            LIMIT ?
-            """,
-            [active_only, limit],
-        ).fetchall()
-    return [
-        {
-            "source_key": row[0],
-            "media_type": row[1],
-            "trakt_id": row[2],
-            "imdb_id": row[3],
-            "tmdb_id": row[4],
-            "tconst": row[5],
-            "parent_title": row[6],
-            "title": row[7],
-            "season_number": row[8],
-            "episode_number": row[9],
-            "collected_at": row[10],
-            "updated_at": row[11],
-            "is_active": row[12],
-            "last_seen_sync_id": row[13],
-        }
-        for row in rows
-    ]
+    from filmy.db_legacy import get_trakt_collection as _impl
+
+    return _impl(limit=limit, active_only=active_only)
 
 
 def get_trakt_status() -> dict[str, Any]:
-    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
-        latest = conn.execute(
-            """
-            SELECT id, export_path, export_fingerprint, status, summary_json, created_at
-            FROM old.trakt_sync_runs
-            WHERE status = 'completed'
-            ORDER BY created_at DESC
-            LIMIT 1
-            """
-        ).fetchone()
-        if latest is None:
-            return {
-                "latest_sync": None,
-                "counts": {
-                    "history_events_active": 0,
-                    "ratings_active": 0,
-                    "lists_active": 0,
-                    "watchlist_active": 0,
-                    "collection_active": 0,
-                },
-                "last_activities": None,
-            }
+    from filmy.db_legacy import get_trakt_status as _impl
 
-        summary = _loads_json_or_none(latest[4]) or {}
-        nested_summary = summary.get("summary") or {}
-        counts = {
-            "history_events_active": conn.execute(
-                "SELECT COUNT(*) FROM old.trakt_history_events WHERE is_active = TRUE"
-            ).fetchone()[0],
-            "ratings_active": conn.execute(
-                "SELECT COUNT(*) FROM old.trakt_ratings WHERE is_active = TRUE"
-            ).fetchone()[0],
-            "lists_active": conn.execute(
-                "SELECT COUNT(*) FROM old.trakt_lists WHERE is_active = TRUE"
-            ).fetchone()[0],
-            "watchlist_active": conn.execute(
-                "SELECT COUNT(*) FROM old.trakt_list_items WHERE is_active = TRUE AND list_kind = 'watchlist'"
-            ).fetchone()[0],
-            "collection_active": conn.execute(
-                "SELECT COUNT(*) FROM old.trakt_collection_items WHERE is_active = TRUE"
-            ).fetchone()[0],
-        }
-    return {
-        "latest_sync": {
-            "id": latest[0],
-            "export_path": latest[1],
-            "export_fingerprint": latest[2],
-            "status": latest[3],
-            "created_at": latest[5],
-            "summary": nested_summary,
-        },
-        "counts": counts,
-        "last_activities": nested_summary.get("last_activities"),
-    }
+    return _impl()
 
 
 def inspect_imdb_lists(export_dir: str = "imdb_lists") -> dict[str, Any]:
-    export_path = _resolve_export_path(export_dir)
-    files: list[dict[str, Any]] = []
-    for path in sorted(export_path.iterdir()):
-        if not path.is_file() or path.name.startswith("."):
-            continue
-        item_count = _count_csv_rows(path)
-        files.append(
-            {
-                "name": path.name,
-                "path": path.as_posix(),
-                "relative_path": path.name,
-                "category": _categorize_imdb_list_file(path.name),
-                "item_count": item_count,
-                "size": path.stat().st_size,
-                "mtime": int(path.stat().st_mtime),
-                "sha256": _file_sha256(path),
-            }
-        )
-    return {
-        "export_dir": export_path.as_posix(),
-        "fingerprint": _fingerprint_trakt_files(files),
-        "file_count": len(files),
-        "files": files,
-    }
+    from filmy.db_legacy import inspect_imdb_lists as _impl
+
+    return _impl(export_dir)
 
 
 def sync_imdb_lists(export_dir: str = "imdb_lists") -> dict[str, Any]:
-    inspection = inspect_imdb_lists(export_dir)
-    if inspection["file_count"] == 0:
-        raise ValueError("Adresář imdb_lists je prázdný.")
+    from filmy.db_legacy import sync_imdb_lists as _impl
 
-    with duckdb.connect(DB_PATH.as_posix()) as conn:
-        _create_base_schema(conn)
-        latest = conn.execute(
-            """
-            SELECT id
-            FROM old.imdb_list_sync_runs
-            WHERE export_fingerprint = ? AND status = 'completed'
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            [inspection["fingerprint"]],
-        ).fetchone()
-        if latest is not None:
-            return {
-                "status": "unchanged",
-                "sync_run_id": latest[0],
-                "export_dir": inspection["export_dir"],
-                "fingerprint": inspection["fingerprint"],
-            }
-
-        sync_run_id = str(uuid.uuid4())
-        conn.execute(
-            """
-            INSERT INTO old.imdb_list_sync_runs (id, export_path, export_fingerprint, status, summary_json, created_at)
-            VALUES (?, ?, ?, 'running', ?, ?)
-            """,
-            [sync_run_id, inspection["export_dir"], inspection["fingerprint"], json.dumps(inspection), _now_iso()],
-        )
-
-        files_by_category = {item["category"]: item for item in inspection["files"]}
-        summary = {
-            "watchlist": _sync_imdb_watchlist(conn, sync_run_id, files_by_category.get("watchlist")),
-            "favorite_people": _sync_imdb_favorite_people(conn, sync_run_id, files_by_category.get("favorite_people")),
-        }
-        result = {
-            "status": "completed",
-            "sync_run_id": sync_run_id,
-            "export_dir": inspection["export_dir"],
-            "fingerprint": inspection["fingerprint"],
-            "summary": summary,
-        }
-        conn.execute(
-            "UPDATE old.imdb_list_sync_runs SET status = 'completed', summary_json = ? WHERE id = ?",
-            [json.dumps(result, ensure_ascii=False), sync_run_id],
-        )
-        return result
+    return _impl(export_dir)
 
 
 def get_imdb_lists_status() -> dict[str, Any]:
-    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
-        latest = conn.execute(
-            """
-            SELECT id, export_path, export_fingerprint, status, summary_json, created_at
-            FROM old.imdb_list_sync_runs
-            WHERE status = 'completed'
-            ORDER BY created_at DESC
-            LIMIT 1
-            """
-        ).fetchone()
-        counts = {
-            "watchlist_active": conn.execute(
-                "SELECT COUNT(*) FROM old.imdb_watchlist_items WHERE is_active = TRUE"
-            ).fetchone()[0],
-            "favorite_people_active": conn.execute(
-                "SELECT COUNT(*) FROM old.imdb_favorite_people WHERE is_active = TRUE"
-            ).fetchone()[0],
-        }
-    return {
-        "latest_sync": (
-            {
-                "id": latest[0],
-                "export_path": latest[1],
-                "export_fingerprint": latest[2],
-                "status": latest[3],
-                "summary": (_loads_json_or_none(latest[4]) or {}).get("summary"),
-                "created_at": latest[5],
-            }
-            if latest
-            else None
-        ),
-        "counts": counts,
-    }
+    from filmy.db_legacy import get_imdb_lists_status as _impl
+
+    return _impl()
 
 
 def get_imdb_watchlist(limit: int = 100, active_only: bool = True) -> list[dict[str, Any]]:
-    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
-        rows = conn.execute(
-            """
-            SELECT tconst, position, title, original_title, title_type, imdb_rating, runtime_minutes, year,
-                   genres, num_votes, release_date, directors, your_rating, date_rated, is_active, last_seen_sync_id
-            FROM old.imdb_watchlist_items
-            WHERE (? = FALSE OR is_active = TRUE)
-            ORDER BY position ASC NULLS LAST, title
-            LIMIT ?
-            """,
-            [active_only, limit],
-        ).fetchall()
-    return [
-        {
-            "tconst": row[0],
-            "position": row[1],
-            "title": row[2],
-            "original_title": row[3],
-            "title_type": row[4],
-            "imdb_rating": row[5],
-            "runtime_minutes": row[6],
-            "year": row[7],
-            "genres": row[8],
-            "num_votes": row[9],
-            "release_date": row[10],
-            "directors": row[11],
-            "your_rating": row[12],
-            "date_rated": row[13],
-            "is_active": row[14],
-            "last_seen_sync_id": row[15],
-        }
-        for row in rows
-    ]
+    from filmy.db_legacy import get_imdb_watchlist as _impl
+
+    return _impl(limit=limit, active_only=active_only)
 
 
 def get_imdb_favorite_people(limit: int = 100, active_only: bool = True) -> list[dict[str, Any]]:
-    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
-        rows = conn.execute(
-            """
-            SELECT nconst, position, name, known_for, birth_date, is_active, last_seen_sync_id
-            FROM old.imdb_favorite_people
-            WHERE (? = FALSE OR is_active = TRUE)
-            ORDER BY position ASC NULLS LAST, name
-            LIMIT ?
-            """,
-            [active_only, limit],
-        ).fetchall()
-    return [
-        {
-            "nconst": row[0],
-            "position": row[1],
-            "name": row[2],
-            "known_for": row[3],
-            "birth_date": row[4],
-            "is_active": row[5],
-            "last_seen_sync_id": row[6],
-        }
-        for row in rows
-    ]
+    from filmy.db_legacy import get_imdb_favorite_people as _impl
+
+    return _impl(limit=limit, active_only=active_only)
 
 
 def inspect_plex_source() -> dict[str, Any]:
-    server = get_primary_server()
-    if server is None:
-        return {"server": None, "sections": [], "fingerprint": None}
+    from filmy.db_legacy import inspect_plex_source as _impl
 
-    sections = [
-        section
-        for section in get_library_sections(server)
-        if section.get("type") in {"movie", "show"} and section.get("hidden") != "1"
-    ]
-    fingerprint = _plex_fingerprint(server.client_identifier, sections)
-    return {
-        "server": {
-            "name": server.name,
-            "client_identifier": server.client_identifier,
-        },
-        "sections": sections,
-        "fingerprint": fingerprint,
-    }
+    return _impl()
 
 
 def sync_plex_source(section_limit: int | None = None, item_limit_per_section: int | None = None) -> dict[str, Any]:
-    plex_server = get_primary_server()
-    inspection = inspect_plex_source()
-    server = inspection["server"]
-    if server is None or plex_server is None:
-        raise ValueError("Nebyl nalezen žádný dostupný Plex Media Server.")
+    from filmy.db_legacy import sync_plex_source as _impl
 
-    sections = inspection["sections"]
-    if section_limit is not None:
-        sections = sections[:section_limit]
-
-    with duckdb.connect(DB_PATH.as_posix()) as conn:
-        _create_base_schema(conn)
-        latest = conn.execute(
-            """
-            SELECT id
-            FROM old.plex_sync_runs
-            WHERE source_fingerprint = ? AND status = 'completed'
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            [inspection["fingerprint"]],
-        ).fetchone()
-        if latest is not None:
-            return {
-                "status": "unchanged",
-                "sync_run_id": latest[0],
-                "summary": _loads_json_or_none(
-                    conn.execute("SELECT summary_json FROM old.plex_sync_runs WHERE id = ?", [latest[0]]).fetchone()[0]
-                ),
-            }
-
-        sync_run_id = str(uuid.uuid4())
-        now = _now_iso()
-        conn.execute(
-            """
-            INSERT INTO old.plex_sync_runs (
-                id, server_name, server_client_identifier, source_fingerprint, status, summary_json, created_at
-            )
-            VALUES (?, ?, ?, ?, 'running', '{}', ?)
-            """,
-            [sync_run_id, server["name"], server["client_identifier"], inspection["fingerprint"], now],
-        )
-        plex_list_id = _ensure_user_list(
-            conn,
-            "plex-library",
-            "Plex Library",
-            "custom",
-            "seed_plex_library",
-            f"plex:{server['client_identifier']}",
-            now,
-            preferred_slug="plex-library",
-        )
-
-        summary = {
-            "server_name": server["name"],
-            "server_client_identifier": server["client_identifier"],
-            "sections_processed": 0,
-            "items_imported": 0,
-            "library_items_upserted": 0,
-            "watch_events_upserted": 0,
-            "content_state_updates": 0,
-        }
-
-        for section in sections:
-            summary["sections_processed"] += 1
-            items = iter_section_items(section["key"], resource=plex_server, limit=item_limit_per_section)
-            for item in items:
-                rating_key = item.get("rating_key")
-                if not rating_key:
-                    continue
-                snapshot = get_metadata_snapshot(rating_key, resource=plex_server)
-                if snapshot is None:
-                    continue
-                _upsert_plex_library_item(conn, sync_run_id, section, snapshot)
-                summary["items_imported"] += 1
-
-                if _sync_plex_item_to_local_library(conn, plex_list_id, sync_run_id, snapshot, now):
-                    summary["library_items_upserted"] += 1
-                if _sync_plex_watch_state(conn, snapshot):
-                    summary["watch_events_upserted"] += 1
-                if _sync_plex_content_state(conn, snapshot, now):
-                    summary["content_state_updates"] += 1
-
-        conn.execute("UPDATE old.plex_library_items SET is_active = FALSE WHERE last_seen_sync_id <> ?", [sync_run_id])
-        conn.execute(
-            """
-            UPDATE app.user_list_items
-            SET is_archived = TRUE, updated_at = ?
-            WHERE list_id = ? AND source_origin = 'seed_plex_library' AND source_ref NOT IN (
-                SELECT source_key FROM old.plex_library_items WHERE last_seen_sync_id = ? AND is_active = TRUE
-            )
-            """,
-            [now, plex_list_id, sync_run_id],
-        )
-        conn.execute(
-            "UPDATE old.plex_sync_runs SET status = 'completed', summary_json = ? WHERE id = ?",
-            [json.dumps(summary, ensure_ascii=False), sync_run_id],
-        )
-
-    return {"status": "completed", "sync_run_id": sync_run_id, "summary": summary}
+    return _impl(section_limit=section_limit, item_limit_per_section=item_limit_per_section)
 
 
 def get_plex_status() -> dict[str, Any]:
-    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
-        latest = conn.execute(
-            """
-            SELECT id, server_name, server_client_identifier, source_fingerprint, status, summary_json, created_at
-            FROM old.plex_sync_runs
-            WHERE status = 'completed'
-            ORDER BY created_at DESC
-            LIMIT 1
-            """
-        ).fetchone()
-        if latest is None:
-            return {
-                "latest_sync": None,
-                "counts": {
-                    "active_library_items": 0,
-                    "mapped_imdb_items": 0,
-                    "mapped_tmdb_items": 0,
-                    "watched_items": 0,
-                },
-            }
+    from filmy.db_legacy import get_plex_status as _impl
 
-        counts = {
-            "active_library_items": conn.execute(
-                "SELECT COUNT(*) FROM old.plex_library_items WHERE is_active = TRUE"
-            ).fetchone()[0],
-            "mapped_imdb_items": conn.execute(
-                "SELECT COUNT(*) FROM old.plex_library_items WHERE is_active = TRUE AND imdb_id IS NOT NULL"
-            ).fetchone()[0],
-            "mapped_tmdb_items": conn.execute(
-                "SELECT COUNT(*) FROM old.plex_library_items WHERE is_active = TRUE AND tmdb_id IS NOT NULL"
-            ).fetchone()[0],
-            "watched_items": conn.execute(
-                """
-                SELECT COUNT(*)
-                FROM old.plex_library_items
-                WHERE is_active = TRUE
-                  AND (
-                    COALESCE(view_count, 0) > 0
-                    OR (
-                        COALESCE(viewed_leaf_count, 0) > 0
-                        AND viewed_leaf_count = leaf_count
-                    )
-                  )
-                """
-            ).fetchone()[0],
-        }
-    return {
-        "latest_sync": {
-            "id": latest[0],
-            "server_name": latest[1],
-            "server_client_identifier": latest[2],
-            "source_fingerprint": latest[3],
-            "status": latest[4],
-            "summary": _loads_json_or_none(latest[5]),
-            "created_at": latest[6],
-        },
-        "counts": counts,
-    }
+    return _impl()
 
 
 def _upsert_plex_library_item(
@@ -6096,100 +5004,9 @@ def _upsert_plex_library_item(
     section: dict[str, Any],
     snapshot: dict[str, Any],
 ) -> None:
-    ids = snapshot.get("ids") or {}
-    imdb_id = ids.get("imdb")
-    tconst = None
-    if imdb_id:
-        found = conn.execute("SELECT tconst FROM app.catalog_titles WHERE tconst = ?", [imdb_id]).fetchone()
-        if found:
-            tconst = found[0]
+    from filmy.db_legacy import _upsert_plex_library_item as _impl
 
-    source_key = _plex_source_key(snapshot["rating_key"])
-    conn.execute(
-        """
-        INSERT INTO old.plex_library_items (
-            source_key,
-            plex_rating_key,
-            plex_guid,
-            section_key,
-            section_title,
-            library_type,
-            title,
-            year,
-            imdb_id,
-            tmdb_id,
-            tvdb_id,
-            tconst,
-            view_count,
-            viewed_leaf_count,
-            leaf_count,
-            last_viewed_at,
-            added_at_src,
-            updated_at_src,
-            originally_available_at,
-            directors_json,
-            roles_json,
-            genres_json,
-            countries_json,
-            is_active,
-            last_seen_sync_id,
-            raw_json
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?, ?)
-        ON CONFLICT (source_key) DO UPDATE SET
-            plex_guid = excluded.plex_guid,
-            section_key = excluded.section_key,
-            section_title = excluded.section_title,
-            library_type = excluded.library_type,
-            title = excluded.title,
-            year = excluded.year,
-            imdb_id = excluded.imdb_id,
-            tmdb_id = excluded.tmdb_id,
-            tvdb_id = excluded.tvdb_id,
-            tconst = excluded.tconst,
-            view_count = excluded.view_count,
-            viewed_leaf_count = excluded.viewed_leaf_count,
-            leaf_count = excluded.leaf_count,
-            last_viewed_at = excluded.last_viewed_at,
-            added_at_src = excluded.added_at_src,
-            updated_at_src = excluded.updated_at_src,
-            originally_available_at = excluded.originally_available_at,
-            directors_json = excluded.directors_json,
-            roles_json = excluded.roles_json,
-            genres_json = excluded.genres_json,
-            countries_json = excluded.countries_json,
-            is_active = TRUE,
-            last_seen_sync_id = excluded.last_seen_sync_id,
-            raw_json = excluded.raw_json
-        """,
-        [
-            source_key,
-            snapshot["rating_key"],
-            snapshot.get("guid"),
-            section.get("key"),
-            section.get("title"),
-            snapshot.get("type") or section.get("type"),
-            snapshot.get("title"),
-            _safe_int(snapshot.get("year")),
-            imdb_id,
-            _safe_int(ids.get("tmdb")),
-            _safe_int(ids.get("tvdb")),
-            tconst,
-            _safe_int(snapshot.get("view_count")),
-            _safe_int(snapshot.get("viewed_leaf_count")),
-            _safe_int(snapshot.get("leaf_count")),
-            _parse_unix_timestamp(snapshot.get("last_viewed_at")),
-            _parse_unix_timestamp(snapshot.get("added_at")),
-            _parse_unix_timestamp(snapshot.get("updated_at")),
-            snapshot.get("originally_available_at"),
-            json.dumps(snapshot.get("directors") or [], ensure_ascii=False),
-            json.dumps(snapshot.get("roles") or [], ensure_ascii=False),
-            json.dumps(snapshot.get("genres") or [], ensure_ascii=False),
-            json.dumps(snapshot.get("countries") or [], ensure_ascii=False),
-            sync_run_id,
-            json.dumps(snapshot, ensure_ascii=False),
-        ],
-    )
+    return _impl(conn, sync_run_id, section, snapshot)
 
 
 def _sync_plex_item_to_local_library(
@@ -6199,190 +5016,27 @@ def _sync_plex_item_to_local_library(
     snapshot: dict[str, Any],
     now: str,
 ) -> bool:
-    ids = snapshot.get("ids") or {}
-    imdb_id = ids.get("imdb")
-    tmdb_id = _safe_int(ids.get("tmdb"))
-    tconst = imdb_id if imdb_id and conn.execute("SELECT COUNT(*) FROM app.catalog_titles WHERE tconst = ?", [imdb_id]).fetchone()[0] else None
-    if tconst is None and imdb_id is None and tmdb_id is None:
-        return False
-    canonical_key = _canonical_media_key("title", tconst, imdb_id, tmdb_id, None, None, None)
+    from filmy.db_legacy import _sync_plex_item_to_local_library as _impl
 
-    _upsert_user_list_item(
-        conn,
-        list_id=list_id,
-        canonical_key=canonical_key,
-        tconst=tconst,
-        media_type="title",
-        imdb_id=imdb_id,
-        tmdb_id=tmdb_id,
-        trakt_id=None,
-        parent_tconst=None,
-        parent_title=None,
-        title=snapshot.get("title"),
-        season_number=None,
-        episode_number=None,
-        rank=None,
-        added_at=_parse_unix_timestamp(snapshot.get("added_at")) or now,
-        notes=f"plex_sync:{sync_run_id}",
-        source_origin="seed_plex_library",
-        source_ref=_plex_source_key(snapshot["rating_key"]),
-        now=now,
-    )
-    return True
+    return _impl(conn, list_id, sync_run_id, snapshot, now)
 
 
 def _sync_plex_watch_state(conn: duckdb.DuckDBPyConnection, snapshot: dict[str, Any]) -> bool:
-    ids = snapshot.get("ids") or {}
-    imdb_id = ids.get("imdb")
-    if not imdb_id:
-        return False
-    found = conn.execute("SELECT COUNT(*) FROM app.catalog_titles WHERE tconst = ?", [imdb_id]).fetchone()[0]
-    if not found or not _plex_item_is_watched(snapshot):
-        return False
+    from filmy.db_legacy import _sync_plex_watch_state as _impl
 
-    watched_at = _parse_unix_timestamp(snapshot.get("last_viewed_at")) or _now_iso()
-    watched_on = watched_at[:10]
-    event_id = f"plex-watch-{snapshot['rating_key']}"
-    conn.execute(
-        """
-        INSERT INTO app.watch_events (
-            id, tconst, event_scope, watched_on, source, batch_id, import_row_id, rating, notes, created_at
-        )
-        VALUES (?, ?, 'title', ?, 'plex', NULL, NULL, NULL, ?, ?)
-        ON CONFLICT (id) DO UPDATE SET
-            tconst = excluded.tconst,
-            watched_on = excluded.watched_on,
-            notes = excluded.notes,
-            created_at = excluded.created_at
-        """,
-        [event_id, imdb_id, watched_on, f"plex_rating_key:{snapshot['rating_key']}", watched_at],
-    )
-    return True
+    return _impl(conn, snapshot)
 
 
 def _sync_plex_content_state(conn: duckdb.DuckDBPyConnection, snapshot: dict[str, Any], now: str) -> bool:
-    ids = snapshot.get("ids") or {}
-    imdb_id = ids.get("imdb")
-    if not imdb_id:
-        return False
-    found = conn.execute("SELECT COUNT(*) FROM app.catalog_titles WHERE tconst = ?", [imdb_id]).fetchone()[0]
-    if not found:
-        return False
+    from filmy.db_legacy import _sync_plex_content_state as _impl
 
-    interest_state = None
-    last_watched_at = None
-    if _plex_item_is_watched(snapshot):
-        interest_state = "watched"
-        last_watched_at = _parse_unix_timestamp(snapshot.get("last_viewed_at")) or now
-    elif _plex_item_is_in_progress(snapshot):
-        interest_state = "in_progress"
-    else:
-        return False
-
-    conn.execute(
-        """
-        INSERT INTO app.content_state (tconst, interest_state, last_previewed_at, last_watched_at, updated_at)
-        VALUES (?, ?, NULL, ?, ?)
-        ON CONFLICT (tconst) DO UPDATE SET
-            interest_state = excluded.interest_state,
-            last_watched_at = COALESCE(excluded.last_watched_at, app.content_state.last_watched_at),
-            updated_at = excluded.updated_at
-        """,
-        [imdb_id, interest_state, last_watched_at, now],
-    )
-    return True
+    return _impl(conn, snapshot, now)
 
 
 def get_local_library_status() -> dict[str, Any]:
-    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
-        counts = {
-            "lists": conn.execute("SELECT COUNT(*) FROM app.user_lists").fetchone()[0],
-            "list_items": conn.execute("SELECT COUNT(*) FROM app.user_list_items WHERE is_archived = FALSE").fetchone()[0],
-            "watchlist_items": conn.execute(
-                """
-                SELECT COUNT(*)
-                FROM app.user_list_items AS i
-                JOIN app.user_lists AS l ON l.id = i.list_id
-                WHERE i.is_archived = FALSE AND l.list_kind = 'watchlist'
-                """
-            ).fetchone()[0],
-            "ratings": conn.execute("SELECT COUNT(*) FROM app.user_ratings").fetchone()[0],
-            "favorite_people": conn.execute("SELECT COUNT(*) FROM app.user_people WHERE is_favorite = TRUE").fetchone()[0],
-            "watch_events": conn.execute("SELECT COUNT(*) FROM app.watch_events").fetchone()[0],
-        }
-        lists = conn.execute(
-            """
-            WITH grouped_items AS (
-                SELECT
-                    i.list_id,
-                    COALESCE(e.series_tconst, i.tconst, i.parent_tconst) AS display_tconst
-                FROM app.user_list_items AS i
-                LEFT JOIN app.catalog_episodes AS e ON e.episode_tconst = i.tconst
-                WHERE i.is_archived = FALSE
-            )
-            SELECT l.id, l.slug, l.name, l.description, l.list_kind, COUNT(DISTINCT g.display_tconst) AS item_count
-            FROM app.user_lists AS l
-            LEFT JOIN grouped_items AS g ON g.list_id = l.id AND g.display_tconst IS NOT NULL
-            GROUP BY 1,2,3,4,5
-            ORDER BY l.list_kind, l.name
-            """
-        ).fetchall()
-        ui_config = get_ui_config()
-    recently_watched_count = get_recently_watched_page(limit=1, offset=0)["total"]
-    watched_count = get_watched_page(limit=1, offset=0)["total"]
+    from filmy.db_library import get_local_library_status as _impl
 
-    base_lists = [
-        {
-            "id": row[0],
-            "slug": row[1],
-            "name": row[2],
-            "description": row[3],
-            "list_kind": row[4],
-            "item_count": row[5],
-            "item_type": "list",
-        }
-        for row in lists
-    ]
-    visible_lists = list(base_lists)
-    visible_lists.append(
-        {
-            "id": WATCHED_VIEW_ID,
-            "slug": "watched",
-            "name": "Watched",
-            "description": "All watched titles from local history.",
-            "list_kind": "view",
-            "item_count": watched_count,
-            "item_type": "view",
-            "view_kind": "watched",
-        }
-    )
-    visible_lists.append(
-        {
-            "id": RECENTLY_WATCHED_VIEW_ID,
-            "slug": "recently-watched",
-            "name": "Recently Watched",
-            "description": f"Local history from the last {ui_config.recently_watched_days} days.",
-            "list_kind": "view",
-            "item_count": recently_watched_count,
-            "item_type": "view",
-            "view_kind": "recently_watched",
-        }
-    )
-
-    def sort_key(item: dict[str, Any]) -> tuple[int, str]:
-        if item["id"] == "watchlist":
-            return (0, item["name"].lower())
-        if item.get("view_kind") == "watched":
-            return (1, item["name"].lower())
-        if item.get("view_kind") == "recently_watched":
-            return (2, item["name"].lower())
-        return (3, item["name"].lower())
-
-    return {
-        "counts": counts,
-        "lists": sorted(base_lists, key=sort_key),
-        "visible_lists": sorted(visible_lists, key=sort_key),
-    }
+    return _impl()
 
 
 def _poster_url_from_detail(detail: dict[str, Any] | None) -> str | None:
@@ -6405,229 +5059,27 @@ def _poster_url_from_local_path(local_path_value: str | None) -> str | None:
 
 
 def get_continue_watching_items(limit: int = 5) -> list[dict[str, Any]]:
-    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
-        rows = conn.execute(
-            """
-            WITH latest_posters AS (
-                SELECT
-                    tconst,
-                    local_path,
-                    row_number() OVER (PARTITION BY tconst ORDER BY fetched_at DESC, id DESC) AS rn
-                FROM app.tmdb_assets
-                WHERE asset_kind = 'poster' AND status = 'fetched'
-            )
-            SELECT
-                cs.tconst,
-                cs.interest_state,
-                cs.last_previewed_at,
-                cs.last_watched_at,
-                cs.updated_at,
-                COALESCE(t.title_type, 'tvEpisode') AS title_type,
-                COALESCE(t.primary_title, e.primary_title) AS primary_title,
-                COALESCE(t.original_title, e.original_title) AS original_title,
-                COALESCE(t.start_year, e.start_year) AS start_year,
-                COALESCE(t.end_year, NULL) AS end_year,
-                COALESCE(t.runtime_minutes, e.runtime_minutes) AS runtime_minutes,
-                t.genres,
-                t.average_rating,
-                t.num_votes,
-                e.series_tconst,
-                e.season_number,
-                e.episode_number,
-                s.primary_title AS series_title,
-                COALESCE(p.local_path, sp.local_path) AS poster_local_path
-            FROM app.content_state AS cs
-            LEFT JOIN app.catalog_titles AS t ON t.tconst = cs.tconst
-            LEFT JOIN app.catalog_episodes AS e ON e.episode_tconst = cs.tconst
-            LEFT JOIN app.catalog_titles AS s ON s.tconst = e.series_tconst
-            LEFT JOIN latest_posters AS p ON p.tconst = cs.tconst AND p.rn = 1
-            LEFT JOIN latest_posters AS sp ON sp.tconst = e.series_tconst AND sp.rn = 1
-            WHERE cs.interest_state = 'in_progress'
-              AND COALESCE(p.local_path, sp.local_path) IS NOT NULL
-            ORDER BY COALESCE(cs.last_previewed_at, cs.updated_at) DESC, COALESCE(cs.last_watched_at, cs.updated_at) DESC
-            LIMIT ?
-            """,
-            [limit],
-        ).fetchall()
+    from filmy.db_library import get_continue_watching_items as _impl
 
-    items: list[dict[str, Any]] = []
-    for row in rows:
-        item = {
-            "tconst": row[0],
-            "interest_state": row[1],
-            "last_previewed_at": row[2],
-            "last_watched_at": row[3],
-            "updated_at": row[4],
-            "title_type": row[5],
-            "title": row[6],
-            "original_title": row[7],
-            "year": row[8],
-            "end_year": row[9],
-            "runtime_minutes": row[10],
-            "genres": row[11] or [],
-            "imdb_rating": row[12],
-            "imdb_votes": row[13],
-            "series_tconst": row[14],
-            "season_number": row[15],
-            "episode_number": row[16],
-            "series_title": row[17],
-            "poster_url": _poster_url_from_local_path(row[18]),
-        }
-        items.append(item)
-    return items
+    return _impl(limit=limit)
+
+
+def get_hot_watchlist_page(limit: int = 50, offset: int = 0) -> dict[str, Any]:
+    from filmy.db_library import get_hot_watchlist_page as _impl
+
+    return _impl(limit=limit, offset=offset)
 
 
 def get_user_list_items_page(list_id: str, limit: int = 50, offset: int = 0) -> dict[str, Any]:
-    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
-        list_row = conn.execute(
-            """
-            SELECT id, slug, name, description, list_kind
-            FROM app.user_lists
-            WHERE id = ?
-            """,
-            [list_id],
-        ).fetchone()
-        if list_row is None:
-            return {"list": None, "total": 0, "items": [], "limit": limit, "offset": offset}
+    from filmy.db_library import get_user_list_items_page as _impl
 
-        total = conn.execute(
-            """
-            WITH latest_posters AS (
-                SELECT
-                    tconst,
-                    local_path,
-                    row_number() OVER (PARTITION BY tconst ORDER BY fetched_at DESC, id DESC) AS rn
-                FROM app.tmdb_assets
-                WHERE asset_kind = 'poster' AND status = 'fetched'
-            )
-            SELECT COUNT(*)
-            FROM (
-                SELECT DISTINCT
-                    COALESCE(e.series_tconst, i.tconst, i.parent_tconst) AS display_tconst
-                FROM app.user_list_items AS i
-                LEFT JOIN app.catalog_episodes AS e ON e.episode_tconst = i.tconst
-                LEFT JOIN latest_posters AS p ON p.tconst = COALESCE(e.series_tconst, i.tconst, i.parent_tconst) AND p.rn = 1
-                WHERE i.list_id = ? AND i.is_archived = FALSE
-                  AND COALESCE(e.series_tconst, i.tconst, i.parent_tconst) IS NOT NULL
-                  AND p.local_path IS NOT NULL
-            ) AS grouped
-            """,
-            [list_id],
-        ).fetchone()[0]
-
-        rows = conn.execute(
-            """
-            WITH latest_posters AS (
-                SELECT
-                    tconst,
-                    local_path,
-                    row_number() OVER (PARTITION BY tconst ORDER BY fetched_at DESC, id DESC) AS rn
-                FROM app.tmdb_assets
-                WHERE asset_kind = 'poster' AND status = 'fetched'
-            ),
-            latest_user_ratings AS (
-                SELECT
-                    tconst,
-                    rating,
-                    row_number() OVER (PARTITION BY tconst ORDER BY rated_at DESC NULLS LAST, updated_at DESC, created_at DESC) AS rn
-                FROM app.user_ratings
-                WHERE tconst IS NOT NULL
-            ),
-            ranked_items AS (
-                SELECT
-                    COALESCE(e.series_tconst, i.tconst, i.parent_tconst) AS display_tconst,
-                    i.tconst AS source_tconst,
-                    i.media_type,
-                    i.title,
-                    i.parent_title,
-                    i.season_number,
-                    i.episode_number,
-                    i.rank,
-                    i.added_at,
-                    i.notes,
-                    l.name,
-                    l.list_kind,
-                    row_number() OVER (
-                        PARTITION BY COALESCE(e.series_tconst, i.tconst, i.parent_tconst)
-                        ORDER BY i.rank NULLS LAST, i.added_at DESC NULLS LAST, COALESCE(i.title, i.parent_title, i.tconst)
-                    ) AS group_row
-                FROM app.user_list_items AS i
-                JOIN app.user_lists AS l ON l.id = i.list_id
-                LEFT JOIN app.catalog_episodes AS e ON e.episode_tconst = i.tconst
-                WHERE i.list_id = ? AND i.is_archived = FALSE
-            )
-            SELECT
-                r.display_tconst,
-                r.media_type,
-                r.title,
-                r.parent_title,
-                NULL AS season_number,
-                NULL AS episode_number,
-                r.rank,
-                r.added_at,
-                r.notes,
-                r.name,
-                r.list_kind,
-                t.title_type AS resolved_title_type,
-                t.start_year AS resolved_year,
-                p.local_path AS poster_local_path,
-                NULL AS resolved_series_title,
-                t.primary_title AS resolved_title,
-                ur.rating AS user_rating
-            FROM ranked_items AS r
-            JOIN app.catalog_titles AS t ON t.tconst = r.display_tconst
-            LEFT JOIN latest_posters AS p ON p.tconst = r.display_tconst AND p.rn = 1
-            LEFT JOIN latest_user_ratings AS ur ON ur.tconst = r.display_tconst AND ur.rn = 1
-            WHERE r.group_row = 1
-              AND r.display_tconst IS NOT NULL
-              AND p.local_path IS NOT NULL
-            ORDER BY r.rank NULLS LAST, r.added_at DESC NULLS LAST, COALESCE(r.title, r.parent_title, r.display_tconst)
-            LIMIT ? OFFSET ?
-            """,
-            [list_id, limit, offset],
-        ).fetchall()
-
-    items: list[dict[str, Any]] = []
-    for row in rows:
-        item = {
-            "tconst": row[0],
-            "media_type": row[1],
-            "title": row[15],
-            "parent_title": row[3],
-            "season_number": row[4],
-            "episode_number": row[5],
-            "rank": row[6],
-            "added_at": row[7],
-            "notes": row[8],
-            "list_name": row[9],
-            "list_kind": row[10],
-            "poster_url": _poster_url_from_local_path(row[13]),
-            "title_type": row[11],
-            "year": row[12],
-            "end_year": None,
-            "runtime_minutes": None,
-            "series_title": row[14],
-            "user_rating": row[16],
-        }
-        items.append(item)
-
-    return {
-        "list": {
-            "id": list_row[0],
-            "slug": list_row[1],
-            "name": list_row[2],
-            "description": list_row[3],
-            "list_kind": list_row[4],
-        },
-        "total": total,
-        "items": items,
-        "limit": limit,
-        "offset": offset,
-    }
+    return _impl(list_id, limit=limit, offset=offset)
 
 
 def get_user_list_items(list_id: str, limit: int = 12) -> list[dict[str, Any]]:
-    return get_user_list_items_page(list_id, limit=limit, offset=0)["items"]
+    from filmy.db_library import get_user_list_items as _impl
+
+    return _impl(list_id, limit=limit)
 
 
 def format_czech_datetime(value: Any) -> str | None:
@@ -6648,86 +5100,9 @@ def _sync_trakt_history(
     sync_run_id: str,
     files: list[dict[str, Any]],
 ) -> dict[str, int]:
-    imported = 0
-    watch_events_synced = 0
-    for file_info in files:
-        for item in _load_json_file(Path(file_info["path"])):
-            history_id = _safe_int(item.get("id"))
-            watched_at = item.get("watched_at")
-            if history_id is None or not watched_at:
-                continue
-            media = _extract_trakt_media(item)
-            conn.execute(
-                """
-                INSERT INTO old.trakt_history_events (
-                    history_id, tconst, media_type, trakt_id, imdb_id, tmdb_id, parent_trakt_id, parent_title,
-                    title, season_number, episode_number, watched_at, watched_on, action, is_active,
-                    last_seen_sync_id, raw_json
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?, ?)
-                ON CONFLICT (history_id) DO UPDATE SET
-                    tconst = excluded.tconst,
-                    media_type = excluded.media_type,
-                    trakt_id = excluded.trakt_id,
-                    imdb_id = excluded.imdb_id,
-                    tmdb_id = excluded.tmdb_id,
-                    parent_trakt_id = excluded.parent_trakt_id,
-                    parent_title = excluded.parent_title,
-                    title = excluded.title,
-                    season_number = excluded.season_number,
-                    episode_number = excluded.episode_number,
-                    watched_at = excluded.watched_at,
-                    watched_on = excluded.watched_on,
-                    action = excluded.action,
-                    is_active = TRUE,
-                    last_seen_sync_id = excluded.last_seen_sync_id,
-                    raw_json = excluded.raw_json
-                """,
-                [
-                    history_id,
-                    media["tconst"],
-                    media["media_type"],
-                    media["trakt_id"],
-                    media["imdb_id"],
-                    media["tmdb_id"],
-                    media["parent_trakt_id"],
-                    media["parent_title"],
-                    media["title"],
-                    media["season_number"],
-                    media["episode_number"],
-                    watched_at,
-                    watched_at[:10],
-                    item.get("action"),
-                    sync_run_id,
-                    json.dumps(item, ensure_ascii=False),
-                ],
-            )
-            conn.execute("DELETE FROM app.watch_events WHERE id = ?", [f"trakt-history-{history_id}"])
-            conn.execute(
-                """
-                INSERT INTO app.watch_events (
-                    id, tconst, event_scope, watched_on, source, batch_id, import_row_id, rating, notes, created_at
-                )
-                VALUES (?, ?, ?, ?, 'trakt_export', ?, NULL, NULL, NULL, ?)
-                """,
-                [
-                    f"trakt-history-{history_id}",
-                    media["tconst"] or media["imdb_id"] or f"unresolved:{history_id}",
-                    "episode" if media["media_type"] == "episode" else "title",
-                    watched_at[:10],
-                    sync_run_id,
-                    watched_at,
-                ],
-            )
-            conn.execute(
-                "INSERT INTO old.trakt_history_snapshot (sync_run_id, history_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
-                [sync_run_id, history_id],
-            )
-            imported += 1
-            watch_events_synced += 1
+    from filmy.db_legacy import _sync_trakt_history as _impl
 
-    conn.execute("UPDATE old.trakt_history_events SET is_active = FALSE WHERE last_seen_sync_id <> ?", [sync_run_id])
-    return {"imported": imported, "watch_events_synced": watch_events_synced}
+    return _impl(conn, sync_run_id, files)
 
 
 def _sync_trakt_ratings(
@@ -6735,64 +5110,9 @@ def _sync_trakt_ratings(
     sync_run_id: str,
     files: list[dict[str, Any]],
 ) -> dict[str, int]:
-    imported = 0
-    for file_info in files:
-        for item in _load_json_file(Path(file_info["path"])):
-            media = _extract_trakt_media(item)
-            source_key = _build_trakt_media_key(media)
-            rated_at = item.get("rated_at")
-            rating = _safe_int(item.get("rating"))
-            if not source_key or rated_at is None or rating is None:
-                continue
-            conn.execute(
-                """
-                INSERT INTO old.trakt_ratings (
-                    source_key, media_type, trakt_id, imdb_id, tmdb_id, tconst, parent_trakt_id, parent_title,
-                    title, season_number, episode_number, rating, rated_at, is_active, last_seen_sync_id, raw_json
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?, ?)
-                ON CONFLICT (source_key) DO UPDATE SET
-                    media_type = excluded.media_type,
-                    trakt_id = excluded.trakt_id,
-                    imdb_id = excluded.imdb_id,
-                    tmdb_id = excluded.tmdb_id,
-                    tconst = excluded.tconst,
-                    parent_trakt_id = excluded.parent_trakt_id,
-                    parent_title = excluded.parent_title,
-                    title = excluded.title,
-                    season_number = excluded.season_number,
-                    episode_number = excluded.episode_number,
-                    rating = excluded.rating,
-                    rated_at = excluded.rated_at,
-                    is_active = TRUE,
-                    last_seen_sync_id = excluded.last_seen_sync_id,
-                    raw_json = excluded.raw_json
-                """,
-                [
-                    source_key,
-                    media["media_type"],
-                    media["trakt_id"],
-                    media["imdb_id"],
-                    media["tmdb_id"],
-                    media["tconst"],
-                    media["parent_trakt_id"],
-                    media["parent_title"],
-                    media["title"],
-                    media["season_number"],
-                    media["episode_number"],
-                    rating,
-                    rated_at,
-                    sync_run_id,
-                    json.dumps(item, ensure_ascii=False),
-                ],
-            )
-            conn.execute(
-                "INSERT INTO old.trakt_ratings_snapshot (sync_run_id, source_key) VALUES (?, ?) ON CONFLICT DO NOTHING",
-                [sync_run_id, source_key],
-            )
-            imported += 1
-    conn.execute("UPDATE old.trakt_ratings SET is_active = FALSE WHERE last_seen_sync_id <> ?", [sync_run_id])
-    return {"imported": imported}
+    from filmy.db_legacy import _sync_trakt_ratings as _impl
+
+    return _impl(conn, sync_run_id, files)
 
 
 def _sync_trakt_lists(
@@ -6802,195 +5122,9 @@ def _sync_trakt_lists(
     custom_list_files: list[dict[str, Any]],
     watchlist_files: list[dict[str, Any]],
 ) -> dict[str, int]:
-    imported_lists = 0
-    imported_items = 0
-    list_name_map: dict[str, str] = {}
+    from filmy.db_legacy import _sync_trakt_lists as _impl
 
-    for file_info in metadata_files:
-        for item in _load_json_file(Path(file_info["path"])):
-            trakt_list_id = _safe_int(((item.get("ids") or {}).get("trakt")))
-            if trakt_list_id is None:
-                continue
-            conn.execute(
-                """
-                INSERT INTO old.trakt_lists (
-                    trakt_list_id, slug, name, description, privacy, list_type, item_count, updated_at,
-                    is_active, last_seen_sync_id, raw_json
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?, ?)
-                ON CONFLICT (trakt_list_id) DO UPDATE SET
-                    slug = excluded.slug,
-                    name = excluded.name,
-                    description = excluded.description,
-                    privacy = excluded.privacy,
-                    list_type = excluded.list_type,
-                    item_count = excluded.item_count,
-                    updated_at = excluded.updated_at,
-                    is_active = TRUE,
-                    last_seen_sync_id = excluded.last_seen_sync_id,
-                    raw_json = excluded.raw_json
-                """,
-                [
-                    trakt_list_id,
-                    (item.get("ids") or {}).get("slug"),
-                    item.get("name"),
-                    item.get("description"),
-                    item.get("privacy"),
-                    item.get("type"),
-                    _safe_int(item.get("item_count")),
-                    item.get("updated_at"),
-                    sync_run_id,
-                    json.dumps(item, ensure_ascii=False),
-                ],
-            )
-            list_name_map[str(trakt_list_id)] = item.get("name") or ""
-            imported_lists += 1
-    conn.execute("UPDATE old.trakt_lists SET is_active = FALSE WHERE last_seen_sync_id <> ?", [sync_run_id])
-
-    for file_info in custom_list_files:
-        list_id = _parse_trakt_list_id_from_filename(file_info["name"])
-        list_name = list_name_map.get(list_id)
-        for item in _load_json_file(Path(file_info["path"])):
-            media = _extract_trakt_media(item)
-            item_id = _safe_int(item.get("id"))
-            if item_id is None:
-                continue
-            conn.execute(
-                """
-                INSERT INTO old.trakt_list_items (
-                    source_key, trakt_list_id, list_kind, list_name, item_id, media_type, trakt_id, imdb_id, tmdb_id,
-                    tconst, parent_trakt_id, parent_title, title, season_number, episode_number, rank, listed_at,
-                    notes, my_rating, is_active, last_seen_sync_id, raw_json
-                )
-                VALUES (?, ?, 'custom', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?, ?)
-                ON CONFLICT (source_key) DO UPDATE SET
-                    list_name = excluded.list_name,
-                    item_id = excluded.item_id,
-                    media_type = excluded.media_type,
-                    trakt_id = excluded.trakt_id,
-                    imdb_id = excluded.imdb_id,
-                    tmdb_id = excluded.tmdb_id,
-                    tconst = excluded.tconst,
-                    parent_trakt_id = excluded.parent_trakt_id,
-                    parent_title = excluded.parent_title,
-                    title = excluded.title,
-                    season_number = excluded.season_number,
-                    episode_number = excluded.episode_number,
-                    rank = excluded.rank,
-                    listed_at = excluded.listed_at,
-                    notes = excluded.notes,
-                    my_rating = excluded.my_rating,
-                    is_active = TRUE,
-                    last_seen_sync_id = excluded.last_seen_sync_id,
-                    raw_json = excluded.raw_json
-                """,
-                [
-                    f"{list_id}:{item_id}",
-                    list_id,
-                    list_name,
-                    item_id,
-                    media["media_type"],
-                    media["trakt_id"],
-                    media["imdb_id"],
-                    media["tmdb_id"],
-                    media["tconst"],
-                    media["parent_trakt_id"],
-                    media["parent_title"],
-                    media["title"],
-                    media["season_number"],
-                    media["episode_number"],
-                    _safe_int(item.get("rank")),
-                    item.get("listed_at"),
-                    item.get("notes"),
-                    _safe_int(item.get("my_rating")),
-                    sync_run_id,
-                    json.dumps(item, ensure_ascii=False),
-                ],
-            )
-            conn.execute(
-                "INSERT INTO old.trakt_list_items_snapshot (sync_run_id, source_key) VALUES (?, ?) ON CONFLICT DO NOTHING",
-                [sync_run_id, f"{list_id}:{item_id}"],
-            )
-            imported_items += 1
-
-    for file_info in watchlist_files:
-        for item in _load_json_file(Path(file_info["path"])):
-            media = _extract_trakt_media(item)
-            item_id = _safe_int(item.get("id"))
-            if item_id is None:
-                continue
-            conn.execute(
-                """
-                INSERT INTO old.trakt_list_items (
-                    source_key, trakt_list_id, list_kind, list_name, item_id, media_type, trakt_id, imdb_id, tmdb_id,
-                    tconst, parent_trakt_id, parent_title, title, season_number, episode_number, rank, listed_at,
-                    notes, my_rating, is_active, last_seen_sync_id, raw_json
-                )
-                VALUES (?, 'watchlist', 'watchlist', 'Watchlist', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?, ?)
-                ON CONFLICT (source_key) DO UPDATE SET
-                    item_id = excluded.item_id,
-                    media_type = excluded.media_type,
-                    trakt_id = excluded.trakt_id,
-                    imdb_id = excluded.imdb_id,
-                    tmdb_id = excluded.tmdb_id,
-                    tconst = excluded.tconst,
-                    parent_trakt_id = excluded.parent_trakt_id,
-                    parent_title = excluded.parent_title,
-                    title = excluded.title,
-                    season_number = excluded.season_number,
-                    episode_number = excluded.episode_number,
-                    rank = excluded.rank,
-                    listed_at = excluded.listed_at,
-                    notes = excluded.notes,
-                    my_rating = excluded.my_rating,
-                    is_active = TRUE,
-                    last_seen_sync_id = excluded.last_seen_sync_id,
-                    raw_json = excluded.raw_json
-                """,
-                [
-                    f"watchlist:{item_id}",
-                    item_id,
-                    media["media_type"],
-                    media["trakt_id"],
-                    media["imdb_id"],
-                    media["tmdb_id"],
-                    media["tconst"],
-                    media["parent_trakt_id"],
-                    media["parent_title"],
-                    media["title"],
-                    media["season_number"],
-                    media["episode_number"],
-                    _safe_int(item.get("rank")),
-                    item.get("listed_at"),
-                    item.get("notes"),
-                    _safe_int(item.get("my_rating")),
-                    sync_run_id,
-                    json.dumps(item, ensure_ascii=False),
-                ],
-            )
-            conn.execute(
-                "INSERT INTO old.trakt_list_items_snapshot (sync_run_id, source_key) VALUES (?, ?) ON CONFLICT DO NOTHING",
-                [sync_run_id, f"watchlist:{item_id}"],
-            )
-            imported_items += 1
-
-    conn.execute(
-        """
-        UPDATE old.trakt_list_items
-        SET is_active = FALSE
-        WHERE list_kind = 'custom' AND last_seen_sync_id <> ?
-        """,
-        [sync_run_id],
-    )
-    conn.execute(
-        """
-        UPDATE old.trakt_list_items
-        SET is_active = FALSE
-        WHERE list_kind = 'watchlist' AND last_seen_sync_id <> ?
-        """,
-        [sync_run_id],
-    )
-    return {"lists_imported": imported_lists, "items_imported": imported_items}
+    return _impl(conn, sync_run_id, metadata_files, custom_list_files, watchlist_files)
 
 
 def _sync_trakt_collection(
@@ -6998,68 +5132,15 @@ def _sync_trakt_collection(
     sync_run_id: str,
     files: list[dict[str, Any]],
 ) -> dict[str, int]:
-    imported = 0
-    for file_info in files:
-        for item in _load_json_file(Path(file_info["path"])):
-            media = _extract_trakt_media(item)
-            source_key = _build_trakt_media_key(media)
-            if not source_key:
-                continue
-            conn.execute(
-                """
-                INSERT INTO old.trakt_collection_items (
-                    source_key, media_type, trakt_id, imdb_id, tmdb_id, tconst, parent_trakt_id, parent_title,
-                    title, season_number, episode_number, collected_at, updated_at, is_active, last_seen_sync_id, raw_json
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?, ?)
-                ON CONFLICT (source_key) DO UPDATE SET
-                    media_type = excluded.media_type,
-                    trakt_id = excluded.trakt_id,
-                    imdb_id = excluded.imdb_id,
-                    tmdb_id = excluded.tmdb_id,
-                    tconst = excluded.tconst,
-                    parent_trakt_id = excluded.parent_trakt_id,
-                    parent_title = excluded.parent_title,
-                    title = excluded.title,
-                    season_number = excluded.season_number,
-                    episode_number = excluded.episode_number,
-                    collected_at = excluded.collected_at,
-                    updated_at = excluded.updated_at,
-                    is_active = TRUE,
-                    last_seen_sync_id = excluded.last_seen_sync_id,
-                    raw_json = excluded.raw_json
-                """,
-                [
-                    source_key,
-                    media["media_type"],
-                    media["trakt_id"],
-                    media["imdb_id"],
-                    media["tmdb_id"],
-                    media["tconst"],
-                    media["parent_trakt_id"],
-                    media["parent_title"],
-                    media["title"],
-                    media["season_number"],
-                    media["episode_number"],
-                    item.get("collected_at"),
-                    item.get("updated_at"),
-                    sync_run_id,
-                    json.dumps(item, ensure_ascii=False),
-                ],
-            )
-            conn.execute(
-                "INSERT INTO old.trakt_collection_snapshot (sync_run_id, source_key) VALUES (?, ?) ON CONFLICT DO NOTHING",
-                [sync_run_id, source_key],
-            )
-            imported += 1
-    conn.execute("UPDATE old.trakt_collection_items SET is_active = FALSE WHERE last_seen_sync_id <> ?", [sync_run_id])
-    return {"imported": imported}
+    from filmy.db_legacy import _sync_trakt_collection as _impl
+
+    return _impl(conn, sync_run_id, files)
 
 
 def _read_last_activities(files: list[dict[str, Any]]) -> dict[str, Any] | None:
-    if not files:
-        return None
-    return _load_json_file(Path(files[0]["path"]))
+    from filmy.db_legacy import _read_last_activities as _impl
+
+    return _impl(files)
 
 
 def _catalog_needs_refresh(conn: duckdb.DuckDBPyConnection) -> bool:
@@ -7786,15 +5867,39 @@ def _create_base_schema(conn: duckdb.DuckDBPyConnection) -> None:
             source_origin VARCHAR NOT NULL,
             source_ref VARCHAR,
             is_favorite BOOLEAN NOT NULL DEFAULT TRUE,
+            affinity_rating INTEGER NOT NULL DEFAULT 0,
             created_at TIMESTAMP NOT NULL,
             updated_at TIMESTAMP NOT NULL
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app.search_recall (
+            id VARCHAR PRIMARY KEY,
+            entity_type VARCHAR NOT NULL,
+            query_text VARCHAR NOT NULL,
+            query_text_fold VARCHAR NOT NULL,
+            query_key VARCHAR NOT NULL,
+            target_id VARCHAR NOT NULL,
+            target_label VARCHAR,
+            target_title_type VARCHAR,
+            matched_alias_title VARCHAR,
+            fuzzy_score DOUBLE,
+            first_searched_at TIMESTAMP NOT NULL,
+            last_searched_at TIMESTAMP NOT NULL,
+            hit_count INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    conn.execute("ALTER TABLE app.user_people ADD COLUMN IF NOT EXISTS affinity_rating INTEGER")
+    conn.execute("UPDATE app.user_people SET affinity_rating = 0 WHERE affinity_rating IS NULL")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_favorite_genres_active_rank ON app.favorite_genres(is_active, preference_rank)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_favorite_traits_active_rank ON app.favorite_traits(is_active, preference_rank)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_genre_scores_genre_generated_at ON app.genre_scores(genre, generated_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_genre_scores_scope_generated_at ON app.genre_scores(score_scope, generated_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_search_recall_entity_query_key ON app.search_recall(entity_type, query_key)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_search_recall_last_searched_at ON app.search_recall(last_searched_at)")
 
     _archive_import_reference_tables(conn)
     _migrate_legacy_watch_history(conn)
@@ -8172,7 +6277,10 @@ def _upsert_user_list_item(
             parent_title = COALESCE(app.user_list_items.parent_title, excluded.parent_title),
             title = COALESCE(app.user_list_items.title, excluded.title),
             rank = COALESCE(app.user_list_items.rank, excluded.rank),
-            added_at = COALESCE(app.user_list_items.added_at, excluded.added_at),
+            added_at = CASE
+                WHEN app.user_list_items.is_archived THEN COALESCE(excluded.added_at, app.user_list_items.added_at)
+                ELSE COALESCE(app.user_list_items.added_at, excluded.added_at)
+            END,
             notes = COALESCE(app.user_list_items.notes, excluded.notes),
             is_archived = FALSE,
             updated_at = excluded.updated_at
@@ -8486,7 +6594,7 @@ def _fetch_library_summary(conn: duckdb.DuckDBPyConnection, tconst: str, title_t
         watched_count = conn.execute("SELECT COUNT(*) FROM app.watch_events WHERE tconst = ?", [tconst]).fetchone()[0]
         last_watched_at = conn.execute("SELECT MAX(created_at) FROM app.watch_events WHERE tconst = ?", [tconst]).fetchone()[0]
 
-    in_watchlist = conn.execute(
+    raw_in_watchlist = conn.execute(
         """
         SELECT COUNT(*)
         FROM app.user_list_items AS i
@@ -8495,6 +6603,7 @@ def _fetch_library_summary(conn: duckdb.DuckDBPyConnection, tconst: str, title_t
         """,
         [tconst],
     ).fetchone()[0] > 0
+    in_watchlist = raw_in_watchlist and watched_count == 0
     rating = conn.execute(
         """
         SELECT rating, rated_at
@@ -8510,7 +6619,7 @@ def _fetch_library_summary(conn: duckdb.DuckDBPyConnection, tconst: str, title_t
         SELECT l.name, l.list_kind, i.rank, i.added_at
         FROM app.user_list_items AS i
         JOIN app.user_lists AS l ON l.id = i.list_id
-        WHERE i.tconst = ? AND i.is_archived = FALSE
+        WHERE i.tconst = ? AND i.is_archived = FALSE AND l.list_kind <> 'watchlist'
         ORDER BY
             CASE WHEN l.list_kind = 'watchlist' THEN 1 ELSE 0 END,
             i.added_at DESC NULLS LAST,
@@ -9317,69 +7426,9 @@ def _sync_imdb_watchlist(
     sync_run_id: str,
     file_info: dict[str, Any] | None,
 ) -> dict[str, int]:
-    if file_info is None:
-        return {"imported": 0}
-    imported = 0
-    for row in _read_csv_rows(Path(file_info["path"])):
-        tconst = (row.get("Const") or "").strip()
-        if not tconst:
-            continue
-        conn.execute(
-            """
-            INSERT INTO old.imdb_watchlist_items (
-                tconst, position, created_at_src, modified_at_src, description, title, original_title, url,
-                title_type, imdb_rating, runtime_minutes, year, genres, num_votes, release_date, directors,
-                your_rating, date_rated, is_active, last_seen_sync_id, raw_json
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?, ?)
-            ON CONFLICT (tconst) DO UPDATE SET
-                position = excluded.position,
-                created_at_src = excluded.created_at_src,
-                modified_at_src = excluded.modified_at_src,
-                description = excluded.description,
-                title = excluded.title,
-                original_title = excluded.original_title,
-                url = excluded.url,
-                title_type = excluded.title_type,
-                imdb_rating = excluded.imdb_rating,
-                runtime_minutes = excluded.runtime_minutes,
-                year = excluded.year,
-                genres = excluded.genres,
-                num_votes = excluded.num_votes,
-                release_date = excluded.release_date,
-                directors = excluded.directors,
-                your_rating = excluded.your_rating,
-                date_rated = excluded.date_rated,
-                is_active = TRUE,
-                last_seen_sync_id = excluded.last_seen_sync_id,
-                raw_json = excluded.raw_json
-            """,
-            [
-                tconst,
-                _safe_int(row.get("Position")),
-                row.get("Created") or None,
-                row.get("Modified") or None,
-                row.get("Description") or None,
-                row.get("Title") or None,
-                row.get("Original Title") or None,
-                row.get("URL") or None,
-                row.get("Title Type") or None,
-                _safe_float(row.get("IMDb Rating")),
-                _safe_int(row.get("Runtime (mins)")),
-                _safe_int(row.get("Year")),
-                row.get("Genres") or None,
-                _safe_int(row.get("Num Votes")),
-                _parse_iso_date(row.get("Release Date")),
-                row.get("Directors") or None,
-                _safe_int(row.get("Your Rating")),
-                _parse_iso_date(row.get("Date Rated")),
-                sync_run_id,
-                json.dumps(row, ensure_ascii=False),
-            ],
-        )
-        imported += 1
-    conn.execute("UPDATE old.imdb_watchlist_items SET is_active = FALSE WHERE last_seen_sync_id <> ?", [sync_run_id])
-    return {"imported": imported}
+    from filmy.db_legacy import _sync_imdb_watchlist as _impl
+
+    return _impl(conn, sync_run_id, file_info)
 
 
 def _sync_imdb_favorite_people(
@@ -9387,48 +7436,9 @@ def _sync_imdb_favorite_people(
     sync_run_id: str,
     file_info: dict[str, Any] | None,
 ) -> dict[str, int]:
-    if file_info is None:
-        return {"imported": 0}
-    imported = 0
-    for row in _read_csv_rows(Path(file_info["path"])):
-        nconst = (row.get("Const") or "").strip()
-        if not nconst:
-            continue
-        conn.execute(
-            """
-            INSERT INTO old.imdb_favorite_people (
-                nconst, position, created_at_src, modified_at_src, description, name, known_for, birth_date,
-                is_active, last_seen_sync_id, raw_json
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?, ?)
-            ON CONFLICT (nconst) DO UPDATE SET
-                position = excluded.position,
-                created_at_src = excluded.created_at_src,
-                modified_at_src = excluded.modified_at_src,
-                description = excluded.description,
-                name = excluded.name,
-                known_for = excluded.known_for,
-                birth_date = excluded.birth_date,
-                is_active = TRUE,
-                last_seen_sync_id = excluded.last_seen_sync_id,
-                raw_json = excluded.raw_json
-            """,
-            [
-                nconst,
-                _safe_int(row.get("Position")),
-                row.get("Created") or None,
-                row.get("Modified") or None,
-                row.get("Description") or None,
-                row.get("Name") or None,
-                row.get("Known For") or None,
-                row.get("Birth Date") or None,
-                sync_run_id,
-                json.dumps(row, ensure_ascii=False),
-            ],
-        )
-        imported += 1
-    conn.execute("UPDATE old.imdb_favorite_people SET is_active = FALSE WHERE last_seen_sync_id <> ?", [sync_run_id])
-    return {"imported": imported}
+    from filmy.db_legacy import _sync_imdb_favorite_people as _impl
+
+    return _impl(conn, sync_run_id, file_info)
 
 
 def _loads_json_or_none(value: str | None) -> Any:

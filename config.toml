@@ -10,6 +10,14 @@ my_lists_selected_limit = 50
 # Starší watch eventy zůstávají v databázi, ale tento pohled je ignoruje.
 recently_watched_days = 183
 
+# Kolik naposledy přidaných titulů z watchlistu se má zobrazit v Hot Watchlist.
+# Řazení je vždy podle data přidání do watchlistu sestupně.
+hot_watchlist_limit = 50
+
+# Kolik posledních vyhledávacích mapování si appka drží pro rychlé opakované lookupy.
+# Každý záznam je varianta hledaného textu namapovaná na konkrétní titul nebo osobu.
+search_recall_limit = 500
+
 # Primární jazyk TMDB detailu pro zobrazení v appce.
 # Povolené hodnoty jsou jen "EN" a "CZ"; druhý jazyk se automaticky bere jako fallback.
 tmdb_primary_language = "EN"

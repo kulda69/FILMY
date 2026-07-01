@@ -21,6 +21,37 @@ TMDB v této vrstvě neslouží jako vyhledávací základ. Je jen enrichment vr
 
 ## 2. Co dnes existuje
 
+### Rychlá recall vrstva
+
+Než se spustí plné lookup vyhledávání, appka se nejdřív dívá do pomocné tabulky `app.search_recall`.
+
+Smysl:
+
+- urychlit opakované hledání stejného titulu nebo osoby
+- pamatovat si i varianty dotazu, včetně překlepů nebo zkomolenin
+- při nalezení přímé mapy vrátit rovnou detail cíle bez celého fuzzy pipeline průchodu
+
+Tabulka drží:
+
+- původní hledaný text
+- normalizovaný `query_key`
+- typ cíle (`title` / `person`)
+- cílové IMDb ID (`tt...` / `nm...`)
+- poslední známé fuzzy skóre
+- počet použití a čas posledního použití
+
+Velikost je omezená konfigurací:
+
+- `search_recall_limit` v `config.toml`
+- výchozí hodnota je `500`
+
+Chování:
+
+- pokud se v `app.search_recall` najde odpovídající mapování, lookup ho použije jako první
+- pokud se nic nenajde, běží normální titulová nebo person lookup pipeline
+- do recall vrstvy se zapisují jen smysluplné, dostatečně jisté výsledky
+- recall zápis je jen optimalizace; při locku databáze nesmí shodit samotné vyhledávání
+
 ### Tituly
 
 V kódu jsou dnes dvě odlišné cesty:
@@ -33,6 +64,7 @@ V kódu jsou dnes dvě odlišné cesty:
 2. `lookup_title_by_query(...)`
    - hlavní tolerantní lookup
    - umí překlepy a vícekrokové dohledání
+   - nejdřív kontroluje `app.search_recall`
    - vrací:
      - vybraný titul
      - shortlist kandidátů
@@ -45,6 +77,7 @@ Podobně existuje:
 1. `lookup_person_by_query(...)`
    - tolerantní lookup osob
    - pracuje nad `app.catalog_people`
+   - nejdřív kontroluje `app.search_recall`
    - vrací vybranou osobu i kandidáty
 
 ## 3. API endpointy
@@ -119,7 +152,23 @@ Tohle je důležitější cesta. Cíl je:
 - může mít drobný překlep
 - výsledkem má být jeden nejlepší kandidát a zároveň shortlist dalších možností
 
-Flow má dnes tři vrstvy.
+Flow má dnes čtyři vrstvy.
+
+### 5.0 Nultá vrstva: search recall
+
+Nejprve se kontroluje `app.search_recall`.
+
+Pokud tam pro daný dotaz už existuje dříve ověřené mapování:
+
+- vrátí se rovnou dříve nalezený titul
+- obejde se katalogový substring search i fuzzy výpočet
+- při úspěšném použití se záznam znovu označí jako čerstvě použitý
+
+To je určené hlavně pro opakované dotazy typu:
+
+- stejné jméno osoby hledané vícekrát za sebou
+- stejný titul hledaný opakovaně
+- stejný překlep, který už jednou správně vedl na konkrétní výsledek
 
 ### 5.1 První vrstva: přímé substring hledání
 

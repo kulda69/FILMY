@@ -5,6 +5,10 @@
 {% block content %}
 {% set current_label = title_item.title %}
 {% include "_top_breadcrumbs.html" %}
+{% set user_rating_value = library_state.rating.value if library_state and library_state.rating else 0 %}
+{% set user_rating_full_stars = user_rating_value // 2 %}
+{% set user_rating_has_half_star = user_rating_value % 2 == 1 %}
+{% set user_rating_empty_stars = 5 - user_rating_full_stars - (1 if user_rating_has_half_star else 0) %}
 
 <section class="mb-4">
     <div class="card bg-black border-secondary-subtle overflow-hidden">
@@ -12,17 +16,18 @@
         <div class="title-hero-backdrop border-bottom border-secondary-subtle" style="background-image: linear-gradient(rgba(0, 0, 0, 0.18), rgba(0, 0, 0, 0.86)), url('{{ backdrop_url }}');"></div>
         {% endif %}
         <div class="card-body p-4 p-lg-5">
-            <div class="row g-4 g-xl-5 align-items-start">
-                <div class="col-12 col-lg-5 col-xl-4">
-                    {% if poster_url %}
-                    <img src="{{ poster_url }}" alt="Poster for {{ title_item.title }}" class="img-fluid rounded-4 border border-secondary-subtle w-100 title-hero-poster">
-                    {% else %}
-                    <div class="rounded-4 border border-secondary-subtle bg-body-tertiary d-flex align-items-center justify-content-center text-secondary text-center px-3 title-hero-poster">
-                        Poster not available yet.
-                    </div>
-                    {% endif %}
+            <div class="float-lg-start me-lg-5 mb-4" style="width: min(100%, 19rem);">
+                {% if poster_url %}
+                <img src="{{ poster_url }}" alt="Poster for {{ title_item.title }}" class="img-fluid rounded-4 border border-secondary-subtle w-100 title-hero-poster">
+                {% else %}
+                <div class="rounded-4 border border-secondary-subtle bg-body-tertiary d-flex align-items-center justify-content-center text-secondary text-center px-3 title-hero-poster">
+                    Poster not available yet.
                 </div>
-                <div class="col-12 col-lg-7 col-xl-8">
+                {% endif %}
+            </div>
+
+            <div class="overflow-hidden">
+                <div class="mb-4">
                     <div class="d-flex flex-wrap gap-2 mb-4">
                         <span class="badge text-bg-light text-dark px-3 py-2">{{ title_item.kind_label }}</span>
                         {% if title_item.year %}
@@ -40,13 +45,112 @@
                         {% if content_state.interest_state %}
                         <span class="badge text-bg-dark border border-secondary-subtle px-3 py-2">{{ content_state.interest_state }}</span>
                         {% endif %}
-                        {% if library_state.rating %}
-                        <span class="badge px-3 py-2 text-dark border-0" style="background-color: #d7b1aa;">You: {{ library_state.rating.value }}</span>
+                        {% if user_rating_value > 0 %}
+                        <span class="d-inline-flex align-items-center gap-2 px-1">
+                            <span style="color: #f5c26b;">You:</span>
+                            <span class="fs-5 lh-1" style="color: #f5c26b;">{{ "★" * user_rating_full_stars }}{% if user_rating_has_half_star %}½{% endif %}{{ "☆" * user_rating_empty_stars }}</span>
+                        </span>
                         {% endif %}
                         <span class="badge text-bg-dark border border-secondary-subtle text-secondary-emphasis px-3 py-2">{{ title_item.tconst }}</span>
                     </div>
 
-                    <h1 class="display-4 mb-3 lh-1" style="color: #b56a33;">{{ title_item.title }}</h1>
+                    <div class="d-flex align-items-start gap-3 mb-3">
+                        <h1 class="display-4 mb-0 lh-1 flex-grow-1" style="color: #b56a33;">{{ title_item.title }}</h1>
+                        {% set title_menu_id = "title-menu-" ~ title_item.tconst %}
+                        <div class="ms-auto">
+                            <button
+                                type="button"
+                                class="card-menu-trigger text-secondary border-0 bg-transparent p-0"
+                                popovertarget="{{ title_menu_id }}"
+                                aria-label="Item actions for {{ title_item.title }}"
+                            >...</button>
+                            <div id="{{ title_menu_id }}" popover class="card-menu-panel">
+                                <div class="card-menu-view" data-menu-view="root">
+                                    <form action="/ui/list-actions/watched" method="post" class="m-0">
+                                        <input type="hidden" name="tconst" value="{{ title_item.tconst }}">
+                                        <input type="hidden" name="return_to" value="{{ title_return_to }}">
+                                        <button type="submit" class="card-menu-item">Watched</button>
+                                    </form>
+                                    <button
+                                        type="button"
+                                        class="card-menu-item d-flex justify-content-between align-items-center"
+                                        data-menu-open="rating"
+                                    >
+                                        <span>Rate</span>
+                                        {% if library_state.rating %}
+                                        <span class="small text-secondary">{{ "%.1f"|format(library_state.rating.value / 2) }}★</span>
+                                        {% else %}
+                                        <span class="text-secondary">›</span>
+                                        {% endif %}
+                                    </button>
+                                    {% if title_action_targets %}
+                                    <div class="border-top border-secondary-subtle my-1"></div>
+                                    <button
+                                        type="button"
+                                        class="card-menu-item d-flex justify-content-between align-items-center"
+                                        data-menu-open="copy"
+                                    >
+                                        <span>Copy to</span>
+                                        <span class="text-secondary">›</span>
+                                    </button>
+                                    {% endif %}
+                                </div>
+
+                                <div class="card-menu-view d-none" data-menu-view="copy">
+                                    <button type="button" class="card-menu-item d-flex align-items-center gap-2" data-menu-back>
+                                        <span class="text-secondary">‹</span>
+                                        <span>Back</span>
+                                    </button>
+                                    <div class="card-menu-label">Copy to list</div>
+                                    {% for target in title_action_targets %}
+                                    <form action="/ui/list-actions/add" method="post" class="m-0">
+                                        <input type="hidden" name="tconst" value="{{ title_item.tconst }}">
+                                        <input type="hidden" name="target_list_id" value="{{ target.id }}">
+                                        <input type="hidden" name="return_to" value="{{ title_return_to }}">
+                                        <button type="submit" class="card-menu-item">{{ target.name }}</button>
+                                    </form>
+                                    {% endfor %}
+                                </div>
+
+                                <div class="card-menu-view d-none" data-menu-view="rating">
+                                    <button type="button" class="card-menu-item d-flex align-items-center gap-2" data-menu-back>
+                                        <span class="text-secondary">‹</span>
+                                        <span>Back</span>
+                                    </button>
+                                    <div class="card-menu-label">Your rating</div>
+                                    {% if library_state.rating %}
+                                    <div class="card-menu-current-rating">
+                                        Current {{ library_state.rating.value }}/10
+                                    </div>
+                                    {% endif %}
+                                    {% for rating_value in range(10, 0, -1) %}
+                                    {% set full_stars = rating_value // 2 %}
+                                    {% set has_half_star = rating_value % 2 == 1 %}
+                                    {% set empty_stars = 5 - full_stars - (1 if has_half_star else 0) %}
+                                    <form action="/ui/list-actions/rating" method="post" class="m-0">
+                                        <input type="hidden" name="tconst" value="{{ title_item.tconst }}">
+                                        <input type="hidden" name="rating" value="{{ rating_value }}">
+                                        <input type="hidden" name="return_to" value="{{ title_return_to }}">
+                                        <button type="submit" class="card-menu-item d-flex justify-content-between align-items-center">
+                                            <span class="card-rating-stars">
+                                                {{ "★" * full_stars }}{% if has_half_star %}½{% endif %}{{ "☆" * empty_stars }}
+                                            </span>
+                                            <span class="small text-secondary">{{ "%.1f"|format(rating_value / 2) }}</span>
+                                        </button>
+                                    </form>
+                                    {% endfor %}
+                                    {% if library_state.rating %}
+                                    <div class="border-top border-secondary-subtle my-1"></div>
+                                    <form action="/ui/list-actions/rating/clear" method="post" class="m-0">
+                                        <input type="hidden" name="tconst" value="{{ title_item.tconst }}">
+                                        <input type="hidden" name="return_to" value="{{ title_return_to }}">
+                                        <button type="submit" class="card-menu-item text-secondary">Clear rating</button>
+                                    </form>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                     {% if title_item.original_title and title_item.original_title != title_item.title %}
                     <div class="text-secondary fs-4 mb-4">{{ title_item.original_title }}</div>
                     {% endif %}
@@ -68,16 +172,17 @@
                         {% endfor %}
                     </div>
                     {% endif %}
-
-                    {% if tmdb_details.overview %}
-                    <div class="title-hero-overview mb-5">
-                        <div class="text-uppercase small mb-3" style="color: #b56a33;">What it is about</div>
-                        <p class="mb-0 fs-6 lh-lg">{{ tmdb_details.overview }}</p>
-                    </div>
-                    {% endif %}
-
                 </div>
             </div>
+
+            {% if tmdb_details.overview %}
+            <div class="title-hero-overview mb-5">
+                <div class="text-uppercase small mb-3" style="color: #b56a33;">What it is about</div>
+                <p class="mb-0 fs-6 lh-lg">{{ tmdb_details.overview }}</p>
+            </div>
+            {% endif %}
+
+            <div class="clearfix"></div>
         </div>
     </div>
 </section>
@@ -168,8 +273,11 @@
                         <span class="badge text-dark border-0" style="background-color: #9fb6c9;">{{ user_list.name }}</span>
                         {% endfor %}
                         {% endif %}
-                        {% if library_state.rating %}
-                        <span class="badge px-3 py-2 text-dark border-0" style="background-color: #d7b1aa;">{{ library_state.rating.value }}</span>
+                        {% if user_rating_value > 0 %}
+                        <span class="d-inline-flex align-items-center gap-2 px-1">
+                            <span style="color: #f5c26b;">You:</span>
+                            <span class="fs-5 lh-1" style="color: #f5c26b;">{{ "★" * user_rating_full_stars }}{% if user_rating_has_half_star %}½{% endif %}{{ "☆" * user_rating_empty_stars }}</span>
+                        </span>
                         {% else %}
                         <span class="badge text-bg-dark border border-secondary-subtle">Unrated</span>
                         {% endif %}

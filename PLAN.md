@@ -72,11 +72,18 @@ Jak to používat:
 - [ ] Přidat později pohled „ukaž, co je ve více seznamech“.
   Důvod: duplicity mezi seznamy teď budou vědomě povolené a ručně spravované; později má smysl mít nad nimi kontrolní přehled.
 
+- [ ] Doladit vazby mezi listy a doménové důsledky akcí typu `Watched`.
+  Důvod: začínají se objevovat hraniční stavy mezi `Watchlist`, `Hot Watchlist`, `Watched` a dalšími seznamy; je potřeba sjednotit, co přesně která akce automaticky schovává, archivuje nebo nechává aktivní.
+
 - [x] Zapsat a držet jednotné workflow pro detail titulu.
   Důvod: zatím hlavně sbíráme data; při dotazu na konkrétní titul musí appka okamžitě vědět, co všechno má dohledat, složit a ukázat jako jeden smysluplný detail.
 
 - [x] Navázat z detailu titulu na detail osoby přes `Main cast`.
   Důvod: data i portréty lidí se už materializují na pozadí; další přirozený krok je udělat z herců klikatelné vstupy do znovupoužitelného detailu osoby.
+
+- [~] Rozřezat `filmy/db.py` na menší moduly podle odpovědnosti.
+  Důvod: soubor už je příliš velký na bezpečné úpravy; první krok je nechat `filmy.db` jako stabilní fasádu a přesouvat implementace po ověřených blocích do menších modulů.
+  Checkpoint: hotový je modul pro osoby (`filmy/db_people.py`), modul lokální knihovny (`filmy/db_library.py`) a modul legacy zdrojů (`filmy/db_legacy.py`). Do legacy modulu už jsou přesunuté nejen veřejné Trakt/IMDb/Plex read+sync vstupy, ale i interní helpery `_sync_trakt_*`, `_sync_imdb_*` a `_sync_plex_*`. `filmy/db.py` teď funguje hlavně jako fasáda a drží shared helpery plus seed/migrační logiku.
 
 ## Rozhodnutí
 
@@ -169,11 +176,15 @@ Jak to používat:
 
 ## Checkpoint
 
+- 2026-07-01: do vyhledávání přidána interní recall/cache vrstva `app.search_recall`. Title i person lookup teď nejdřív zkouší malé mapování nedávných dotazů na konkrétní `tt...` / `nm...`, teprve potom pouští plné vyhledávání. Limit je v `config.toml` jako `search_recall_limit = 500`. Je to čistě technická optimalizace pro opakované hledání, ne uživatelská funkce a nemá mít vlastní UI.
 - 2026-06-30: search dostal skutečnou HTML výsledkovou stránku `GET /search` napojenou na horní navbar; stránka umí zobrazit jak nalezený titul, tak nalezenou osobu a shortlist alternativ.
 - 2026-06-30: title lookup už nepreferuje lokálně viděné tituly; z rankingu zmizel `watched_count`, protože hledání musí fungovat i pro věci, které ještě nejsou v uživatelových seznamech ani historii.
 - 2026-06-30: title search nově bere výrazněji v úvahu aliasy a normalizaci lokálních názvů; dotazy typu `3 procenta` se mapují i na názvy se znakem `%`.
 - 2026-06-30: person search se rozšířil z pouhého full-name matchingu na víc variant jména. Fuzzy a levenshtein vrstva teď pracují i s příjmením a s kompaktní variantou bez mezer, takže jednoslovný překlep typu `Gylenhal` už najde `Jake Gyllenhaal`.
 - 2026-06-30: person lookup už pro shortlist kandidátů netahá plnou filmografii každé osoby; místo toho používá levnější `credit_count` agregaci z `app.title_credits`. Další krok, pokud se k tomu vrátíme, je hlavně změřit rychlost celé search pipeline na reálných dotazech a případně ještě zúžit DB shortlist před Python fuzzy scoringem.
+- 2026-06-30: aktivní Trakt integrace byla vyřazena z běžné appky. Admin endpointy a CLI export už nejsou součástí standardního provozu; export helper byl přesunut do `filmy.legacy.trakt_export` a historické `old.trakt_*` tabulky zůstávají jen jako archivní vrstva.
+- 2026-06-30: FastAPI entrypoint byl rozdělen podle odpovědnosti. `filmy.main` je teď jen sestavení aplikace + `lifespan`, sdílené helpery jsou v `filmy.app_shared` a routy jsou rozdělené do `filmy.routers.web`, `filmy.routers.ui` a `filmy.routers.api`.
+- 2026-06-30: proběhl krátký dokumentační pass nad novou FastAPI strukturou a složitější helper logikou. Breadcrumb/navigation helpery, cache warmup a nové person-affinity funkce mají doplněné vysvětlující docstringy, aby další změny nestály jen na implicitní znalosti chatu.
 - 2026-06-29: detail titulu je znovu složený do tří vrstev pod hero blokem. `Main cast` je zpátky jako samostatný panel, `Directed by` a `Written by` mají vlastní nadpisy a badge jména, `Created by` je pod tím, aliasy jsou omezené jen na `en/cs/es/de` a nadpisy sekcí používají stejnou barvu jako název filmu.
 - 2026-06-29: přidána druhá ruční preference vrstva `favorite_traits` pro volné výrazy typu `cerebral`, `dark` nebo `slow-burn`; je dostupná v `System` jako samostatná stránka a zatím slouží jen ke sběru explicitních preferencí bez navazující výpočetní logiky.
 - 2026-06-27: vytvořen sdílený `PLAN.md` v rootu projektu jako jedno místo pro další kroky a průběžné odškrtávání.

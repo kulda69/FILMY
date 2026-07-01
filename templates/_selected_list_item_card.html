@@ -27,16 +27,20 @@
                     >...</button>
                     <div id="{{ menu_id }}" popover class="card-menu-panel">
                         <div class="card-menu-view" data-menu-view="root">
+                            {% if selected_list.item_type == "list" %}
                             <form action="/ui/list-actions/delete" method="post" class="m-0">
                                 <input type="hidden" name="list_id" value="{{ selected_list.id }}">
                                 <input type="hidden" name="display_tconst" value="{{ item.tconst }}">
                                 <input type="hidden" name="return_to" value="{{ selected_list_return_to }}">
                                 <button type="submit" class="card-menu-item">Delete from list</button>
                             </form>
+                            {% endif %}
                             <form action="/ui/list-actions/watched" method="post" class="m-0">
                                 <input type="hidden" name="tconst" value="{{ item.tconst }}">
+                                {% if selected_list.item_type == "list" %}
                                 <input type="hidden" name="list_id" value="{{ selected_list.id }}">
                                 <input type="hidden" name="display_tconst" value="{{ item.tconst }}">
+                                {% endif %}
                                 <input type="hidden" name="return_to" value="{{ selected_list_return_to }}">
                                 <button type="submit" class="card-menu-item">Watched</button>
                             </form>
@@ -52,7 +56,7 @@
                                 <span class="text-secondary">›</span>
                                 {% endif %}
                             </button>
-                            {% if selected_list_move_targets %}
+                            {% if selected_list_move_targets and selected_list.item_type == "list" %}
                             <div class="border-top border-secondary-subtle my-1"></div>
                             <button
                                 type="button"
@@ -71,8 +75,20 @@
                                 <span class="text-secondary">›</span>
                             </button>
                             {% endif %}
+                            {% if selected_list_move_targets and selected_list.item_type != "list" %}
+                            <div class="border-top border-secondary-subtle my-1"></div>
+                            <button
+                                type="button"
+                                class="card-menu-item d-flex justify-content-between align-items-center"
+                                data-menu-open="copy"
+                            >
+                                <span>Copy to</span>
+                                <span class="text-secondary">›</span>
+                            </button>
+                            {% endif %}
                         </div>
 
+                        {% if selected_list.item_type == "list" %}
                         <div class="card-menu-view d-none" data-menu-view="move">
                             <button type="button" class="card-menu-item d-flex align-items-center gap-2" data-menu-back>
                                 <span class="text-secondary">‹</span>
@@ -89,6 +105,7 @@
                             </form>
                             {% endfor %}
                         </div>
+                        {% endif %}
 
                         <div class="card-menu-view d-none" data-menu-view="copy">
                             <button type="button" class="card-menu-item d-flex align-items-center gap-2" data-menu-back>
@@ -97,6 +114,7 @@
                             </button>
                             <div class="card-menu-label">Copy to list</div>
                             {% for target in selected_list_move_targets %}
+                            {% if selected_list.item_type == "list" %}
                             <form action="/ui/list-actions/copy" method="post" class="m-0">
                                 <input type="hidden" name="source_list_id" value="{{ selected_list.id }}">
                                 <input type="hidden" name="target_list_id" value="{{ target.id }}">
@@ -104,6 +122,14 @@
                                 <input type="hidden" name="return_to" value="{{ selected_list_return_to }}">
                                 <button type="submit" class="card-menu-item">{{ target.name }}</button>
                             </form>
+                            {% else %}
+                            <form action="/ui/list-actions/add" method="post" class="m-0">
+                                <input type="hidden" name="tconst" value="{{ item.tconst }}">
+                                <input type="hidden" name="target_list_id" value="{{ target.id }}">
+                                <input type="hidden" name="return_to" value="{{ selected_list_return_to }}">
+                                <button type="submit" class="card-menu-item">{{ target.name }}</button>
+                            </form>
+                            {% endif %}
                             {% endfor %}
                         </div>
 

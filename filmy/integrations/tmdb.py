@@ -219,6 +219,63 @@ def fetch_person_portrait(nconst: str, fetch_reason: str) -> dict[str, Any]:
     return payload
 
 
+def fetch_person_biography(nconst: str, fetch_reason: str) -> dict[str, Any]:
+    _require_token()
+    meta_path = _person_biography_meta_path(nconst)
+    existing_meta = _load_json_file(meta_path)
+    if existing_meta:
+        status = str(existing_meta.get("status") or "")
+        if status in {"fetched", "no_biography", "not_found"}:
+            return existing_meta
+
+    match = _api_get(f"/find/{nconst}", {"external_source": "imdb_id"})
+    person_results = match.get("person_results") or []
+    if not person_results:
+        payload = {
+            "nconst": nconst,
+            "status": "not_found",
+            "fetch_reason": fetch_reason,
+            "updated_at": time.time(),
+        }
+        _write_json_file(meta_path, payload)
+        return payload
+
+    first = person_results[0]
+    tmdb_person_id = int(first["id"])
+
+    selected_payload: dict[str, Any] | None = None
+    for locale in (PRIMARY_LOCALE, FALLBACK_LOCALE, None):
+        query = {"language": locale} if locale else None
+        detail = _api_get(f"/person/{tmdb_person_id}", query)
+        biography = str(detail.get("biography") or "").strip()
+        if not biography:
+            continue
+        selected_payload = {
+            "nconst": nconst,
+            "status": "fetched",
+            "tmdb_person_id": tmdb_person_id,
+            "name": detail.get("name") or first.get("name"),
+            "locale": locale or "default",
+            "biography": biography,
+            "fetch_reason": fetch_reason,
+            "updated_at": time.time(),
+        }
+        break
+
+    if selected_payload is None:
+        selected_payload = {
+            "nconst": nconst,
+            "status": "no_biography",
+            "tmdb_person_id": tmdb_person_id,
+            "name": first.get("name"),
+            "fetch_reason": fetch_reason,
+            "updated_at": time.time(),
+        }
+
+    _write_json_file(meta_path, selected_payload)
+    return selected_payload
+
+
 def get_person_portrait_status(nconst: str) -> dict[str, Any]:
     meta_path = _person_portrait_meta_path(nconst)
     portrait_path = _person_portrait_file_path(nconst)
@@ -245,6 +302,32 @@ def get_person_portrait_status(nconst: str) -> dict[str, Any]:
         "status": "missing",
         "has_portrait": bool(portrait_path and portrait_path.exists()),
         "portrait_path": portrait_path.as_posix() if portrait_path and portrait_path.exists() else None,
+        "meta": meta,
+    }
+
+
+def get_person_biography_status(nconst: str) -> dict[str, Any]:
+    meta_path = _person_biography_meta_path(nconst)
+    meta = _load_json_file(meta_path) or {}
+    status = str(meta.get("status") or "missing")
+    if status == "fetched" and str(meta.get("biography") or "").strip():
+        return {
+            "nconst": nconst,
+            "status": "fetched",
+            "has_biography": True,
+            "meta": meta,
+        }
+    if status in {"no_biography", "not_found"}:
+        return {
+            "nconst": nconst,
+            "status": status,
+            "has_biography": False,
+            "meta": meta,
+        }
+    return {
+        "nconst": nconst,
+        "status": "missing",
+        "has_biography": False,
         "meta": meta,
     }
 
@@ -526,6 +609,10 @@ def _relative_asset_path(tconst: str, asset_kind: str, filename: str) -> Path:
 
 def _person_portrait_meta_path(nconst: str) -> Path:
     return PEOPLE_ASSETS_DIR / nconst / "portrait.json"
+
+
+def _person_biography_meta_path(nconst: str) -> Path:
+    return PEOPLE_ASSETS_DIR / nconst / "biography.json"
 
 
 def _person_portrait_file_path(nconst: str) -> Path | None:
