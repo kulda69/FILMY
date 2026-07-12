@@ -15,6 +15,7 @@ from filmy.db import (
     format_czech_datetime,
     get_hot_watchlist_page,
     get_person_presentation,
+    get_person_portrait_summary,
     get_recently_watched_page,
     get_title_presentation,
     get_user_list_items_page,
@@ -29,6 +30,8 @@ _homepage_warmup_lock = threading.Lock()
 _homepage_warmup_thread: threading.Thread | None = None
 _person_portrait_warmup_lock = threading.Lock()
 _person_portrait_warmup_active: set[str] = set()
+_person_presentation_warmup_lock = threading.Lock()
+_person_presentation_warmup_active: set[str] = set()
 _BREADCRUMB_TRAIL_PARAM = "_trail"
 _BREADCRUMB_LABEL_PARAM = "_label"
 _BREADCRUMB_TS_PARAM = "_ts"
@@ -83,19 +86,15 @@ def launch_homepage_warmup(tconsts: list[str]) -> None:
 
 
 def present_main_cast(main_cast: list[dict[str, object]]) -> list[dict[str, object]]:
-    """Attach locally cached portrait metadata to main-cast people for title detail cards."""
+    """Attach lightweight portrait metadata to main-cast people for title detail cards."""
     items: list[dict[str, object]] = []
     for person in main_cast:
         item = dict(person)
         nconst = str(person.get("nconst") or "").strip()
         if nconst:
-            presentation = get_person_presentation(nconst)
-            if presentation is not None:
-                item["portrait_url"] = presentation.get("portrait_url")
-                item["has_portrait"] = presentation.get("has_portrait", False)
-            else:
-                item["portrait_url"] = None
-                item["has_portrait"] = False
+            portrait = get_person_portrait_summary(nconst)
+            item["portrait_url"] = portrait.get("portrait_url")
+            item["has_portrait"] = bool(portrait.get("has_portrait"))
         else:
             item["portrait_url"] = None
             item["has_portrait"] = False
@@ -137,6 +136,45 @@ def launch_person_portrait_warmup(main_cast: list[dict[str, object]]) -> None:
             target=run,
             args=(nconst,),
             name=f"person-portrait-warmup-{nconst}",
+            daemon=True,
+        )
+        thread.start()
+
+
+def launch_person_presentation_warmup(main_cast: list[dict[str, object]], limit: int = 8) -> None:
+    """Warm full person presentations in background for the currently visible cast.
+
+    The UI already knows the relevant `nconst` values from title detail. Prebuilding
+    the person presentations makes the next click to actor/director detail much
+    cheaper without blocking the title page itself.
+    """
+    candidate_nconsts = [
+        str(person.get("nconst") or "").strip()
+        for person in main_cast[: max(limit, 0)]
+        if person.get("nconst")
+    ]
+    unique_nconsts = [nconst for nconst in dict.fromkeys(candidate_nconsts) if nconst]
+    if not unique_nconsts:
+        return
+
+    def run(nconst: str) -> None:
+        try:
+            get_person_presentation(nconst)
+        except Exception:
+            pass
+        finally:
+            with _person_presentation_warmup_lock:
+                _person_presentation_warmup_active.discard(nconst)
+
+    for nconst in unique_nconsts:
+        with _person_presentation_warmup_lock:
+            if nconst in _person_presentation_warmup_active:
+                continue
+            _person_presentation_warmup_active.add(nconst)
+        thread = threading.Thread(
+            target=run,
+            args=(nconst,),
+            name=f"person-presentation-warmup-{nconst}",
             daemon=True,
         )
         thread.start()
@@ -236,9 +274,9 @@ def present_person_search_result_card(
     }
 
 
-def signal_metadata_pipeline(reason: str) -> None:
+def signal_metadata_pipeline(reason: str, *, target_tconst: str | None = None) -> None:
     try:
-        signal_background_activity(reason)
+        signal_background_activity(reason, target_tconst=target_tconst)
     except OSError:
         # Metadata wake-up is best-effort; the write action itself must still succeed.
         pass
@@ -366,7 +404,19 @@ def redirect_back(return_to: str | None) -> RedirectResponse:
     query_pairs.append((_BREADCRUMB_TS_PARAM, str(time.time_ns())))
     refreshed = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query_pairs), parts.fragment))
     response = RedirectResponse(url=refreshed, status_code=303)
-    response.headers["Cache-Control"] = "no-store, max-age=0"
+    apply_html_cache_headers(response)
+    return response
+
+
+def apply_html_cache_headers(response: RedirectResponse | object) -> object:
+    """Allow browser history/bfcache while still forcing revalidation on normal reloads.
+
+    `no-store` was blocking efficient history navigation for detail pages. The
+    app already appends a cache-busting `_ts` parameter after mutations, so we
+    can switch to a softer policy that keeps stale content under control
+    without disabling browser back/forward optimizations.
+    """
+    response.headers["Cache-Control"] = "private, no-cache, max-age=0, must-revalidate"
     response.headers["Pragma"] = "no-cache"
     return response
 
@@ -641,6 +691,7 @@ __all__ = [
     "format_czech_datetime",
     "group_tmdb_providers",
     "launch_homepage_warmup",
+    "launch_person_presentation_warmup",
     "launch_person_portrait_warmup",
     "present_episode_seasons",
     "present_main_cast",

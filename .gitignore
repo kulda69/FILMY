@@ -23,6 +23,7 @@ data/assets/
 NetflixViewingHistory.csv
 imdb/*.tsv
 imdb_lists/*.csv
+work/
 
 # generated debug and probe artifacts
 data/plex_probe.json
@@ -35,3 +36,4 @@ data/imdb_refresh_status.json
 tmp/
 output/playwright/
 Screenshot *.png
+data/*.duckdb*

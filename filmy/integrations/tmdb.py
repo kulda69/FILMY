@@ -369,9 +369,10 @@ def get_tmdb_status(tconst: str) -> dict[str, Any]:
 def enrich_library_from_tmdb(
     limit: int | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    priority_tconsts: list[str] | None = None,
 ) -> dict[str, Any]:
     _require_token()
-    targets = get_tmdb_enrichment_targets(limit=limit, include_complete=False)
+    targets = get_tmdb_enrichment_targets(limit=limit, include_complete=False, priority_tconsts=priority_tconsts)
     summary: dict[str, Any] = {
         "requested_limit": limit,
         "candidate_count": len(targets),

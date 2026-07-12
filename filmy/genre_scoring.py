@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from typing import Any, Sequence
 
 
-ALGORITHM_VERSION = "genre-v1"
+ALGORITHM_VERSION = "genre-v2"
 
 
 def compute_genre_scores(
@@ -35,8 +35,9 @@ def compute_genre_scores(
     - `affinity_score`:
       Hlavni souhrnny signal pro dany zanr. Nejdriv se pocita na urovni
       jednotlivych titulu jako `title_affinity`, kde se micha hodnoceni,
-      tendence ke znovusledovani a recency. Na urovni zanru je to pak vazeny
-      prumer techto hodnot, prevedeny do intervalu `0..1`.
+      tendence ke znovusledovani, recency a jemne i oblibenost hercu. Na
+      urovni zanru je to pak vazeny prumer techto hodnot, prevedeny do
+      intervalu `0..1`.
     - `rating_signal_score`:
       Primy signal z lokalnich hodnoceni. Stred je zhruba kolem `5.5/10`, takze
       vyssi hodnoceni tlaci signal do plusu a slaba hodnoceni do minusu. Je to
@@ -49,6 +50,13 @@ def compute_genre_scores(
       Signal cerstvosti odvozeny z `last_watched_at`. Novejsi aktivita ma vyssi
       vahu a casem exponencialne slabi. Tim se do vysledku trochu promita
       aktualni nalada, ale nepremaze starsi vkus.
+    - `actor_affinity_score`:
+      Slaby pomocny signal z lokalne hodnocenych hercu. Bere se jen hlavni
+      obsazeni (`cast`) a jen osoby, ktere uzivatel opravdu ohodnotil.
+      Smysl je jednoduchy: pokud se v nejakem zanru opakovane objevuje obsazeni,
+      ktere mam rad, ma ten zanr dostat mirny bonus. Tento signal schvalne
+      nema vahu srovnatelnou s ratingem titulu, aby oblibeny herec nepretlacil
+      film, ktery me realne nebavil.
     - `frequency_score`:
       Hruby signal hustoty dukazu. Nejde o to, kolikrat byl prehrany jeden
       konkretni titul, ale jak casto se cely zanr objevuje v historii sledovani.
@@ -93,6 +101,7 @@ def compute_genre_scores(
     - ratingy jsou nejsilnejsi preference signal
     - rewatches maji smysl, ale mensi nez ratingy
     - recentni chovani ma hrat roli, ale ma postupne slabnout
+    - oblibenost hercu ma fungovat jen jako jemna korekce
     - rucne zadane oblibene zanry maji vysledek ovlivnit, ale nemaji plne
       prepsat protichudnou lokalni historii
     """
@@ -114,11 +123,21 @@ def compute_genre_scores(
         rating_signal = _rating_signal(row.get("rating"))
         watch_signal = _watch_signal(row.get("watch_count"))
         recency_signal = _recency_signal(row.get("last_watched_at"), observed_at)
-        title_affinity = _clamp((0.62 * rating_signal) + (0.23 * watch_signal) + (0.15 * recency_signal), -1.0, 1.0)
+        actor_affinity_signal = _actor_affinity_signal(row.get("actor_affinity_rating"))
+        title_affinity = _clamp(
+            (0.56 * rating_signal)
+            + (0.20 * watch_signal)
+            + (0.14 * recency_signal)
+            + (0.10 * actor_affinity_signal),
+            -1.0,
+            1.0,
+        )
         title_weight = 1.0
         if row.get("rating") is not None:
             title_weight += 0.75
         title_weight += 0.20 * min(int(row.get("watch_count") or 0), 3)
+        if row.get("actor_affinity_rating") is not None:
+            title_weight += 0.15
 
         prepared = {
             "tconst": row.get("tconst"),
@@ -127,6 +146,8 @@ def compute_genre_scores(
             "rating": row.get("rating"),
             "watch_count": int(row.get("watch_count") or 0),
             "last_watched_at": row.get("last_watched_at"),
+            "actor_affinity_rating": row.get("actor_affinity_rating"),
+            "actor_affinity_signal": actor_affinity_signal,
             "rating_signal": rating_signal,
             "watch_signal": watch_signal,
             "recency_signal": recency_signal,
@@ -145,6 +166,7 @@ def compute_genre_scores(
         rating_signal_score = _weighted_average([item["rating_signal"] for item in items], weights)
         watch_signal_score = _weighted_average([item["watch_signal"] for item in items], weights)
         recency_score = _weighted_average([item["recency_signal"] for item in items], weights)
+        actor_affinity_score = _actor_affinity_score(items)
         frequency_score = _clamp(sum(item["watch_count"] for item in items) / max(len(items) * 2.5, 1.0), 0.0, 1.0)
         consistency_score = _consistency_score(items)
         confidence_score = _confidence_score(items)
@@ -160,8 +182,9 @@ def compute_genre_scores(
         final_normalized = _clamp(
             (0.26 * affinity_score)
             + (0.16 * positive_rating_bonus)
-            + (0.15 * watch_signal_score)
-            + (0.11 * recency_score)
+            + (0.13 * watch_signal_score)
+            + (0.10 * recency_score)
+            + (0.07 * actor_affinity_score)
             + (0.09 * frequency_score)
             + (0.08 * consistency_score)
             + (0.05 * confidence_score)
@@ -181,6 +204,7 @@ def compute_genre_scores(
             rating_signal_score=rating_signal_score,
             watch_signal_score=watch_signal_score,
             recency_score=recency_score,
+            actor_affinity_score=actor_affinity_score,
             preference_overlap_score=preference_overlap_score,
             titles_considered=len(items),
         )
@@ -200,6 +224,7 @@ def compute_genre_scores(
                 "rating_signal_score": round(rating_signal_score, 4),
                 "watch_signal_score": round(watch_signal_score, 4),
                 "recency_score": round(recency_score, 4),
+                "actor_affinity_score": round(actor_affinity_score, 4),
                 "frequency_score": round(frequency_score, 4),
                 "consistency_score": round(consistency_score, 4),
                 "novelty_score": round(novelty_score, 4),
@@ -253,6 +278,15 @@ def _recency_signal(value: Any, observed_at: datetime) -> float:
     return round(math.exp(-age_days / 240.0), 4)
 
 
+def _actor_affinity_signal(value: Any) -> float:
+    if value is None:
+        return 0.0
+    rating = float(value)
+    if rating <= 0:
+        return 0.0
+    return _clamp((rating - 5.0) / 5.0, -1.0, 1.0)
+
+
 def _favorite_overlap_score(item: dict[str, Any] | None, *, max_favorite_weight: float) -> float:
     if not item:
         return 0.0
@@ -277,6 +311,17 @@ def _consistency_score(items: Sequence[dict[str, Any]]) -> float:
         return _clamp((positive - negative + len(rated)) / (2 * len(rated)), 0.0, 1.0)
     positive_affinity = sum(1 for item in items if item["title_affinity"] > 0.15)
     return _clamp(positive_affinity / max(len(items), 1), 0.0, 1.0)
+
+
+def _actor_affinity_score(items: Sequence[dict[str, Any]]) -> float:
+    rated_items = [item for item in items if item.get("actor_affinity_rating") is not None]
+    if not rated_items:
+        return 0.0
+    raw = _weighted_average(
+        [float(item["actor_affinity_signal"]) for item in rated_items],
+        [float(item["title_weight"]) for item in rated_items],
+    )
+    return _clamp((raw + 1.0) / 2.0, 0.0, 1.0)
 
 
 def _confidence_score(items: Sequence[dict[str, Any]]) -> float:
@@ -311,6 +356,7 @@ def _build_explanation(
     rating_signal_score: float,
     watch_signal_score: float,
     recency_score: float,
+    actor_affinity_score: float,
     preference_overlap_score: float,
     titles_considered: int,
 ) -> str:
@@ -323,6 +369,8 @@ def _build_explanation(
         reasons.append("repeat viewing")
     if recency_score > 0.35:
         reasons.append("recent activity")
+    if actor_affinity_score > 0.62:
+        reasons.append("liked cast")
     if preference_overlap_score > 0.20:
         reasons.append("manual preference")
     if not reasons:

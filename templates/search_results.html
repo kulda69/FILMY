@@ -16,6 +16,11 @@
                     {% if search_query %}
                     <div class="text-secondary">
                         Query <span class="text-light">"{{ search_query }}"</span>
+                        {% if search_scope == "titles" %}
+                        · titles only
+                        {% elif search_scope == "people" %}
+                        · people only
+                        {% endif %}
                         {% if search_mode == "wide" %}
                         · wider candidate sweep
                         {% else %}

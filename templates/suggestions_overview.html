@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+
+{% block title %}Filmy | Suggestions{% endblock %}
+
+{% block content %}
+{% set current_label = "Suggestions" %}
+{% include "_top_breadcrumbs.html" %}
+
+<section class="mb-4">
+    <div class="card bg-black border-secondary-subtle">
+        <div class="card-body p-4">
+            <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4">
+                <div>
+                    <span class="badge text-bg-light text-dark align-self-start mb-3">Suggestions</span>
+                    <h1 class="h5 mb-1">Aktuální žánrové signály a lokální návrhy.</h1>
+                    <p class="text-secondary mb-0">Tady už se může skládat těžší suggestion vrstva mimo domovku.</p>
+                </div>
+                <div class="d-flex flex-wrap gap-2">
+                    {% if favorite_traits_active_count %}
+                    <span class="badge text-bg-dark border border-secondary-subtle">{{ favorite_traits_active_count }} active traits</span>
+                    {% endif %}
+                    {% if suggestion_scores_generated_at %}
+                    <span class="badge text-bg-dark border border-secondary-subtle">Updated {{ format_czech_datetime(suggestion_scores_generated_at) }}</span>
+                    {% endif %}
+                    <a class="btn btn-outline-light btn-sm" href="/#suggestions-section">Back home</a>
+                </div>
+            </div>
+
+            {% if suggestion_scores %}
+            <div class="row g-3">
+                {% for item in suggestion_scores %}
+                <div class="col-12 col-md-6 col-xl-3">
+                    <a href="{{ item.genre_detail_url }}" class="rounded-4 border border-secondary-subtle bg-body h-100 p-3 d-block text-decoration-none text-body">
+                        <div class="d-flex justify-content-between align-items-center gap-3 mb-2">
+                            <div>
+                                <div class="fw-semibold">{{ item.genre }}</div>
+                                <div class="small text-secondary mt-1">{{ item.titles_considered }} titles</div>
+                            </div>
+                            <span class="badge text-bg-light text-dark">{{ "%.1f"|format(item.final_score) }}</span>
+                        </div>
+
+                        <div class="d-flex flex-wrap gap-2">
+                            {% if item.preference_overlap_score %}
+                            <span class="badge text-bg-dark border border-secondary-subtle">Manual {{ "%.2f"|format(item.preference_overlap_score) }}</span>
+                            {% endif %}
+                            <span class="badge text-bg-dark border border-secondary-subtle">Affinity {{ "%.2f"|format(item.affinity_score) }}</span>
+                            <span class="badge text-bg-dark border border-secondary-subtle">Traits {{ item.top_traits|join(", ") if item.top_traits else "n/a" }}</span>
+                            <span class="badge text-bg-dark border border-secondary-subtle">Actor {{ "%.2f"|format(item.actor_affinity_score or 0) }}</span>
+                        </div>
+                    </a>
+                </div>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="rounded-4 border border-secondary-subtle p-4 text-secondary">
+                Suggestions zatím nejsou spočítané.
+            </div>
+            {% endif %}
+
+            {% if trait_suggestion_cards %}
+            <div class="mt-4">
+                <div class="d-flex justify-content-between align-items-center gap-3 mb-3">
+                    <div class="text-uppercase small" style="color: #b56a33;">Matches your traits</div>
+                    <a class="link-light small text-decoration-none" href="/views/suggestions/traits">View all »</a>
+                </div>
+                <div class="row g-3">
+                    {% for item in trait_suggestion_cards %}
+                    <div class="col-12 col-xl-6">
+                        {% include "_suggestion_title_card.html" %}
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+
+            {% if new_imdb_cards %}
+            <div class="mt-4">
+                <div class="text-uppercase small mb-3" style="color: #b56a33;">New on IMDb</div>
+                <div class="row g-3">
+                    {% for item in new_imdb_cards %}
+                    <div class="col-12 col-xl-6">
+                        {% include "_suggestion_title_card.html" %}
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</section>
+{% endblock %}

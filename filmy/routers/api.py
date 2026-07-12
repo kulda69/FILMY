@@ -26,6 +26,7 @@ from filmy.db import (
     get_imdb_watchlist,
     get_import_batch,
     get_local_library_status,
+    get_person_presentation,
     get_plex_status,
     get_title_presentation,
     get_watch_history,
@@ -34,7 +35,6 @@ from filmy.db import (
     lookup_person_by_query,
     lookup_title_by_query,
     record_watch_event,
-    refresh_catalog,
     search_catalog,
     set_user_rating,
     set_watchlist_state,
@@ -51,6 +51,7 @@ from filmy.integrations.tmdb import (
     sync_title_from_imdb,
 )
 from filmy.scripts.materialize_title_details import materialize_title_detail_cache
+from filmy.scripts.rebuild_catalog_postgresql import rebuild_catalog_from_current_imdb
 
 router = APIRouter()
 
@@ -193,7 +194,10 @@ async def catalog_lookup_text(
     item = lookup_title_by_query(query=q, title_type=title_type, candidates_limit=1)
     if item is None:
         raise HTTPException(status_code=404, detail="Titul nebyl nalezen.")
-    return item["selected"]["display_text"]
+    presentation = get_title_presentation(item["selected_tconst"])
+    if presentation is None:
+        raise HTTPException(status_code=404, detail="Titul nebyl nalezen.")
+    return str(presentation["display_text"])
 
 
 @router.get("/api/catalog/person/lookup")
@@ -212,12 +216,15 @@ async def catalog_person_lookup_text(q: str = Query(min_length=1)):
     item = describe_person_by_query(q)
     if item is None:
         raise HTTPException(status_code=404, detail="Osoba nebyla nalezena.")
-    return item["display_text"]
+    presentation = get_person_presentation(item["nconst"])
+    if presentation is None:
+        raise HTTPException(status_code=404, detail="Osoba nebyla nalezena.")
+    return str(presentation["display_text"])
 
 
 @router.post("/api/admin/imdb/rebuild")
 async def admin_imdb_rebuild():
-    result = {"status": "ok", "stats": refresh_catalog()}
+    result = {"status": "ok", "stats": rebuild_catalog_from_current_imdb(force=True)}
     signal_metadata_pipeline("admin_imdb_rebuild")
     return result
 

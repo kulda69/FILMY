@@ -184,49 +184,31 @@
     </div>
 </section>
 
-<section class="mb-4">
+<section id="suggestions-section" class="mb-4 anchor-offset">
     <div class="card bg-black border-secondary-subtle">
         <div class="card-body p-4">
             <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4">
                 <div>
                     <span class="badge text-bg-light text-dark align-self-start mb-3">Suggestions</span>
-                    <h2 class="h5 mb-1">Aktualni zanrove signaly.</h2>
-                    <p class="text-secondary mb-0">Pracovni vystup z toho, co uz mame v lokalnich datech.</p>
+                    <h2 class="h5 mb-1">Návrhy jsou teď bokem.</h2>
+                    <p class="text-secondary mb-0">Domovka se kvůli rychlosti už nesnaží synchronně skládat celé suggestion sekce. Vlastní doporučení se otevírají na samostatné stránce.</p>
                 </div>
-                {% if suggestion_scores_generated_at %}
-                <span class="badge text-bg-dark border border-secondary-subtle">Updated {{ format_czech_datetime(suggestion_scores_generated_at) }}</span>
-                {% endif %}
-            </div>
-
-            {% if suggestion_scores %}
-            <div class="row g-3">
-                {% for item in suggestion_scores %}
-                <div class="col-12 col-md-6 col-xl-3">
-                    <div class="rounded-4 border border-secondary-subtle bg-body h-100 p-3">
-                        <div class="d-flex justify-content-between align-items-center gap-3 mb-2">
-                            <div>
-                                <div class="fw-semibold">{{ item.genre }}</div>
-                                <div class="small text-secondary mt-1">{{ item.titles_considered }} titles</div>
-                            </div>
-                            <span class="badge text-bg-light text-dark">{{ "%.1f"|format(item.final_score) }}</span>
-                        </div>
-
-                        <div class="d-flex flex-wrap gap-2">
-                            {% if item.preference_overlap_score %}
-                            <span class="badge text-bg-dark border border-secondary-subtle">Manual {{ "%.2f"|format(item.preference_overlap_score) }}</span>
-                            {% endif %}
-                            <span class="badge text-bg-dark border border-secondary-subtle">Affinity {{ "%.2f"|format(item.affinity_score) }}</span>
-                            <span class="badge text-bg-dark border border-secondary-subtle">Watch {{ "%.2f"|format(item.watch_signal_score) }}</span>
-                        </div>
-                    </div>
+                <div class="d-flex flex-wrap gap-2">
+                    {% if favorite_traits_active_count %}
+                    <span class="badge text-bg-dark border border-secondary-subtle">{{ favorite_traits_active_count }} active traits</span>
+                    {% endif %}
+                    {% if suggestion_scores_generated_at %}
+                    <span class="badge text-bg-dark border border-secondary-subtle">Updated {{ format_czech_datetime(suggestion_scores_generated_at) }}</span>
+                    {% endif %}
                 </div>
-                {% endfor %}
             </div>
-            {% else %}
-            <div class="rounded-4 border border-secondary-subtle p-4 text-secondary">
-                Suggestions zatim nejsou spocitane.
+            <div class="rounded-4 border border-secondary-subtle bg-body p-4 d-flex flex-column flex-lg-row justify-content-between align-items-start align-items-lg-center gap-3">
+                <div>
+                    <div class="fw-semibold mb-1">Genre signals, trait matches a nové IMDb tipy</div>
+                    <div class="small text-secondary">Otevři samostatnou stránku až když tě budou návrhy opravdu zajímat.</div>
+                </div>
+                <a class="btn btn-outline-light" href="/views/suggestions">Show me</a>
             </div>
-            {% endif %}
         </div>
     </div>
 </section>

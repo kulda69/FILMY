@@ -155,6 +155,13 @@
                     <div class="text-secondary fs-4 mb-4">{{ title_item.original_title }}</div>
                     {% endif %}
 
+                    {% if background_fetch_pending %}
+                    <div class="d-inline-flex align-items-center gap-2 rounded-pill border border-danger-subtle bg-danger-subtle px-3 py-2 mb-4 fw-semibold text-danger-emphasis shadow-sm">
+                        <span class="d-inline-block rounded-circle bg-danger" style="width: 0.7rem; height: 0.7rem;"></span>
+                        <span>TMDB fetching in background</span>
+                    </div>
+                    {% endif %}
+
                     {% if title_item.kind == "episode" and title_item.series_title %}
                     <div class="mb-4 fs-5">
                         <span class="text-secondary">Part of</span>
@@ -398,6 +405,14 @@
     })();
 </script>
 {% endif %}
+{% if background_fetch_pending %}
+<script>
+    window.setTimeout(() => {
+        window.location.reload();
+    }, 7000);
+</script>
+{% endif %}
+
 {% endblock %}
 
 {% if title_episode_items %}

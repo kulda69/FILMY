@@ -12,7 +12,7 @@
             <div class="d-flex flex-wrap align-items-start justify-content-between gap-3 mb-4">
                 <div>
                     <h1 class="h2 mb-2" style="color: #b56a33;">Favorite Traits</h1>
-                    <p class="text-secondary mb-0">Volne vyrazy jako cerebral, dark, slow-burn nebo mind-bending. Vyplnena priorita znamena, ze trait patri mezi oblibene.</p>
+                    <p class="text-secondary mb-0">Predvyplneny seznam volnych vyrazu pro budouci doporucovani. Vyplnena priorita 1-10 znamena, ze trait patri mezi oblibene; prazdna priorita znamena nehodnoceno.</p>
                 </div>
                 <div class="d-flex flex-wrap gap-2">
                     <span class="badge text-bg-dark border border-secondary-subtle px-3 py-2">{{ favorite_count }} selected</span>
@@ -29,7 +29,7 @@
                 <input type="hidden" name="return_to" value="{{ return_to }}">
 
                 <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4">
-                    <div class="small text-secondary">Prazdny radek se ignoruje. Pokud vyplnis nazev, vypln i prioritu.</div>
+                    <div class="small text-secondary">Rozsah 1-10. Prazdna priorita = nehodnoceno. Stejna priorita u vice traits je povolena.</div>
                     <button type="submit" class="btn btn-light text-dark">Save traits</button>
                 </div>
 
@@ -57,6 +57,7 @@
                                         class="form-control bg-black border-secondary-subtle text-light"
                                         type="number"
                                         min="1"
+                                        max="10"
                                         step="1"
                                         name="priority_{{ loop.index }}"
                                         value="{{ item.preference_rank if item.preference_rank is not none else '' }}"

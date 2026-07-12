@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+
+{% block title %}Filmy | {{ genre_item.genre }}{% endblock %}
+
+{% block content %}
+<section class="mb-4">
+    <div class="card bg-black border-secondary-subtle">
+        <div class="card-body p-4">
+            <div class="d-flex justify-content-between align-items-start gap-3 mb-4">
+                <div class="d-flex flex-column gap-2">
+                    <div class="d-flex align-items-center gap-3 flex-wrap">
+                        <span class="badge text-bg-light text-dark align-self-start">{{ genre_item.genre }}</span>
+                        <span class="badge text-bg-dark border border-secondary-subtle">{{ "%.1f"|format(genre_item.final_score) }}</span>
+                        {% if active_traits_count %}
+                        <span class="badge text-bg-dark border border-secondary-subtle">{{ active_traits_count }} active traits</span>
+                        {% endif %}
+                    </div>
+                    <div class="small text-secondary">
+                        {{ genre_item.titles_considered }} titles
+                        {% if genre_item.explanation %}
+                        · {{ genre_item.explanation }}
+                        {% endif %}
+                    </div>
+                    <div class="d-flex flex-wrap gap-2">
+                        {% if genre_item.preference_overlap_score %}
+                        <span class="badge text-bg-dark border border-secondary-subtle">Manual {{ "%.2f"|format(genre_item.preference_overlap_score) }}</span>
+                        {% endif %}
+                        <span class="badge text-bg-dark border border-secondary-subtle">Affinity {{ "%.2f"|format(genre_item.affinity_score) }}</span>
+                        <span class="badge text-bg-dark border border-secondary-subtle">Traits {{ "%.2f"|format(genre_item.preference_alignment_score) }}</span>
+                        <span class="badge text-bg-dark border border-secondary-subtle">Actor {{ "%.2f"|format(genre_item.actor_affinity_score or 0) }}</span>
+                    </div>
+                </div>
+                <a class="btn btn-outline-light btn-sm" href="/#suggestions-section">Back home</a>
+            </div>
+
+            {% if recommended_cards %}
+            <div class="mb-4">
+                <div class="text-uppercase small mb-3" style="color: #b56a33;">Current unwatched recommendations</div>
+                <div class="row g-3">
+                    {% for item in recommended_cards %}
+                    <div class="col-12 col-xl-6">
+                        {% include "_suggestion_title_card.html" %}
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+
+            {% if contributing_cards %}
+            <div class="mt-4">
+                <div class="text-uppercase small mb-3" style="color: #b56a33;">Historical signal evidence</div>
+                <div class="row g-3">
+                    {% for item in contributing_cards %}
+                    <div class="col-12 col-xl-6">
+                        {% include "_suggestion_title_card.html" %}
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+
+            {% if excluded_cards %}
+            <div class="mt-4">
+                <div class="text-uppercase small mb-3" style="color: #b56a33;">What drags it down</div>
+                <div class="row g-3">
+                    {% for item in excluded_cards %}
+                    <div class="col-12 col-xl-6">
+                        {% include "_suggestion_title_card.html" %}
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</section>
+{% endblock %}

@@ -13,143 +13,34 @@ from typing import Any
 
 import duckdb
 
+from filmy.db import get_tmdb_target_counts
 from filmy.paths import ASSETS_DIR, DATA_DIR, DB_PATH, METADATA_PIPELINE_SIGNAL_PATH, PROJECT_ROOT
 
 
-def signal_background_activity(reason: str) -> None:
+def signal_background_activity(reason: str, *, target_tconst: str | None = None) -> None:
     """Wake the metadata pipeline after a user or admin write action."""
 
     METADATA_PIPELINE_SIGNAL_PATH.parent.mkdir(parents=True, exist_ok=True)
     payload = {"ts": time.time(), "reason": reason}
+    if target_tconst:
+        payload["target_tconst"] = target_tconst
     METADATA_PIPELINE_SIGNAL_PATH.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-TMDB_TARGET_COUNTS_SQL = """
-WITH candidates AS (
-    SELECT w.tconst AS target_tconst, 1 AS priority
-    FROM app.watch_events AS w
-    JOIN app.catalog_titles AS t ON t.tconst = w.tconst
-    GROUP BY 1, 2
-
-    UNION ALL
-
-    SELECT e.series_tconst AS target_tconst, 1 AS priority
-    FROM app.watch_events AS w
-    JOIN app.catalog_episodes AS e ON e.episode_tconst = w.tconst
-    GROUP BY 1, 2
-
-    UNION ALL
-
-    SELECT cs.tconst AS target_tconst, 2 AS priority
-    FROM app.content_state AS cs
-    JOIN app.catalog_titles AS t ON t.tconst = cs.tconst
-    WHERE cs.interest_state = 'in_progress'
-    GROUP BY 1, 2
-
-    UNION ALL
-
-    SELECT e.series_tconst AS target_tconst, 2 AS priority
-    FROM app.content_state AS cs
-    JOIN app.catalog_episodes AS e ON e.episode_tconst = cs.tconst
-    WHERE cs.interest_state = 'in_progress'
-    GROUP BY 1, 2
-
-    UNION ALL
-
-    SELECT i.tconst AS target_tconst, 3 AS priority
-    FROM app.user_list_items AS i
-    JOIN app.user_lists AS l ON l.id = i.list_id
-    JOIN app.catalog_titles AS t ON t.tconst = i.tconst
-    WHERE i.is_archived = FALSE AND l.list_kind = 'watchlist'
-    GROUP BY 1, 2
-
-    UNION ALL
-
-    SELECT e.series_tconst AS target_tconst, 3 AS priority
-    FROM app.user_list_items AS i
-    JOIN app.user_lists AS l ON l.id = i.list_id
-    JOIN app.catalog_episodes AS e ON e.episode_tconst = i.tconst
-    WHERE i.is_archived = FALSE AND l.list_kind = 'watchlist'
-    GROUP BY 1, 2
-
-    UNION ALL
-
-    SELECT i.tconst AS target_tconst, 3 AS priority
-    FROM app.user_list_items AS i
-    JOIN app.user_lists AS l ON l.id = i.list_id
-    JOIN app.catalog_titles AS t ON t.tconst = i.tconst
-    WHERE i.is_archived = FALSE AND i.source_origin = 'seed_plex_library'
-    GROUP BY 1, 2
-
-    UNION ALL
-
-    SELECT e.series_tconst AS target_tconst, 3 AS priority
-    FROM app.user_list_items AS i
-    JOIN app.user_lists AS l ON l.id = i.list_id
-    JOIN app.catalog_episodes AS e ON e.episode_tconst = i.tconst
-    WHERE i.is_archived = FALSE AND i.source_origin = 'seed_plex_library'
-    GROUP BY 1, 2
-
-    UNION ALL
-
-    SELECT i.tconst AS target_tconst, 4 AS priority
-    FROM app.user_list_items AS i
-    JOIN app.user_lists AS l ON l.id = i.list_id
-    JOIN app.catalog_titles AS t ON t.tconst = i.tconst
-    WHERE i.is_archived = FALSE AND l.list_kind = 'custom' AND i.source_origin <> 'seed_plex_library'
-    GROUP BY 1, 2
-
-    UNION ALL
-
-    SELECT e.series_tconst AS target_tconst, 4 AS priority
-    FROM app.user_list_items AS i
-    JOIN app.user_lists AS l ON l.id = i.list_id
-    JOIN app.catalog_episodes AS e ON e.episode_tconst = i.tconst
-    WHERE i.is_archived = FALSE AND l.list_kind = 'custom' AND i.source_origin <> 'seed_plex_library'
-    GROUP BY 1, 2
-),
-ranked AS (
-    SELECT target_tconst, MIN(priority) AS priority
-    FROM candidates
-    WHERE target_tconst IS NOT NULL
-    GROUP BY 1
-),
-targets AS (
-    SELECT r.target_tconst AS tconst, r.priority
-    FROM ranked AS r
-    LEFT JOIN app.tmdb_title_map AS m ON m.tconst = r.target_tconst
-    WHERE COALESCE(m.sync_status, '') <> 'not_found'
-),
-detail_flags AS (
-    SELECT
-        tconst,
-        MAX(CASE WHEN locale = 'en-US' THEN 1 ELSE 0 END) AS has_en,
-        MAX(CASE WHEN locale = 'cs-CZ' THEN 1 ELSE 0 END) AS has_cs,
-        MAX(CASE WHEN locale = 'en-US' THEN poster_path WHEN locale = 'cs-CZ' THEN poster_path ELSE NULL END) AS poster_path,
-        MAX(CASE WHEN locale = 'en-US' THEN backdrop_path WHEN locale = 'cs-CZ' THEN backdrop_path ELSE NULL END) AS backdrop_path
-    FROM app.tmdb_title_details
-    GROUP BY 1
-),
-asset_flags AS (
-    SELECT
-        tconst,
-        MAX(CASE WHEN asset_kind = 'poster' AND status = 'fetched' THEN 1 ELSE 0 END) AS has_poster,
-        MAX(CASE WHEN asset_kind = 'backdrop' AND status = 'fetched' THEN 1 ELSE 0 END) AS has_backdrop
-    FROM app.tmdb_assets
-    GROUP BY 1
-)
-SELECT
-    COUNT(*) AS total,
-    COUNT(*) FILTER (
-        WHERE COALESCE(df.has_en, 0) = 1
-          AND COALESCE(df.has_cs, 0) = 1
-          AND (COALESCE(df.poster_path, '') = '' OR COALESCE(af.has_poster, 0) = 1)
-          AND (COALESCE(df.backdrop_path, '') = '' OR COALESCE(af.has_backdrop, 0) = 1)
-    ) AS complete
-FROM targets AS t
-LEFT JOIN detail_flags AS df USING (tconst)
-LEFT JOIN asset_flags AS af USING (tconst)
-"""
+def read_background_activity_signal() -> dict[str, Any] | None:
+    try:
+        raw = METADATA_PIPELINE_SIGNAL_PATH.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
 
 
 @dataclass(frozen=True)
@@ -198,7 +89,7 @@ class BackgroundJobSupervisor:
                         "--person-portrait-batch-size",
                         "20",
                         "--person-detail-batch-size",
-                        "20",
+                        "0",
                         "--active-sleep-seconds",
                         "2",
                         "--idle-sleep-seconds",
@@ -216,6 +107,10 @@ class BackgroundJobSupervisor:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._homepage_snapshot_cache: dict[str, Any] | None = None
+        self._homepage_snapshot_cached_at: float = 0.0
+        self._homepage_snapshot_ttl_seconds: float = 15.0
+        self._homepage_snapshot_refreshing: bool = False
 
     def start(self) -> None:
         with self._lock:
@@ -269,6 +164,49 @@ class BackgroundJobSupervisor:
         return {"enabled": True, "jobs": jobs}
 
     def homepage_snapshot(self) -> dict[str, Any]:
+        now = time.time()
+        with self._lock:
+            if (
+                self._homepage_snapshot_cache is not None
+                and (now - self._homepage_snapshot_cached_at) <= self._homepage_snapshot_ttl_seconds
+            ):
+                return dict(self._homepage_snapshot_cache)
+            cached = dict(self._homepage_snapshot_cache) if self._homepage_snapshot_cache is not None else None
+            if not self._homepage_snapshot_refreshing:
+                self._homepage_snapshot_refreshing = True
+                thread = threading.Thread(
+                    target=self._refresh_homepage_snapshot,
+                    name="homepage-snapshot-refresh",
+                    daemon=True,
+                )
+                thread.start()
+        if cached is not None:
+            return cached
+        status = self.status()
+        jobs: list[dict[str, Any]] = []
+        for item in status["jobs"]:
+            seconds_since_log_update = item.get("seconds_since_log_update")
+            health = "running" if item["is_running"] else "stopped"
+            if item["is_running"] and seconds_since_log_update is not None and seconds_since_log_update > 60:
+                health = "quiet"
+            jobs.append(
+                {
+                    "name": item["name"],
+                    "health": health,
+                    "pid": item["pid"],
+                    "restart_count": item["restart_count"],
+                    "seconds_since_log_update": round(seconds_since_log_update, 1) if seconds_since_log_update is not None else None,
+                }
+            )
+        return {
+            "detail_cache_files": None,
+            "tmdb_total_targets": None,
+            "tmdb_complete_targets": None,
+            "tmdb_remaining_targets": None,
+            "jobs": jobs,
+        }
+
+    def _refresh_homepage_snapshot(self) -> None:
         status = self.status()
         tmdb_total: int | None = None
         tmdb_complete: int | None = None
@@ -293,13 +231,17 @@ class BackgroundJobSupervisor:
                     "seconds_since_log_update": round(seconds_since_log_update, 1) if seconds_since_log_update is not None else None,
                 }
             )
-        return {
+        snapshot = {
             "detail_cache_files": detail_files,
             "tmdb_total_targets": tmdb_total,
             "tmdb_complete_targets": tmdb_complete,
             "tmdb_remaining_targets": max(tmdb_total - tmdb_complete, 0) if tmdb_total is not None and tmdb_complete is not None else None,
             "jobs": jobs,
         }
+        with self._lock:
+            self._homepage_snapshot_cache = dict(snapshot)
+            self._homepage_snapshot_cached_at = time.time()
+            self._homepage_snapshot_refreshing = False
 
     def _run(self) -> None:
         while not self._stop_event.wait(10.0):
@@ -417,9 +359,7 @@ class BackgroundJobSupervisor:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def _tmdb_target_counts(self) -> tuple[int, int]:
-        with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
-            total, complete = conn.execute(TMDB_TARGET_COUNTS_SQL).fetchone()
-        return int(total), int(complete)
+        return get_tmdb_target_counts()
 
     def _stop_existing_pid(self, spec: JobSpec) -> None:
         if not spec.pid_path.exists():

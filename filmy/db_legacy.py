@@ -13,9 +13,40 @@ import json
 import uuid
 from typing import Any
 
+from filmy.runtime_postgres import _connect as _pg_connect
+
 
 def _db():
     return importlib.import_module("filmy.db")
+
+
+class _PgCompatConnection:
+    """Lehká kompatibilní vrstva, aby legacy SQL s `?` fungovalo i nad psycopg."""
+
+    def __init__(self, raw_connection: Any) -> None:
+        self._raw_connection = raw_connection
+        self._cursor = raw_connection.cursor()
+
+    @staticmethod
+    def _translate_sql(sql: str) -> str:
+        return sql.replace("?", "%s")
+
+    def execute(self, sql: str, params: list[Any] | tuple[Any, ...] | None = None) -> "_PgCompatConnection":
+        self._cursor.execute(self._translate_sql(sql), tuple(params or ()))
+        return self
+
+    def executemany(self, sql: str, seq_of_params: list[list[Any]] | list[tuple[Any, ...]]) -> "_PgCompatConnection":
+        self._cursor.executemany(self._translate_sql(sql), seq_of_params)
+        return self
+
+    def fetchone(self) -> Any:
+        return self._cursor.fetchone()
+
+    def fetchall(self) -> list[Any]:
+        return self._cursor.fetchall()
+
+    def close(self) -> None:
+        self._cursor.close()
 
 
 def inspect_trakt_export(export_dir: str = "trakt-export") -> dict[str, Any]:
@@ -51,8 +82,8 @@ def sync_trakt_export(export_dir: str = "trakt-export") -> dict[str, Any]:
     if inspection["file_count"] == 0:
         raise ValueError("Adresář trakt exportu je prázdný.")
 
-    with db.duckdb.connect(db.DB_PATH.as_posix()) as conn:
-        db._create_base_schema(conn)
+    with _pg_connect() as raw_conn:
+        conn = _PgCompatConnection(raw_conn)
         latest = conn.execute(
             """
             SELECT id
@@ -128,12 +159,15 @@ def sync_trakt_export(export_dir: str = "trakt-export") -> dict[str, Any]:
             "UPDATE old.trakt_sync_runs SET status = 'completed', summary_json = ? WHERE id = ?",
             [json.dumps(result, ensure_ascii=False), sync_run_id],
         )
+        raw_conn.commit()
+        conn.close()
         return result
 
 
 def get_trakt_sync_runs(limit: int = 20) -> list[dict[str, Any]]:
     db = _db()
-    with db.duckdb.connect(db.DB_PATH.as_posix(), read_only=True) as conn:
+    with _pg_connect() as raw_conn:
+        conn = _PgCompatConnection(raw_conn)
         rows = conn.execute(
             """
             SELECT id, export_path, export_fingerprint, status, summary_json, created_at
@@ -143,6 +177,7 @@ def get_trakt_sync_runs(limit: int = 20) -> list[dict[str, Any]]:
             """,
             [limit],
         ).fetchall()
+        conn.close()
     return [
         {
             "id": row[0],
@@ -158,7 +193,8 @@ def get_trakt_sync_runs(limit: int = 20) -> list[dict[str, Any]]:
 
 def get_trakt_sync_run(sync_run_id: str) -> dict[str, Any] | None:
     db = _db()
-    with db.duckdb.connect(db.DB_PATH.as_posix(), read_only=True) as conn:
+    with _pg_connect() as raw_conn:
+        conn = _PgCompatConnection(raw_conn)
         run = conn.execute(
             """
             SELECT id, export_path, export_fingerprint, status, summary_json, created_at
@@ -178,6 +214,7 @@ def get_trakt_sync_run(sync_run_id: str) -> dict[str, Any] | None:
             """,
             [sync_run_id],
         ).fetchall()
+        conn.close()
     return {
         "id": run[0],
         "export_path": run[1],
@@ -206,7 +243,8 @@ def get_trakt_sync_changes(
     limit: int = 100,
 ) -> dict[str, Any]:
     db = _db()
-    with db.duckdb.connect(db.DB_PATH.as_posix(), read_only=True) as conn:
+    with _pg_connect() as raw_conn:
+        conn = _PgCompatConnection(raw_conn)
         if sync_run_id is None:
             current = conn.execute(
                 """
@@ -397,6 +435,7 @@ def get_trakt_sync_changes(
                     [current[0]],
                 ).fetchone()[0],
             }
+        conn.close()
     return {
         "current_sync_id": current[0],
         "previous_sync_id": previous_id,
@@ -415,8 +454,10 @@ def get_trakt_ratings(limit: int = 100, active_only: bool = True) -> list[dict[s
         ORDER BY rated_at DESC
         LIMIT ?
     """
-    with db.duckdb.connect(db.DB_PATH.as_posix(), read_only=True) as conn:
+    with _pg_connect() as raw_conn:
+        conn = _PgCompatConnection(raw_conn)
         rows = conn.execute(sql, [active_only, limit]).fetchall()
+        conn.close()
     return [
         {
             "source_key": row[0],
@@ -440,7 +481,8 @@ def get_trakt_ratings(limit: int = 100, active_only: bool = True) -> list[dict[s
 
 def get_trakt_list_overview(include_items: bool = False, active_only: bool = True) -> dict[str, Any]:
     db = _db()
-    with db.duckdb.connect(db.DB_PATH.as_posix(), read_only=True) as conn:
+    with _pg_connect() as raw_conn:
+        conn = _PgCompatConnection(raw_conn)
         lists = conn.execute(
             """
             SELECT trakt_list_id, slug, name, description, privacy, list_type, item_count, updated_at, is_active, last_seen_sync_id
@@ -500,6 +542,7 @@ def get_trakt_list_overview(include_items: bool = False, active_only: bool = Tru
                 [active_only],
             ).fetchall()
             watchlist_items = [db._trakt_list_item_row_to_dict(r) for r in watchlist_rows]
+        conn.close()
 
     return {
         "lists": result_lists,
@@ -512,7 +555,8 @@ def get_trakt_list_overview(include_items: bool = False, active_only: bool = Tru
 
 def get_trakt_collection(limit: int = 100, active_only: bool = True) -> list[dict[str, Any]]:
     db = _db()
-    with db.duckdb.connect(db.DB_PATH.as_posix(), read_only=True) as conn:
+    with _pg_connect() as raw_conn:
+        conn = _PgCompatConnection(raw_conn)
         rows = conn.execute(
             """
             SELECT source_key, media_type, trakt_id, imdb_id, tmdb_id, tconst, parent_title, title,
@@ -524,6 +568,7 @@ def get_trakt_collection(limit: int = 100, active_only: bool = True) -> list[dic
             """,
             [active_only, limit],
         ).fetchall()
+        conn.close()
     return [
         {
             "source_key": row[0],
@@ -547,7 +592,8 @@ def get_trakt_collection(limit: int = 100, active_only: bool = True) -> list[dic
 
 def get_trakt_status() -> dict[str, Any]:
     db = _db()
-    with db.duckdb.connect(db.DB_PATH.as_posix(), read_only=True) as conn:
+    with _pg_connect() as raw_conn:
+        conn = _PgCompatConnection(raw_conn)
         latest = conn.execute(
             """
             SELECT id, export_path, export_fingerprint, status, summary_json, created_at
@@ -589,6 +635,7 @@ def get_trakt_status() -> dict[str, Any]:
                 "SELECT COUNT(*) FROM old.trakt_collection_items WHERE is_active = TRUE"
             ).fetchone()[0],
         }
+        conn.close()
     return {
         "latest_sync": {
             "id": latest[0],
@@ -637,18 +684,18 @@ def sync_imdb_lists(export_dir: str = "imdb_lists") -> dict[str, Any]:
     if inspection["file_count"] == 0:
         raise ValueError("Adresář imdb_lists je prázdný.")
 
-    with db.duckdb.connect(db.DB_PATH.as_posix()) as conn:
-        db._create_base_schema(conn)
-        latest = conn.execute(
+    with _pg_connect() as conn, conn.cursor() as cursor:
+        cursor.execute(
             """
             SELECT id
             FROM old.imdb_list_sync_runs
-            WHERE export_fingerprint = ? AND status = 'completed'
+            WHERE export_fingerprint = %s AND status = 'completed'
             ORDER BY created_at DESC
             LIMIT 1
             """,
-            [inspection["fingerprint"]],
-        ).fetchone()
+            (inspection["fingerprint"],),
+        )
+        latest = cursor.fetchone()
         if latest is not None:
             return {
                 "status": "unchanged",
@@ -658,18 +705,18 @@ def sync_imdb_lists(export_dir: str = "imdb_lists") -> dict[str, Any]:
             }
 
         sync_run_id = str(uuid.uuid4())
-        conn.execute(
+        cursor.execute(
             """
             INSERT INTO old.imdb_list_sync_runs (id, export_path, export_fingerprint, status, summary_json, created_at)
-            VALUES (?, ?, ?, 'running', ?, ?)
+            VALUES (%s, %s, %s, 'running', %s, %s::timestamp)
             """,
-            [sync_run_id, inspection["export_dir"], inspection["fingerprint"], json.dumps(inspection), db._now_iso()],
+            (sync_run_id, inspection["export_dir"], inspection["fingerprint"], json.dumps(inspection), db._now_iso()),
         )
 
         files_by_category = {item["category"]: item for item in inspection["files"]}
         summary = {
-            "watchlist": db._sync_imdb_watchlist(conn, sync_run_id, files_by_category.get("watchlist")),
-            "favorite_people": db._sync_imdb_favorite_people(conn, sync_run_id, files_by_category.get("favorite_people")),
+            "watchlist": _sync_imdb_watchlist(cursor, sync_run_id, files_by_category.get("watchlist")),
+            "favorite_people": _sync_imdb_favorite_people(cursor, sync_run_id, files_by_category.get("favorite_people")),
         }
         result = {
             "status": "completed",
@@ -678,17 +725,18 @@ def sync_imdb_lists(export_dir: str = "imdb_lists") -> dict[str, Any]:
             "fingerprint": inspection["fingerprint"],
             "summary": summary,
         }
-        conn.execute(
-            "UPDATE old.imdb_list_sync_runs SET status = 'completed', summary_json = ? WHERE id = ?",
-            [json.dumps(result, ensure_ascii=False), sync_run_id],
+        cursor.execute(
+            "UPDATE old.imdb_list_sync_runs SET status = 'completed', summary_json = %s WHERE id = %s",
+            (json.dumps(result, ensure_ascii=False), sync_run_id),
         )
+        conn.commit()
         return result
 
 
 def get_imdb_lists_status() -> dict[str, Any]:
     db = _db()
-    with db.duckdb.connect(db.DB_PATH.as_posix(), read_only=True) as conn:
-        latest = conn.execute(
+    with _pg_connect() as conn, conn.cursor() as cursor:
+        cursor.execute(
             """
             SELECT id, export_path, export_fingerprint, status, summary_json, created_at
             FROM old.imdb_list_sync_runs
@@ -696,15 +744,16 @@ def get_imdb_lists_status() -> dict[str, Any]:
             ORDER BY created_at DESC
             LIMIT 1
             """
-        ).fetchone()
+        )
+        latest = cursor.fetchone()
         counts = {
-            "watchlist_active": conn.execute(
-                "SELECT COUNT(*) FROM old.imdb_watchlist_items WHERE is_active = TRUE"
-            ).fetchone()[0],
-            "favorite_people_active": conn.execute(
-                "SELECT COUNT(*) FROM old.imdb_favorite_people WHERE is_active = TRUE"
-            ).fetchone()[0],
+            "watchlist_active": 0,
+            "favorite_people_active": 0,
         }
+        cursor.execute("SELECT COUNT(*) FROM old.imdb_watchlist_items WHERE is_active = TRUE")
+        counts["watchlist_active"] = int(cursor.fetchone()[0] or 0)
+        cursor.execute("SELECT COUNT(*) FROM old.imdb_favorite_people WHERE is_active = TRUE")
+        counts["favorite_people_active"] = int(cursor.fetchone()[0] or 0)
     return {
         "latest_sync": (
             {
@@ -723,19 +772,19 @@ def get_imdb_lists_status() -> dict[str, Any]:
 
 
 def get_imdb_watchlist(limit: int = 100, active_only: bool = True) -> list[dict[str, Any]]:
-    db = _db()
-    with db.duckdb.connect(db.DB_PATH.as_posix(), read_only=True) as conn:
-        rows = conn.execute(
+    with _pg_connect() as conn, conn.cursor() as cursor:
+        cursor.execute(
             """
             SELECT tconst, position, title, original_title, title_type, imdb_rating, runtime_minutes, year,
                    genres, num_votes, release_date, directors, your_rating, date_rated, is_active, last_seen_sync_id
             FROM old.imdb_watchlist_items
-            WHERE (? = FALSE OR is_active = TRUE)
+            WHERE (%s = FALSE OR is_active = TRUE)
             ORDER BY position ASC NULLS LAST, title
-            LIMIT ?
+            LIMIT %s
             """,
-            [active_only, limit],
-        ).fetchall()
+            (active_only, limit),
+        )
+        rows = cursor.fetchall()
     return [
         {
             "tconst": row[0],
@@ -760,18 +809,18 @@ def get_imdb_watchlist(limit: int = 100, active_only: bool = True) -> list[dict[
 
 
 def get_imdb_favorite_people(limit: int = 100, active_only: bool = True) -> list[dict[str, Any]]:
-    db = _db()
-    with db.duckdb.connect(db.DB_PATH.as_posix(), read_only=True) as conn:
-        rows = conn.execute(
+    with _pg_connect() as conn, conn.cursor() as cursor:
+        cursor.execute(
             """
             SELECT nconst, position, name, known_for, birth_date, is_active, last_seen_sync_id
             FROM old.imdb_favorite_people
-            WHERE (? = FALSE OR is_active = TRUE)
+            WHERE (%s = FALSE OR is_active = TRUE)
             ORDER BY position ASC NULLS LAST, name
-            LIMIT ?
+            LIMIT %s
             """,
-            [active_only, limit],
-        ).fetchall()
+            (active_only, limit),
+        )
+        rows = cursor.fetchall()
     return [
         {
             "nconst": row[0],
@@ -817,29 +866,36 @@ def sync_plex_source(section_limit: int | None = None, item_limit_per_section: i
         raise ValueError("Nebyl nalezen žádný dostupný Plex Media Server.")
 
     sections = inspection["sections"]
+    partial_sync = section_limit is not None or item_limit_per_section is not None
     if section_limit is not None:
         sections = sections[:section_limit]
 
-    with db.duckdb.connect(db.DB_PATH.as_posix()) as conn:
-        db._create_base_schema(conn)
-        latest = conn.execute(
-            """
-            SELECT id
-            FROM old.plex_sync_runs
-            WHERE source_fingerprint = ? AND status = 'completed'
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            [inspection["fingerprint"]],
-        ).fetchone()
-        if latest is not None:
-            return {
-                "status": "unchanged",
-                "sync_run_id": latest[0],
-                "summary": db._loads_json_or_none(
-                    conn.execute("SELECT summary_json FROM old.plex_sync_runs WHERE id = ?", [latest[0]]).fetchone()[0]
-                ),
-            }
+    with _pg_connect() as raw_conn:
+        conn = _PgCompatConnection(raw_conn)
+        if not partial_sync:
+            latest = conn.execute(
+                """
+                SELECT id
+                FROM old.plex_sync_runs
+                WHERE source_fingerprint = ?
+                  AND status = 'completed'
+                  AND COALESCE(summary_json::jsonb ->> 'partial_sync', 'false') = 'false'
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                [inspection["fingerprint"]],
+            ).fetchone()
+            if latest is not None:
+                summary_row = conn.execute(
+                    "SELECT summary_json FROM old.plex_sync_runs WHERE id = ?",
+                    [latest[0]],
+                ).fetchone()
+                conn.close()
+                return {
+                    "status": "unchanged",
+                    "sync_run_id": latest[0],
+                    "summary": db._loads_json_or_none(summary_row[0] if summary_row else None),
+                }
 
         sync_run_id = str(uuid.uuid4())
         now = db._now_iso()
@@ -871,6 +927,7 @@ def sync_plex_source(section_limit: int | None = None, item_limit_per_section: i
             "library_items_upserted": 0,
             "watch_events_upserted": 0,
             "content_state_updates": 0,
+            "partial_sync": partial_sync,
         }
 
         for section in sections:
@@ -893,28 +950,32 @@ def sync_plex_source(section_limit: int | None = None, item_limit_per_section: i
                 if db._sync_plex_content_state(conn, snapshot, now):
                     summary["content_state_updates"] += 1
 
-        conn.execute("UPDATE old.plex_library_items SET is_active = FALSE WHERE last_seen_sync_id <> ?", [sync_run_id])
-        conn.execute(
-            """
-            UPDATE app.user_list_items
-            SET is_archived = TRUE, updated_at = ?
-            WHERE list_id = ? AND source_origin = 'seed_plex_library' AND source_ref NOT IN (
-                SELECT source_key FROM old.plex_library_items WHERE last_seen_sync_id = ? AND is_active = TRUE
+        if not partial_sync:
+            conn.execute("UPDATE old.plex_library_items SET is_active = FALSE WHERE last_seen_sync_id <> ?", [sync_run_id])
+            conn.execute(
+                """
+                UPDATE app.user_list_items
+                SET is_archived = TRUE, updated_at = ?
+                WHERE list_id = ? AND source_origin = 'seed_plex_library' AND source_ref NOT IN (
+                    SELECT source_key FROM old.plex_library_items WHERE last_seen_sync_id = ? AND is_active = TRUE
+                )
+                """,
+                [now, plex_list_id, sync_run_id],
             )
-            """,
-            [now, plex_list_id, sync_run_id],
-        )
         conn.execute(
             "UPDATE old.plex_sync_runs SET status = 'completed', summary_json = ? WHERE id = ?",
             [json.dumps(summary, ensure_ascii=False), sync_run_id],
         )
+        raw_conn.commit()
+        conn.close()
 
     return {"status": "completed", "sync_run_id": sync_run_id, "summary": summary}
 
 
 def get_plex_status() -> dict[str, Any]:
     db = _db()
-    with db.duckdb.connect(db.DB_PATH.as_posix(), read_only=True) as conn:
+    with _pg_connect() as raw_conn:
+        conn = _PgCompatConnection(raw_conn)
         latest = conn.execute(
             """
             SELECT id, server_name, server_client_identifier, source_fingerprint, status, summary_json, created_at
@@ -960,6 +1021,7 @@ def get_plex_status() -> dict[str, Any]:
                 """
             ).fetchone()[0],
         }
+        conn.close()
     return {
         "latest_sync": {
             "id": latest[0],
@@ -1609,7 +1671,7 @@ def _sync_imdb_watchlist(conn, sync_run_id: str, file_info: dict[str, Any] | Non
                 title_type, imdb_rating, runtime_minutes, year, genres, num_votes, release_date, directors,
                 your_rating, date_rated, is_active, last_seen_sync_id, raw_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s, %s)
             ON CONFLICT (tconst) DO UPDATE SET
                 position = excluded.position,
                 created_at_src = excluded.created_at_src,
@@ -1632,7 +1694,7 @@ def _sync_imdb_watchlist(conn, sync_run_id: str, file_info: dict[str, Any] | Non
                 last_seen_sync_id = excluded.last_seen_sync_id,
                 raw_json = excluded.raw_json
             """,
-            [
+            (
                 tconst,
                 db._safe_int(row.get("Position")),
                 row.get("Created") or None,
@@ -1653,10 +1715,10 @@ def _sync_imdb_watchlist(conn, sync_run_id: str, file_info: dict[str, Any] | Non
                 db._parse_iso_date(row.get("Date Rated")),
                 sync_run_id,
                 json.dumps(row, ensure_ascii=False),
-            ],
+            ),
         )
         imported += 1
-    conn.execute("UPDATE old.imdb_watchlist_items SET is_active = FALSE WHERE last_seen_sync_id <> ?", [sync_run_id])
+    conn.execute("UPDATE old.imdb_watchlist_items SET is_active = FALSE WHERE last_seen_sync_id <> %s", (sync_run_id,))
     return {"imported": imported}
 
 
@@ -1675,7 +1737,7 @@ def _sync_imdb_favorite_people(conn, sync_run_id: str, file_info: dict[str, Any]
                 nconst, position, created_at_src, modified_at_src, description, name, known_for, birth_date,
                 is_active, last_seen_sync_id, raw_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s, %s)
             ON CONFLICT (nconst) DO UPDATE SET
                 position = excluded.position,
                 created_at_src = excluded.created_at_src,
@@ -1688,7 +1750,7 @@ def _sync_imdb_favorite_people(conn, sync_run_id: str, file_info: dict[str, Any]
                 last_seen_sync_id = excluded.last_seen_sync_id,
                 raw_json = excluded.raw_json
             """,
-            [
+            (
                 nconst,
                 db._safe_int(row.get("Position")),
                 row.get("Created") or None,
@@ -1699,8 +1761,8 @@ def _sync_imdb_favorite_people(conn, sync_run_id: str, file_info: dict[str, Any]
                 row.get("Birth Date") or None,
                 sync_run_id,
                 json.dumps(row, ensure_ascii=False),
-            ],
+            ),
         )
         imported += 1
-    conn.execute("UPDATE old.imdb_favorite_people SET is_active = FALSE WHERE last_seen_sync_id <> ?", [sync_run_id])
+    conn.execute("UPDATE old.imdb_favorite_people SET is_active = FALSE WHERE last_seen_sync_id <> %s", (sync_run_id,))
     return {"imported": imported}

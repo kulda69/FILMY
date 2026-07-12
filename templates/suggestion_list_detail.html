@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+
+{% block title %}Filmy | {{ page_title }}{% endblock %}
+
+{% block content %}
+<section class="mb-4">
+    <div class="card bg-black border-secondary-subtle">
+        <div class="card-body p-4">
+            <div class="d-flex justify-content-between align-items-start gap-3 mb-4">
+                <div class="d-flex flex-column gap-2">
+                    <div class="d-flex align-items-center gap-3 flex-wrap">
+                        <span class="badge text-bg-light text-dark align-self-start">{{ page_title }}</span>
+                        {% if active_traits_count %}
+                        <span class="badge text-bg-dark border border-secondary-subtle">{{ active_traits_count }} active traits</span>
+                        {% endif %}
+                    </div>
+                    {% if page_description %}
+                    <div class="small text-secondary">{{ page_description }}</div>
+                    {% endif %}
+                    <div class="text-secondary small">
+                        {{ suggestion_total }} položek
+                        {% if suggestion_total_pages > 1 %}
+                        · stránka {{ suggestion_page }} z {{ suggestion_total_pages }}
+                        {% endif %}
+                    </div>
+                </div>
+                <a class="btn btn-outline-light btn-sm" href="/#suggestions-section">Back home</a>
+            </div>
+
+            {% if suggestion_cards %}
+            <div class="row g-3">
+                {% for item in suggestion_cards %}
+                <div class="col-12 col-xl-6">
+                    {% include "_suggestion_title_card.html" %}
+                </div>
+                {% endfor %}
+            </div>
+            <div class="d-flex justify-content-between align-items-center gap-3 mt-4">
+                {% if suggestion_has_previous and suggestion_prev_url %}
+                <a class="btn btn-outline-secondary" href="{{ suggestion_prev_url }}">Previous</a>
+                {% else %}
+                <span></span>
+                {% endif %}
+                {% if suggestion_has_next and suggestion_next_url %}
+                <a class="btn btn-outline-secondary ms-auto" href="{{ suggestion_next_url }}">Next</a>
+                {% endif %}
+            </div>
+            {% else %}
+            <div class="rounded-4 border border-secondary-subtle p-4 text-secondary">
+                Zatim tu nic neni.
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</section>
+{% endblock %}

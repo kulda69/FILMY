@@ -11,6 +11,9 @@ so the refactor can proceed in small verified steps without breaking callers.
 import importlib
 from typing import Any
 
+from filmy.database import run_duckdb_read
+from filmy.runtime_postgres import app_state_uses_postgres, fetch_person_affinity_rating
+
 
 def _db():
     return importlib.import_module("filmy.db")
@@ -20,7 +23,13 @@ def describe_person_by_query(query: str) -> dict[str, Any] | None:
     lookup = lookup_person_by_query(query=query, candidates_limit=5)
     if lookup is None:
         return None
-    return lookup["selected"]
+    presentation = get_person_presentation(lookup["selected_nconst"])
+    if presentation is None:
+        return None
+    selected = dict(presentation)
+    selected["query"] = query
+    selected["match"] = dict(lookup["selected"])
+    return selected
 
 
 def lookup_person_by_query(query: str, candidates_limit: int = 5) -> dict[str, Any] | None:
@@ -46,13 +55,6 @@ def lookup_person_by_query(query: str, candidates_limit: int = 5) -> dict[str, A
     else:
         selected = db._pick_best_person_match(query, candidates)
 
-    presentation = get_person_presentation(selected["nconst"])
-    if presentation is None:
-        return None
-
-    presentation["query"] = query
-    presentation["match"] = db._build_person_lookup_candidate(selected, query=query, is_selected=True)
-
     selected_key = selected["nconst"]
     ordered_candidates = sorted(
         candidates,
@@ -61,7 +63,7 @@ def lookup_person_by_query(query: str, candidates_limit: int = 5) -> dict[str, A
     result = {
         "query": query,
         "selected_nconst": selected_key,
-        "selected": presentation,
+        "selected": db._build_person_lookup_candidate(selected, query=query, is_selected=True),
         "candidates": [
             db._build_person_lookup_candidate(candidate, query=query, is_selected=(candidate["nconst"] == selected_key))
             for candidate in ordered_candidates[: max(candidates_limit, 1)]
@@ -75,24 +77,44 @@ def lookup_person_by_query(query: str, candidates_limit: int = 5) -> dict[str, A
 def get_person_presentation(nconst: str) -> dict[str, Any] | None:
     db = _db()
     _ensure_person_biography_if_needed(nconst)
-    with db.duckdb.connect(db.DB_PATH.as_posix(), read_only=True) as conn:
-        cached = db._load_cached_person_presentation(conn, nconst)
+
+    if db.catalog_backend_uses_postgres():
+        cached = db._load_cached_person_presentation(None, nconst)
         if cached is not None:
             return cached
-        presentation = db._fetch_person_cache_source_detail(conn, nconst)
+        presentation = db._fetch_person_cache_source_detail(None, nconst)
         if presentation is None:
             return None
+        cache_fingerprint = db._person_cache_source_fingerprint(None, nconst, presentation)
+        db._store_cached_person_presentation(nconst, presentation, cache_fingerprint)
+        return presentation
 
-    with db.duckdb.connect(db.DB_PATH.as_posix(), read_only=True) as conn:
-        cache_fingerprint = db._person_cache_source_fingerprint(conn, nconst, presentation)
+    def read_cached(conn):
+        cached = db._load_cached_person_presentation(conn, nconst)
+        if cached is not None:
+            return ("cached", cached)
+        presentation = db._fetch_person_cache_source_detail(conn, nconst)
+        if presentation is None:
+            return ("missing", None)
+        return ("present", presentation)
+
+    status, payload = run_duckdb_read(read_cached)
+    if status == "cached":
+        return payload
+    if status == "missing" or payload is None:
+        return None
+    presentation = payload
+
+    cache_fingerprint = run_duckdb_read(
+        lambda conn: db._person_cache_source_fingerprint(conn, nconst, presentation)
+    )
     db._store_cached_person_presentation(nconst, presentation, cache_fingerprint)
     return presentation
 
 
 def _ensure_person_biography_if_needed(nconst: str) -> None:
     db = _db()
-    with db.duckdb.connect(db.DB_PATH.as_posix(), read_only=True) as conn:
-        affinity_rating = db._get_person_affinity_rating(conn, nconst)
+    affinity_rating = fetch_person_affinity_rating(nconst) if app_state_uses_postgres() else run_duckdb_read(lambda conn: db._get_person_affinity_rating(conn, nconst))
     if affinity_rating <= 0:
         return
 

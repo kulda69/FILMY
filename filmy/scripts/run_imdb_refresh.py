@@ -5,20 +5,17 @@ import gzip
 import json
 import shutil
 import signal
-import time
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.request import urlopen
 
-import duckdb
-
-from filmy.db import is_duckdb_lock_error, refresh_catalog_with_retry
 from filmy.paths import (
     IMDB_DIR,
     IMDB_REFRESH_DIR,
     IMDB_REFRESH_PID_PATH,
     IMDB_REFRESH_STATUS_PATH,
 )
+from filmy.scripts.rebuild_catalog_postgresql import rebuild_catalog_from_current_imdb
 
 
 IMDB_DATASET_BASE_URL = "https://datasets.imdbws.com"
@@ -31,11 +28,9 @@ IMDB_DATASET_FILES = (
     "title.principals.tsv.gz",
     "name.basics.tsv.gz",
 )
-CATALOG_REFRESH_ATTEMPTS = 24
-CATALOG_REFRESH_RETRY_SECONDS = 5.0
-
-
 def _now_ts() -> float:
+    import time
+
     return time.time()
 
 
@@ -192,28 +187,14 @@ def main() -> int:
         _emit({"phase": "swap_done", "imdb_dir": IMDB_DIR.as_posix()})
 
         try:
-            _write_status(stage="refresh_catalog", message="Obnovuji raw pohledy a katalog v DuckDB.", current_file=None)
-            for attempt in range(CATALOG_REFRESH_ATTEMPTS):
-                try:
-                    stats = refresh_catalog_with_retry()
-                    break
-                except duckdb.Error as exc:
-                    if not is_duckdb_lock_error(exc) or attempt == CATALOG_REFRESH_ATTEMPTS - 1:
-                        raise
-                    _emit(
-                        {
-                            "phase": "refresh_catalog_retry",
-                            "attempt": attempt + 1,
-                            "retry_in_seconds": CATALOG_REFRESH_RETRY_SECONDS,
-                            "error": str(exc),
-                        }
-                    )
-                    _write_status(
-                        stage="refresh_catalog",
-                        message="DuckDB je zrovna zamcena, cekam na dalsi pokus o refresh katalogu.",
-                        current_file=None,
-                    )
-                    time.sleep(CATALOG_REFRESH_RETRY_SECONDS)
+            _write_status(stage="refresh_catalog", message="Obnovuji katalog v PostgreSQL.", current_file=None)
+
+            def _progress(**payload: object) -> None:
+                status_payload = {"stage": "refresh_catalog", **payload}
+                _write_status(**status_payload)
+                _emit({"phase": "refresh_catalog_progress", **payload})
+
+            stats = rebuild_catalog_from_current_imdb(force=True, progress=_progress)
             _emit({"phase": "refresh_catalog_done", "stats": stats})
         except Exception:
             if backup_dir is not None and backup_dir.exists():

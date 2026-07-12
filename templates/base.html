@@ -159,26 +159,44 @@
                     <span class="navbar-toggler-icon"></span>
                 </button>
                 <div class="collapse navbar-collapse" id="mainNav">
-                    <form class="d-flex flex-column flex-xl-row align-items-stretch align-items-xl-center gap-2 flex-grow-1 mx-xl-4 my-3 my-xl-0" role="search" action="/search" method="get">
+                    <form class="d-flex flex-column align-items-stretch flex-grow-1 mx-xl-4 my-3 my-xl-0" role="search" action="/search" method="get">
+                        <input type="hidden" name="search_scope" value="{{ nav_search_scope | default('all', true) }}" data-search-scope-input>
                         <div class="input-group input-group-lg">
                             <span class="input-group-text bg-body-tertiary border-secondary-subtle text-secondary">Search</span>
+                            <div class="input-group-text bg-body-tertiary border-secondary-subtle px-2">
+                                <div class="dropdown">
+                                    <button
+                                        class="btn btn-sm btn-outline-secondary rounded-pill px-3"
+                                        type="button"
+                                        data-bs-toggle="dropdown"
+                                        aria-expanded="false"
+                                        data-search-scope-toggle
+                                    >
+                                        {{ {"all": "All", "titles": "Titles", "people": "People"}[nav_search_scope | default("all", true)] }}
+                                    </button>
+                                    <ul class="dropdown-menu dropdown-menu-dark">
+                                        <li><button class="dropdown-item" type="button" data-search-scope-option="all">All</button></li>
+                                        <li><button class="dropdown-item" type="button" data-search-scope-option="titles">Titles</button></li>
+                                        <li><button class="dropdown-item" type="button" data-search-scope-option="people">People</button></li>
+                                    </ul>
+                                </div>
+                            </div>
                             <input
                                 class="form-control bg-body-tertiary border-secondary-subtle text-light"
                                 type="search"
                                 name="q"
                                 value="{{ nav_search_query | default('', true) }}"
-                                placeholder="Find a title with small typos..."
-                                aria-label="Find a title with small typos"
+                                placeholder="Find something with small typos..."
+                                aria-label="Find something with small typos"
                                 required
                             >
                             <button class="btn btn-light text-dark px-4" type="submit" name="mode" value="auto">Go</button>
+                            <button class="btn btn-outline-secondary d-inline-flex align-items-center justify-content-center px-3" type="submit" name="mode" value="wide" title="Wide search">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" viewBox="0 0 16 16" aria-hidden="true">
+                                    <path d="M6.5 0a.5.5 0 0 1 .5.5v1.793l1.146-1.147a.5.5 0 0 1 .708.708L7.707 3H9.5a.5.5 0 0 1 0 1H7.707l1.147 1.146a.5.5 0 1 1-.708.708L7 4.707V6.5a.5.5 0 0 1-1 0V4.707L4.854 5.854a.5.5 0 1 1-.708-.708L5.293 4H3.5a.5.5 0 0 1 0-1h1.793L4.146 1.854a.5.5 0 1 1 .708-.708L6 2.293V.5a.5.5 0 0 1 .5-.5M11 6a5 5 0 1 1-3.477 8.592l-2.557.852a.5.5 0 0 1-.632-.632l.852-2.557A5 5 0 0 1 11 6m0 1a4 4 0 0 0-3.174 6.435.5.5 0 0 1 .08.455l-.463 1.389 1.39-.463a.5.5 0 0 1 .454.08A4 4 0 1 0 11 7"/>
+                                </svg>
+                            </button>
                         </div>
-                        <button class="btn btn-outline-secondary btn-lg d-inline-flex align-items-center justify-content-center gap-2 px-3" type="submit" name="mode" value="wide" title="Wide fuzzy search">
-                            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" viewBox="0 0 16 16" aria-hidden="true">
-                                <path d="M6.5 0a.5.5 0 0 1 .5.5v1.793l1.146-1.147a.5.5 0 0 1 .708.708L7.707 3H9.5a.5.5 0 0 1 0 1H7.707l1.147 1.146a.5.5 0 1 1-.708.708L7 4.707V6.5a.5.5 0 0 1-1 0V4.707L4.854 5.854a.5.5 0 1 1-.708-.708L5.293 4H3.5a.5.5 0 0 1 0-1h1.793L4.146 1.854a.5.5 0 1 1 .708-.708L6 2.293V.5a.5.5 0 0 1 .5-.5M11 6a5 5 0 1 1-3.477 8.592l-2.557.852a.5.5 0 0 1-.632-.632l.852-2.557A5 5 0 0 1 11 6m0 1a4 4 0 0 0-3.174 6.435.5.5 0 0 1 .08.455l-.463 1.389 1.39-.463a.5.5 0 0 1 .454.08A4 4 0 1 0 11 7"/>
-                            </svg>
-                            <span class="d-xl-none">Deep Search</span>
-                        </button>
                     </form>
                     <ul class="navbar-nav ms-xl-auto align-items-xl-center gap-xl-2">
                         <li class="nav-item dropdown">
@@ -241,6 +259,27 @@
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.min.js" crossorigin="anonymous"></script>
 <script>
     (() => {
+        const scopeLabels = {
+            all: "All",
+            titles: "Titles",
+            people: "People",
+        };
+
+        document.querySelectorAll("form[role='search']").forEach((form) => {
+            const input = form.querySelector("[data-search-scope-input]");
+            const toggle = form.querySelector("[data-search-scope-toggle]");
+            if (!(input instanceof HTMLInputElement) || !(toggle instanceof HTMLElement)) {
+                return;
+            }
+            form.querySelectorAll("[data-search-scope-option]").forEach((option) => {
+                option.addEventListener("click", () => {
+                    const value = option.getAttribute("data-search-scope-option") || "all";
+                    input.value = value;
+                    toggle.textContent = scopeLabels[value] || scopeLabels.all;
+                });
+            });
+        });
+
         function showMenuView(panel, viewName) {
             const views = panel.querySelectorAll("[data-menu-view]");
             for (const view of views) {
