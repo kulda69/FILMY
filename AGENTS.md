@@ -50,3 +50,14 @@ Další stav
 ---
 
 Poznámka: API klíče (IMDb/TMDB) nepatří sem do instrukcí — dej je do .env v kódu projektu.
+
+<!-- codex-project-brain:start -->
+## Project Brain
+
+- This project uses the `project-brain` skill for durable memory and recall.
+- At the start of substantive work, read `PLAN.md` and recall relevant `memories.sh` context.
+- Record important events in `Historie projektu.md` and reasons or rejected approaches in `Rozhodnuti projektu.md`.
+- Propagate durable AI rules into `AGENTS.md`; keep current-stage direction and the next action in `PLAN.md`.
+- Use the stable `project_id` from `.agents/project-brain.json` for structured memories.
+- Ask `Mam to zapsat?` when long-term importance or the correct destination is unclear.
+<!-- codex-project-brain:end -->

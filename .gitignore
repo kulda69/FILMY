@@ -1,4 +1,6 @@
 .env
+.env.*
+!.env.example
 .venv/
 
 # Python cache
@@ -37,3 +39,8 @@ tmp/
 output/playwright/
 Screenshot *.png
 data/*.duckdb*
+.agents/
+Historie projektu.md
+Rozhodnuti projektu.md
+.env.*
+!.env.example

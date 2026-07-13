@@ -18,6 +18,40 @@ def _db():
     return importlib.import_module("filmy.db")
 
 
+def ensure_duckdb_database() -> None:
+    """Prepare the legacy DuckDB backend when an explicit rollback selects it."""
+
+    db = _db()
+    with duckdb.connect(db.DB_PATH.as_posix()) as conn:
+        db._create_base_schema(conn)
+        catalog_needs_refresh, manifest_needs_update = db._get_catalog_refresh_state(conn)
+        if catalog_needs_refresh:
+            db.refresh_catalog(conn)
+        elif manifest_needs_update:
+            db._store_imdb_file_manifest(conn)
+            db._store_catalog_refresh_meta(conn)
+        for ensure_fn, label in (
+            (db._ensure_title_alias_lookup, "title_alias_lookup"),
+            (db._ensure_title_lookup, "title_lookup"),
+            (db._ensure_person_lookup, "person_lookup"),
+        ):
+            try:
+                ensure_fn(conn)
+            except duckdb.IOException as exc:
+                if not db._is_no_space_duckdb_error(exc):
+                    raise
+                db.logger.warning("Skipping %s rebuild because disk is full.", label)
+        db._migrate_watched_alias_list(conn)
+
+
+def refresh_duckdb_catalog() -> dict[str, int]:
+    """Run the legacy DuckDB catalog rebuild outside the normal runtime module."""
+
+    db = _db()
+    with duckdb.connect(db.DB_PATH.as_posix()) as conn:
+        return db.refresh_catalog(conn)
+
+
 def archive_import_reference_tables(conn: duckdb.DuckDBPyConnection) -> None:
     db = _db()
     tables = [

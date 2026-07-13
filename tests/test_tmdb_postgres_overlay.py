@@ -49,25 +49,10 @@ class TmdbPostgresOverlayTests(unittest.TestCase):
         self.assertEqual(row["detail_locales"][0], "en-US")
 
     def test_tmdb_targets_filter_postgres_completion_when_enabled(self) -> None:
-        class _FakeDuckConn:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                return False
-
+        candidate = {"tconst": "tt1", "title_type": "movie", "primary_title": "Alpha", "start_year": 2024, "priority": 1, "reasons": ["watchlist"]}
         with (
-            patch("filmy.db.tmdb_backend_uses_postgres", return_value=True),
-            patch("filmy.db.duckdb.connect", return_value=_FakeDuckConn()),
-            patch("filmy.db.content_state_uses_postgres", return_value=False),
-            patch("filmy.db.watch_events_uses_postgres", return_value=False),
-            patch("filmy.db.user_lists_uses_postgres", return_value=False),
-            patch(
-                "filmy.db._get_tmdb_duckdb_enrichment_items",
-                return_value=[{"tconst": "tt1", "title_type": "movie", "primary_title": "Alpha", "start_year": 2024, "priority": 1, "reasons": ["watchlist"]}],
-            ),
-            patch("filmy.db._tmdb_status_is_complete", return_value=False),
-            patch("filmy.db.get_tmdb_mapping", return_value={"sync_status": "synced"}),
+            patch("filmy.db._get_runtime_postgres_candidate_items", return_value=[candidate]),
+            patch("filmy.db.fetch_tmdb_completion_flags", return_value={"tt1": {"has_primary": False}}),
         ):
             items = db.get_tmdb_enrichment_targets(include_complete=False)
         self.assertEqual(len(items), 1)

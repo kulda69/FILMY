@@ -21,7 +21,6 @@ import duckdb
 from filmy.config import get_ui_config
 from filmy.database import (
     is_duckdb_lock_error as database_is_duckdb_lock_error,
-    open_duckdb_connection,
     run_duckdb_read,
     run_duckdb_write,
 )
@@ -57,8 +56,10 @@ from filmy.runtime_postgres import (
     fetch_catalog_refresh_rows,
     fetch_catalog_title_row,
     fetch_imdb_manifest_rows,
+    fetch_library_summary_snapshot,
     fetch_person_catalog_row,
     fetch_person_credit_rows,
+    fetch_person_lookup_row,
     fetch_person_affinity_rating as fetch_person_affinity_rating_postgres,
     fetch_person_episode_series_credit_rows,
     fetch_people_for_lookup_fuzzy_rows,
@@ -168,26 +169,9 @@ def ensure_database() -> None:
         _ensure_postgres_catalog_startup()
         return
 
-    with duckdb.connect(DB_PATH.as_posix()) as conn:
-        _create_base_schema(conn)
-        catalog_needs_refresh, manifest_needs_update = _get_catalog_refresh_state(conn)
-        if catalog_needs_refresh:
-            refresh_catalog(conn)
-        elif manifest_needs_update:
-            _store_imdb_file_manifest(conn)
-            _store_catalog_refresh_meta(conn)
-        for ensure_fn, label in (
-            (_ensure_title_alias_lookup, "title_alias_lookup"),
-            (_ensure_title_lookup, "title_lookup"),
-            (_ensure_person_lookup, "person_lookup"),
-        ):
-            try:
-                ensure_fn(conn)
-            except duckdb.IOException as exc:
-                if not _is_no_space_duckdb_error(exc):
-                    raise
-                logger.warning("Skipping %s rebuild because disk is full.", label)
-        _migrate_watched_alias_list(conn)
+    from filmy.db_bootstrap import ensure_duckdb_database
+
+    ensure_duckdb_database()
 
 
 def _ensure_postgres_catalog_startup() -> None:
@@ -241,12 +225,12 @@ def _ensure_postgres_catalog_startup() -> None:
 
 
 def refresh_catalog(conn: duckdb.DuckDBPyConnection | None = None) -> dict[str, int]:
-    owns_connection = conn is None
-    if owns_connection:
-        conn = duckdb.connect(DB_PATH.as_posix())
+    if conn is None:
+        from filmy.db_bootstrap import refresh_duckdb_catalog
+
+        return refresh_duckdb_catalog()
 
     try:
-        assert conn is not None
         _create_base_schema(conn)
 
         conn.execute(
@@ -487,8 +471,6 @@ def refresh_catalog(conn: duckdb.DuckDBPyConnection | None = None) -> dict[str, 
         }
     finally:
         clear_title_presentation_cache()
-        if owns_connection and conn is not None:
-            conn.close()
 
 
 def refresh_catalog_with_retry() -> dict[str, int]:
@@ -815,64 +797,16 @@ def clear_title_presentation_cache() -> None:
 
 
 def get_catalog_stats() -> dict[str, int | str | None]:
-    if catalog_backend_uses_postgres():
-        stats = fetch_catalog_stats_row_postgres()
-        return {
-            **stats,
-            "database_path": DB_PATH.as_posix(),
-            "assets_path": ASSETS_DIR.as_posix(),
-        }
-
-    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
-        row = conn.execute(
-            """
-            SELECT
-                COUNT(*) AS titles,
-                COUNT(*) FILTER (WHERE title_type = 'movie') AS movies,
-                COUNT(*) FILTER (WHERE title_type IN ('tvSeries', 'tvMiniSeries')) AS series,
-                MIN(start_year) AS oldest_year,
-                MAX(start_year) AS newest_year,
-                (SELECT COUNT(*) FROM app.catalog_episodes) AS episodes,
-                (SELECT COUNT(*) FROM app.title_aliases) AS aliases
-            FROM app.catalog_titles
-            """
-        ).fetchone()
-
+    stats = fetch_catalog_stats_row_postgres()
     return {
-        "titles": row[0],
-        "movies": row[1],
-        "series": row[2],
-        "oldest_year": row[3],
-        "newest_year": row[4],
-        "episodes": row[5],
-        "aliases": row[6],
+        **stats,
         "database_path": DB_PATH.as_posix(),
         "assets_path": ASSETS_DIR.as_posix(),
     }
 
 
 def get_imdb_manifest() -> list[dict[str, Any]]:
-    if meta_backend_uses_postgres():
-        return fetch_imdb_manifest_rows()
-    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
-        rows = conn.execute(
-            """
-            SELECT source_key, source_path, source_mtime, source_size, source_sha256, recorded_at
-            FROM app.imdb_file_manifest
-            ORDER BY source_key
-            """
-        ).fetchall()
-    return [
-        {
-            "source_key": row[0],
-            "source_path": row[1],
-            "source_mtime": row[2],
-            "source_size": row[3],
-            "source_sha256": row[4],
-            "recorded_at": row[5],
-        }
-        for row in rows
-    ]
+    return fetch_imdb_manifest_rows()
 
 
 def search_catalog(query: str | None, title_type: str | None, limit: int) -> list[dict[str, Any]]:
@@ -972,8 +906,8 @@ def get_content_detail(tconst: str) -> dict[str, Any] | None:
                     for row in episode_rows
                 ]
             else:
-                with open_duckdb_connection(read_only=True) as conn:
-                    detail["episodes"] = conn.execute(
+                detail["episodes"] = _run_duckdb_read(
+                    lambda conn: conn.execute(
                         """
                         WITH latest_episode_ratings AS (
                             SELECT
@@ -1007,6 +941,7 @@ def get_content_detail(tconst: str) -> dict[str, Any] | None:
                         """,
                         [tconst],
                     ).fetchall()
+                )
         return detail
 
     def read(conn: duckdb.DuckDBPyConnection) -> dict[str, Any] | None:
@@ -1248,31 +1183,15 @@ def _lookup_title_from_search_recall(
     if row is None:
         return None
 
-    title_row = _run_duckdb_read(
-        lambda conn: conn.execute(
-            """
-            SELECT
-                tconst,
-                title_type,
-                primary_title,
-                original_title,
-                start_year,
-                runtime_minutes,
-                genres,
-                average_rating,
-                num_votes
-            FROM app.catalog_titles
-            WHERE tconst = ?
-            """,
-            [row[0]],
-        ).fetchone()
-    )
+    title_row = fetch_catalog_title_row(str(row[0]))
     if title_row is None:
+        return None
+    if title_type is not None and str(title_row[1]) != str(title_type):
         return None
 
     candidate = _catalog_row_to_dict(title_row)
     candidate["fuzzy_score"] = row[1]
-    candidate["matched_alias_title"] = row[2]
+    candidate["matched_alias_title"] = None
     result = _build_title_lookup_result(
         query=query,
         title_type=title_type,
@@ -2358,10 +2277,7 @@ def get_favorite_genres(active_only: bool = True) -> list[dict[str, Any]]:
 
 def get_catalog_genres() -> list[dict[str, Any]]:
     """Return all distinct catalog genres with how many titles use them."""
-    if catalog_backend_uses_postgres():
-        return fetch_catalog_genres_postgres()
-    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
-        return _get_catalog_genres(conn)
+    return fetch_catalog_genres_postgres()
 
 
 def get_favorite_traits(active_only: bool = True) -> list[dict[str, Any]]:
@@ -3604,27 +3520,7 @@ def _lookup_person_from_search_recall(query: str, *, candidates_limit: int) -> d
     if row is None:
         return None
 
-    person_row = _run_duckdb_read(
-        lambda conn: conn.execute(
-            """
-            SELECT
-                nconst,
-                primary_name,
-                birth_year,
-                death_year,
-                primary_profession,
-                known_for_titles,
-                COALESCE((
-                    SELECT COUNT(*)
-                    FROM app.title_credits AS c
-                    WHERE c.nconst = p.nconst
-                ), 0) AS credit_count
-            FROM app.catalog_people AS p
-            WHERE nconst = ?
-            """,
-            [row[0]],
-        ).fetchone()
-    )
+    person_row = fetch_person_lookup_row(str(row[0]))
     if person_row is None:
         return None
 
@@ -4116,8 +4012,10 @@ def _catalog_row_from_alias_row(row: tuple[Any, ...]) -> dict[str, Any]:
 
 @lru_cache(maxsize=8)
 def _table_columns(db_path: str, schema_name: str, table_name: str) -> frozenset[str]:
-    with duckdb.connect(db_path, read_only=True) as conn:
-        rows = conn.execute(
+    if db_path != DB_PATH.as_posix():
+        raise ValueError("Introspection fallback podporuje jen aktivní projektovou DuckDB.")
+    rows = _run_duckdb_read(
+        lambda conn: conn.execute(
             """
             SELECT column_name
             FROM information_schema.columns
@@ -4125,6 +4023,7 @@ def _table_columns(db_path: str, schema_name: str, table_name: str) -> frozenset
             """,
             [schema_name, table_name],
         ).fetchall()
+    )
     return frozenset(row[0] for row in rows)
 
 
@@ -4153,6 +4052,68 @@ def _search_catalog_aliases_for_lookup(query: str, title_type: str | None, limit
     query_key_articleless = _normalize_match_key(query, strip_leading_articles=True)
     if not query_key:
         return []
+    if catalog_backend_uses_postgres():
+        with _pg_connect() as conn, conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    t.tconst,
+                    t.title_type,
+                    t.primary_title,
+                    t.original_title,
+                    t.start_year,
+                    t.runtime_minutes,
+                    t.genres,
+                    t.average_rating,
+                    t.num_votes,
+                    a.title AS matched_alias_title,
+                    a.region,
+                    a.language,
+                    a.alias_priority
+                FROM app.title_alias_lookup AS a
+                JOIN app.catalog_titles AS t ON t.tconst = a.tconst
+                WHERE (
+                    a.alias_key = %s
+                    OR a.alias_key_articleless = %s
+                    OR a.alias_key LIKE %s || '%%'
+                    OR a.alias_key_articleless LIKE %s || '%%'
+                )
+                  AND (%s::text IS NULL OR t.title_type = %s::text)
+                ORDER BY
+                    a.alias_priority,
+                    CASE
+                        WHEN a.alias_key = %s THEN 0
+                        WHEN a.alias_key_articleless = %s THEN 1
+                        WHEN a.alias_key LIKE %s || '%%' THEN 2
+                        WHEN a.alias_key_articleless LIKE %s || '%%' THEN 3
+                        ELSE 4
+                    END,
+                    t.start_year DESC NULLS LAST,
+                    t.num_votes DESC NULLS LAST,
+                    t.primary_title
+                LIMIT %s
+                """,
+                (
+                    query_key,
+                    query_key_articleless or query_key,
+                    query_key,
+                    query_key_articleless or query_key,
+                    title_type,
+                    title_type,
+                    query_key,
+                    query_key_articleless or query_key,
+                    query_key,
+                    query_key_articleless or query_key,
+                    limit,
+                ),
+            )
+            rows = cursor.fetchall()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            item = _catalog_row_from_alias_row(row)
+            item["fuzzy_score"] = _best_title_similarity(query_key, [item.get("matched_alias_title")])
+            items.append(item)
+        return items
     if _title_alias_lookup_has_embedded_title_fields(DB_PATH.as_posix()):
         sql = f"""
             SELECT
@@ -4266,6 +4227,57 @@ def _search_catalog_aliases_for_lookup_fuzzy(query: str, title_type: str | None,
     length_floor = max(len(query_key) - 2, 1)
     length_ceiling = len(query_key) + 3
     scan_limit = 200
+    if catalog_backend_uses_postgres():
+        with _pg_connect() as conn, conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    t.tconst,
+                    t.title_type,
+                    t.primary_title,
+                    t.original_title,
+                    t.start_year,
+                    t.runtime_minutes,
+                    t.genres,
+                    t.average_rating,
+                    t.num_votes,
+                    a.title AS matched_alias_title,
+                    a.region,
+                    a.language,
+                    a.alias_priority
+                FROM app.title_alias_lookup AS a
+                JOIN app.catalog_titles AS t ON t.tconst = a.tconst
+                WHERE (%s::text IS NULL OR t.title_type = %s::text)
+                  AND (
+                    a.alias_prefix3_articleless = %s
+                    OR a.alias_prefix2_articleless = %s
+                  )
+                  AND a.alias_length_articleless BETWEEN %s AND %s
+                ORDER BY
+                    a.alias_priority,
+                    t.num_votes DESC NULLS LAST,
+                    t.average_rating DESC NULLS LAST,
+                    t.start_year DESC NULLS LAST
+                LIMIT %s
+                """,
+                (title_type, title_type, prefix3, prefix2, length_floor, length_ceiling, scan_limit),
+            )
+            rows = cursor.fetchall()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            item = _catalog_row_from_alias_row(row)
+            item["fuzzy_score"] = _best_title_similarity(query_key, [item.get("matched_alias_title")])
+            items.append(item)
+        items.sort(
+            key=lambda item: (
+                item.get("fuzzy_score") or 0.0,
+                -int(item.get("alias_priority") or 99),
+                item.get("num_votes") or 0,
+                item.get("start_year") or 0,
+            ),
+            reverse=True,
+        )
+        return [item for item in items if (item.get("fuzzy_score") or 0.0) >= 0.55][:limit]
 
     if _title_alias_lookup_has_embedded_title_fields(DB_PATH.as_posix()):
         sql = f"""
@@ -4328,16 +4340,17 @@ def _search_catalog_aliases_for_lookup_fuzzy(query: str, title_type: str | None,
                 t.start_year DESC NULLS LAST
             LIMIT {scan_limit}
         """
-    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
-        rows = conn.execute(
+    rows = _run_duckdb_read(
+        lambda conn: conn.execute(
             sql,
             [title_type, title_type, prefix3, prefix2, length_floor, length_ceiling],
         ).fetchall()
-        items: list[dict[str, Any]] = []
-        for row in rows:
-            item = _catalog_row_from_alias_row(row)
-            item["fuzzy_score"] = _best_title_similarity(query_key, [item.get("matched_alias_title")])
-            items.append(item)
+    )
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        item = _catalog_row_from_alias_row(row)
+        item["fuzzy_score"] = _best_title_similarity(query_key, [item.get("matched_alias_title")])
+        items.append(item)
     items.sort(
         key=lambda item: (
             item.get("fuzzy_score") or 0.0,
@@ -4359,6 +4372,53 @@ def _search_catalog_aliases_for_lookup_levenshtein(query: str, title_type: str |
     query_len = len(query_key)
     length_floor = max(query_len - 4, 1)
     length_ceiling = query_len + 4
+    if catalog_backend_uses_postgres():
+        with _pg_connect() as conn, conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    t.tconst,
+                    t.title_type,
+                    t.primary_title,
+                    t.original_title,
+                    t.start_year,
+                    t.runtime_minutes,
+                    t.genres,
+                    t.average_rating,
+                    t.num_votes,
+                    a.title AS matched_alias_title,
+                    a.region,
+                    a.language,
+                    a.alias_priority
+                FROM app.title_alias_lookup AS a
+                JOIN app.catalog_titles AS t ON t.tconst = a.tconst
+                WHERE (%s::text IS NULL OR t.title_type = %s::text)
+                  AND a.alias_prefix1_articleless = %s
+                  AND a.alias_length_articleless BETWEEN %s AND %s
+                ORDER BY
+                    a.alias_priority,
+                    t.num_votes DESC NULLS LAST,
+                    t.start_year DESC NULLS LAST
+                LIMIT 500
+                """,
+                (title_type, title_type, first_letter, length_floor, length_ceiling),
+            )
+            rows = cursor.fetchall()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            item = _catalog_row_from_alias_row(row)
+            item["fuzzy_score"] = _best_title_similarity(query_key, [item.get("matched_alias_title")])
+            items.append(item)
+        items.sort(
+            key=lambda item: (
+                item.get("fuzzy_score") or 0.0,
+                -int(item.get("alias_priority") or 99),
+                item.get("num_votes") or 0,
+                item.get("start_year") or 0,
+            ),
+            reverse=True,
+        )
+        return [item for item in items if (item.get("fuzzy_score") or 0.0) >= 0.55][:limit]
 
     if _title_alias_lookup_has_embedded_title_fields(DB_PATH.as_posix()):
         sql = f"""
@@ -4448,85 +4508,131 @@ def _search_catalog_for_lookup_fuzzy(query: str, title_type: str | None, limit: 
     length_floor = max(len(query_key) - 2, 1)
     length_ceiling = len(query_key) + 3
     scan_limit = 200
-
-    if _title_lookup_available(DB_PATH.as_posix()):
-        sql = f"""
-            SELECT
-                tconst,
-                title_type,
-                primary_title,
-                original_title,
-                start_year,
-                runtime_minutes,
-                genres,
-                average_rating,
-                num_votes
-            FROM app.title_lookup
-            WHERE (? IS NULL OR title_type = ?)
-              AND (
-                primary_prefix3 = ?
-                OR original_prefix3 = ?
-                OR primary_prefix2 = ?
-                OR original_prefix2 = ?
+    if catalog_backend_uses_postgres():
+        with _pg_connect() as conn, conn.cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT
+                    tconst,
+                    title_type,
+                    primary_title,
+                    original_title,
+                    start_year,
+                    runtime_minutes,
+                    genres,
+                    average_rating,
+                    num_votes
+                FROM app.title_lookup
+                WHERE (%s::text IS NULL OR title_type = %s::text)
+                  AND (
+                    primary_prefix3 = %s
+                    OR original_prefix3 = %s
+                    OR primary_prefix2 = %s
+                    OR original_prefix2 = %s
+                  )
+                  AND (
+                    primary_length BETWEEN %s AND %s
+                    OR original_length BETWEEN %s AND %s
+                  )
+                ORDER BY
+                    num_votes DESC NULLS LAST,
+                    average_rating DESC NULLS LAST,
+                    start_year DESC NULLS LAST
+                LIMIT {scan_limit}
+                """,
+                (
+                    title_type,
+                    title_type,
+                    prefix3,
+                    prefix3,
+                    prefix2,
+                    prefix2,
+                    length_floor,
+                    length_ceiling,
+                    length_floor,
+                    length_ceiling,
+                ),
             )
-              AND (
-                primary_length BETWEEN ? AND ?
-                OR original_length BETWEEN ? AND ?
-              )
-            ORDER BY
-                num_votes DESC NULLS LAST,
-                average_rating DESC NULLS LAST,
-                start_year DESC NULLS LAST
-            LIMIT {scan_limit}
-        """
+            rows = cursor.fetchall()
     else:
-        sql = f"""
-            SELECT
-                tconst,
-                title_type,
-                primary_title,
-                original_title,
-                start_year,
-                runtime_minutes,
-                genres,
-                average_rating,
-                num_votes
-            FROM app.catalog_titles
-            WHERE (? IS NULL OR title_type = ?)
-              AND (
-                left({_duckdb_match_key_sql("primary_title", strip_leading_articles=True)}, 3) = ?
-                OR left({_duckdb_match_key_sql("original_title", strip_leading_articles=True)}, 3) = ?
-                OR left({_duckdb_match_key_sql("primary_title", strip_leading_articles=True)}, 2) = ?
-                OR left({_duckdb_match_key_sql("original_title", strip_leading_articles=True)}, 2) = ?
-              )
-              AND (
-                length({_duckdb_match_key_sql("primary_title", strip_leading_articles=True)}) BETWEEN ? AND ?
-                OR length({_duckdb_match_key_sql("original_title", strip_leading_articles=True)}) BETWEEN ? AND ?
-              )
-            ORDER BY
-                num_votes DESC NULLS LAST,
-                average_rating DESC NULLS LAST,
-                start_year DESC NULLS LAST
-            LIMIT {scan_limit}
-        """
+        if _title_lookup_available(DB_PATH.as_posix()):
+            sql = f"""
+                SELECT
+                    tconst,
+                    title_type,
+                    primary_title,
+                    original_title,
+                    start_year,
+                    runtime_minutes,
+                    genres,
+                    average_rating,
+                    num_votes
+                FROM app.title_lookup
+                WHERE (? IS NULL OR title_type = ?)
+                  AND (
+                    primary_prefix3 = ?
+                    OR original_prefix3 = ?
+                    OR primary_prefix2 = ?
+                    OR original_prefix2 = ?
+                )
+                  AND (
+                    primary_length BETWEEN ? AND ?
+                    OR original_length BETWEEN ? AND ?
+                  )
+                ORDER BY
+                    num_votes DESC NULLS LAST,
+                    average_rating DESC NULLS LAST,
+                    start_year DESC NULLS LAST
+                LIMIT {scan_limit}
+            """
+        else:
+            sql = f"""
+                SELECT
+                    tconst,
+                    title_type,
+                    primary_title,
+                    original_title,
+                    start_year,
+                    runtime_minutes,
+                    genres,
+                    average_rating,
+                    num_votes
+                FROM app.catalog_titles
+                WHERE (? IS NULL OR title_type = ?)
+                  AND (
+                    left({_duckdb_match_key_sql("primary_title", strip_leading_articles=True)}, 3) = ?
+                    OR left({_duckdb_match_key_sql("original_title", strip_leading_articles=True)}, 3) = ?
+                    OR left({_duckdb_match_key_sql("primary_title", strip_leading_articles=True)}, 2) = ?
+                    OR left({_duckdb_match_key_sql("original_title", strip_leading_articles=True)}, 2) = ?
+                  )
+                  AND (
+                    length({_duckdb_match_key_sql("primary_title", strip_leading_articles=True)}) BETWEEN ? AND ?
+                    OR length({_duckdb_match_key_sql("original_title", strip_leading_articles=True)}) BETWEEN ? AND ?
+                  )
+                ORDER BY
+                    num_votes DESC NULLS LAST,
+                    average_rating DESC NULLS LAST,
+                    start_year DESC NULLS LAST
+                LIMIT {scan_limit}
+            """
 
-    rows = _run_duckdb_read(
-        lambda conn: conn.execute(
-            sql,
-            [
-                title_type,
-                title_type,
-                prefix3,
-                prefix3,
-                prefix2,
-                prefix2,
-                length_floor,
-                length_ceiling,
-                length_floor,
-                length_ceiling,
-            ],
-        ).fetchall()
-    )
+        rows = _run_duckdb_read(
+            lambda conn: conn.execute(
+                sql,
+                [
+                    title_type,
+                    title_type,
+                    prefix3,
+                    prefix3,
+                    prefix2,
+                    prefix2,
+                    length_floor,
+                    length_ceiling,
+                    length_floor,
+                    length_ceiling,
+                ],
+            ).fetchall()
+        )
 
     scored: list[dict[str, Any]] = []
     for row in rows:
@@ -4555,83 +4661,122 @@ def _search_catalog_for_lookup_levenshtein(query: str, title_type: str | None, l
     query_len = len(query_key)
     length_floor = max(query_len - 4, 1)
     length_ceiling = query_len + 4
-
-    if _title_lookup_available(DB_PATH.as_posix()):
-        sql = f"""
-            SELECT
-                tconst,
-                title_type,
-                primary_title,
-                original_title,
-                start_year,
-                runtime_minutes,
-                genres,
-                average_rating,
-                num_votes,
-                LEAST(
-                    levenshtein(?, primary_key),
-                    levenshtein(?, original_key)
-                ) AS edit_distance
-            FROM app.title_lookup
-            WHERE (? IS NULL OR title_type = ?)
-              AND (
-                primary_prefix1 = ?
-                OR original_prefix1 = ?
+    if catalog_backend_uses_postgres():
+        with _pg_connect() as conn, conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    tconst,
+                    title_type,
+                    primary_title,
+                    original_title,
+                    start_year,
+                    runtime_minutes,
+                    genres,
+                    average_rating,
+                    num_votes
+                FROM app.title_lookup
+                WHERE (%s::text IS NULL OR title_type = %s::text)
+                  AND (
+                    primary_prefix1 = %s
+                    OR original_prefix1 = %s
+                  )
+                  AND (
+                    primary_length BETWEEN %s AND %s
+                    OR original_length BETWEEN %s AND %s
+                  )
+                ORDER BY num_votes DESC NULLS LAST, average_rating DESC NULLS LAST, start_year DESC NULLS LAST
+                LIMIT 500
+                """,
+                (
+                    title_type,
+                    title_type,
+                    first_letter,
+                    first_letter,
+                    length_floor,
+                    length_ceiling,
+                    length_floor,
+                    length_ceiling,
+                ),
             )
-              AND (
-                primary_length BETWEEN ? AND ?
-                OR original_length BETWEEN ? AND ?
-            )
-            ORDER BY edit_distance ASC, num_votes DESC NULLS LAST, average_rating DESC NULLS LAST, start_year DESC NULLS LAST
-            LIMIT 500
-        """
+            rows = cursor.fetchall()
     else:
-        sql = f"""
-            SELECT
-                tconst,
-                title_type,
-                primary_title,
-                original_title,
-                start_year,
-                runtime_minutes,
-                genres,
-                average_rating,
-                num_votes,
-                LEAST(
-                    levenshtein(?, {_duckdb_match_key_sql("primary_title", strip_leading_articles=True)}),
-                    levenshtein(?, {_duckdb_match_key_sql("original_title", strip_leading_articles=True)})
-                ) AS edit_distance
-            FROM app.catalog_titles
-            WHERE (? IS NULL OR title_type = ?)
-              AND (
-                left({_duckdb_match_key_sql("primary_title", strip_leading_articles=True)}, 1) = ?
-                OR left({_duckdb_match_key_sql("original_title", strip_leading_articles=True)}, 1) = ?
-            )
-              AND (
-                length({_duckdb_match_key_sql("primary_title", strip_leading_articles=True)}) BETWEEN ? AND ?
-                OR length({_duckdb_match_key_sql("original_title", strip_leading_articles=True)}) BETWEEN ? AND ?
-            )
-            ORDER BY edit_distance ASC, num_votes DESC NULLS LAST, average_rating DESC NULLS LAST, start_year DESC NULLS LAST
-            LIMIT 500
-        """
+        if _title_lookup_available(DB_PATH.as_posix()):
+            sql = f"""
+                SELECT
+                    tconst,
+                    title_type,
+                    primary_title,
+                    original_title,
+                    start_year,
+                    runtime_minutes,
+                    genres,
+                    average_rating,
+                    num_votes,
+                    LEAST(
+                        levenshtein(?, primary_key),
+                        levenshtein(?, original_key)
+                    ) AS edit_distance
+                FROM app.title_lookup
+                WHERE (? IS NULL OR title_type = ?)
+                  AND (
+                    primary_prefix1 = ?
+                    OR original_prefix1 = ?
+                )
+                  AND (
+                    primary_length BETWEEN ? AND ?
+                    OR original_length BETWEEN ? AND ?
+                )
+                ORDER BY edit_distance ASC, num_votes DESC NULLS LAST, average_rating DESC NULLS LAST, start_year DESC NULLS LAST
+                LIMIT 500
+            """
+        else:
+            sql = f"""
+                SELECT
+                    tconst,
+                    title_type,
+                    primary_title,
+                    original_title,
+                    start_year,
+                    runtime_minutes,
+                    genres,
+                    average_rating,
+                    num_votes,
+                    LEAST(
+                        levenshtein(?, {_duckdb_match_key_sql("primary_title", strip_leading_articles=True)}),
+                        levenshtein(?, {_duckdb_match_key_sql("original_title", strip_leading_articles=True)})
+                    ) AS edit_distance
+                FROM app.catalog_titles
+                WHERE (? IS NULL OR title_type = ?)
+                  AND (
+                    left({_duckdb_match_key_sql("primary_title", strip_leading_articles=True)}, 1) = ?
+                    OR left({_duckdb_match_key_sql("original_title", strip_leading_articles=True)}, 1) = ?
+                )
+                  AND (
+                    length({_duckdb_match_key_sql("primary_title", strip_leading_articles=True)}) BETWEEN ? AND ?
+                    OR length({_duckdb_match_key_sql("original_title", strip_leading_articles=True)}) BETWEEN ? AND ?
+                )
+                ORDER BY edit_distance ASC, num_votes DESC NULLS LAST, average_rating DESC NULLS LAST, start_year DESC NULLS LAST
+                LIMIT 500
+            """
 
-    rows = _run_duckdb_read(
-        lambda conn: conn.execute(
-            sql,
-            [
-                query_key,
-                query_key,
-                title_type,
-                title_type,
-                first_letter,
-                first_letter,
-                length_floor,
-                length_ceiling,
-                length_floor,
-                length_ceiling,
-            ],
-        ).fetchall()
-    )
+        rows = _run_duckdb_read(
+            lambda conn: conn.execute(
+                sql,
+                [
+                    query_key,
+                    query_key,
+                    title_type,
+                    title_type,
+                    first_letter,
+                    first_letter,
+                    length_floor,
+                    length_ceiling,
+                    length_floor,
+                    length_ceiling,
+                ],
+            ).fetchall()
+        )
 
     scored: list[dict[str, Any]] = []
     for row in rows:
@@ -4728,42 +4873,45 @@ def _tokens_are_subsequence(needle: list[str], haystack: list[str]) -> bool:
 
 
 def _search_catalog_for_lookup(query: str, title_type: str | None, limit: int) -> list[dict[str, Any]]:
-    sql = """
-        SELECT
-            tconst,
-            title_type,
-            primary_title,
-            original_title,
-            start_year,
-            runtime_minutes,
-            genres,
-            average_rating,
-            num_votes
-        FROM app.catalog_titles
-        WHERE (primary_title ILIKE '%' || ? || '%' OR original_title ILIKE '%' || ? || '%')
-          AND (? IS NULL OR title_type = ?)
-        ORDER BY
-            CASE
-                WHEN lower(primary_title) = lower(?) THEN 0
-                WHEN lower(original_title) = lower(?) THEN 1
-                WHEN primary_title ILIKE ? || '%' THEN 2
-                WHEN original_title ILIKE ? || '%' THEN 3
-                ELSE 4
-            END,
-            start_year DESC NULLS LAST,
-            CASE WHEN average_rating IS NULL THEN 1 ELSE 0 END,
-            average_rating DESC,
-            num_votes DESC,
-            primary_title
-        LIMIT ?
-    """
+    if catalog_backend_uses_postgres():
+        rows = fetch_catalog_search_rows(query=query, title_type=title_type, limit=limit)
+    else:
+        sql = """
+            SELECT
+                tconst,
+                title_type,
+                primary_title,
+                original_title,
+                start_year,
+                runtime_minutes,
+                genres,
+                average_rating,
+                num_votes
+            FROM app.catalog_titles
+            WHERE (primary_title ILIKE '%' || ? || '%' OR original_title ILIKE '%' || ? || '%')
+              AND (? IS NULL OR title_type = ?)
+            ORDER BY
+                CASE
+                    WHEN lower(primary_title) = lower(?) THEN 0
+                    WHEN lower(original_title) = lower(?) THEN 1
+                    WHEN primary_title ILIKE ? || '%' THEN 2
+                    WHEN original_title ILIKE ? || '%' THEN 3
+                    ELSE 4
+                END,
+                start_year DESC NULLS LAST,
+                CASE WHEN average_rating IS NULL THEN 1 ELSE 0 END,
+                average_rating DESC,
+                num_votes DESC,
+                primary_title
+            LIMIT ?
+        """
 
-    rows = _run_duckdb_read(
-        lambda conn: conn.execute(
-            sql,
-            [query, query, title_type, title_type, query, query, query, query, limit],
-        ).fetchall()
-    )
+        rows = _run_duckdb_read(
+            lambda conn: conn.execute(
+                sql,
+                [query, query, title_type, title_type, query, query, query, query, limit],
+            ).fetchall()
+        )
     items: list[dict[str, Any]] = []
     for row in rows:
         item = _catalog_row_to_dict(row)
@@ -5129,55 +5277,29 @@ def get_tmdb_enrichment_targets(
     include_complete: bool = True,
     priority_tconsts: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    fully_pg_runtime = (
-        tmdb_backend_uses_postgres()
-        and catalog_backend_uses_postgres()
-        and content_state_uses_postgres()
-        and watch_events_uses_postgres()
-        and user_lists_uses_postgres()
+    items = _get_runtime_postgres_candidate_items(None)
+    if priority_tconsts:
+        priority_items = _get_priority_tmdb_target_items(None, priority_tconsts)
+        existing = {item["tconst"] for item in items}
+        items = [item for item in priority_items if item["tconst"] not in existing] + items
+
+    ui_config = get_ui_config()
+    primary_locale, fallback_locale = ui_config.tmdb_locale_order
+    flags_by_tconst = fetch_tmdb_completion_flags(
+        [str(item["tconst"]) for item in items],
+        primary_locale=primary_locale,
+        fallback_locale=fallback_locale,
     )
-    if fully_pg_runtime:
-        items = _get_runtime_postgres_candidate_items(None)
-        if priority_tconsts:
-            priority_items = _get_priority_tmdb_target_items(None, priority_tconsts)
-            existing = {item["tconst"] for item in items}
-            items = [item for item in priority_items if item["tconst"] not in existing] + items
-    else:
-        with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
-            effective_include_complete = True if tmdb_backend_uses_postgres() else include_complete
-            items = _get_tmdb_duckdb_enrichment_items(
-                conn,
-                include_complete=effective_include_complete,
-                include_content_state=not content_state_uses_postgres(),
-                include_watch_events=not watch_events_uses_postgres(),
-                include_user_lists=not user_lists_uses_postgres(),
-            )
-            if content_state_uses_postgres() or watch_events_uses_postgres() or user_lists_uses_postgres():
-                items = _merge_tmdb_target_items(items, _get_tmdb_postgres_runtime_items(conn, include_complete=effective_include_complete))
-
-            if priority_tconsts:
-                priority_items = _get_priority_tmdb_target_items(conn, priority_tconsts)
-                existing = {item["tconst"] for item in items}
-                items = [item for item in priority_items if item["tconst"] not in existing] + items
-
-    if tmdb_backend_uses_postgres():
-        ui_config = get_ui_config()
-        primary_locale, fallback_locale = ui_config.tmdb_locale_order
-        flags_by_tconst = fetch_tmdb_completion_flags(
-            [str(item["tconst"]) for item in items],
-            primary_locale=primary_locale,
-            fallback_locale=fallback_locale,
-        )
-        filtered_items: list[dict[str, Any]] = []
-        for item in items:
-            tconst = str(item["tconst"])
-            flags = flags_by_tconst.get(tconst)
-            if flags is not None and str(flags.get("sync_status") or "") == "not_found":
-                continue
-            is_complete = _tmdb_flags_indicate_complete(flags, primary_locale=primary_locale, fallback_locale=fallback_locale)
-            if include_complete or not is_complete:
-                filtered_items.append(item)
-        items = filtered_items
+    filtered_items: list[dict[str, Any]] = []
+    for item in items:
+        tconst = str(item["tconst"])
+        flags = flags_by_tconst.get(tconst)
+        if flags is not None and str(flags.get("sync_status") or "") == "not_found":
+            continue
+        is_complete = _tmdb_flags_indicate_complete(flags, primary_locale=primary_locale, fallback_locale=fallback_locale)
+        if include_complete or not is_complete:
+            filtered_items.append(item)
+    items = filtered_items
 
     if limit is not None:
         items = items[:limit]
@@ -5790,113 +5912,23 @@ def _tmdb_target_sort_key(item: dict[str, Any]) -> tuple[int, int, int, str]:
 
 
 def get_title_detail_cache_targets(limit: int | None = None, include_ready: bool = False) -> list[dict[str, Any]]:
-    if tmdb_backend_uses_postgres():
-        candidate_items = get_tmdb_enrichment_targets(include_complete=True)
-        ui_config = get_ui_config()
-        primary_locale, fallback_locale = ui_config.tmdb_locale_order
-        flags_by_tconst = fetch_tmdb_completion_flags(
-            [str(item["tconst"]) for item in candidate_items],
-            primary_locale=primary_locale,
-            fallback_locale=fallback_locale,
-        )
-        items: list[dict[str, Any]] = []
-        for item in candidate_items:
-            tconst = str(item["tconst"])
-            if not _tmdb_flags_indicate_complete(
-                flags_by_tconst.get(tconst),
-                primary_locale=primary_locale,
-                fallback_locale=fallback_locale,
-            ):
-                continue
-            cache_path = _title_detail_cache_path(tconst)
-            if not cache_path.exists():
-                cache_status = "missing"
-            else:
-                try:
-                    cached = json.loads(cache_path.read_text(encoding="utf-8"))
-                    cache_status = "ready" if isinstance(cached, dict) and cached.get("tconst") == tconst else "invalid"
-                except (OSError, json.JSONDecodeError):
-                    cache_status = "invalid"
-            if cache_status == "ready" and not include_ready:
-                continue
-            items.append(
-                {
-                    "tconst": item["tconst"],
-                    "title_type": item["title_type"],
-                    "primary_title": item["primary_title"],
-                    "start_year": item["start_year"],
-                    "priority": item["priority"],
-                    "reasons": item.get("reasons") or [],
-                    "cache_status": cache_status,
-                    "cache_path": cache_path.as_posix(),
-                }
-            )
-            if limit is not None and len(items) >= limit:
-                break
-        return items
-
-    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
-        candidate_items = _get_tmdb_duckdb_enrichment_items(
-            conn,
-            include_complete=True,
-            include_content_state=not content_state_uses_postgres(),
-            include_watch_events=not watch_events_uses_postgres(),
-            include_user_lists=not user_lists_uses_postgres(),
-        )
-        if content_state_uses_postgres() or watch_events_uses_postgres() or user_lists_uses_postgres():
-            candidate_items = _merge_tmdb_target_items(candidate_items, _get_tmdb_postgres_runtime_items(conn, include_complete=True))
-
-        if not candidate_items:
-            return []
-
-        target_tconsts = [str(item["tconst"]) for item in candidate_items]
-        placeholders = ", ".join("?" for _ in target_tconsts)
-        rows = conn.execute(
-            f"""
-        WITH detail_flags AS (
-            SELECT
-                tconst,
-                MAX(CASE WHEN locale = 'en-US' THEN 1 ELSE 0 END) AS has_en,
-                MAX(CASE WHEN locale = 'cs-CZ' THEN 1 ELSE 0 END) AS has_cs,
-                MAX(CASE WHEN locale = 'en-US' THEN poster_path WHEN locale = 'cs-CZ' THEN poster_path ELSE NULL END) AS poster_path,
-                MAX(CASE WHEN locale = 'en-US' THEN backdrop_path WHEN locale = 'cs-CZ' THEN backdrop_path ELSE NULL END) AS backdrop_path
-            FROM app.tmdb_title_details
-            GROUP BY 1
-        ),
-        asset_flags AS (
-            SELECT
-                tconst,
-                MAX(CASE WHEN asset_kind = 'poster' AND status = 'fetched' THEN 1 ELSE 0 END) AS has_poster,
-                MAX(CASE WHEN asset_kind = 'backdrop' AND status = 'fetched' THEN 1 ELSE 0 END) AS has_backdrop
-            FROM app.tmdb_assets
-            GROUP BY 1
-        )
-        SELECT
-            t.tconst,
-            t.title_type,
-            t.primary_title,
-            t.start_year
-        FROM app.catalog_titles AS t
-        JOIN detail_flags AS d ON d.tconst = t.tconst
-        LEFT JOIN asset_flags AS a ON a.tconst = t.tconst
-        LEFT JOIN app.tmdb_title_map AS m ON m.tconst = t.tconst
-        WHERE COALESCE(d.has_en, 0) = 1
-          AND COALESCE(d.has_cs, 0) = 1
-          AND (COALESCE(d.poster_path, '') = '' OR COALESCE(a.has_poster, 0) = 1)
-          AND (COALESCE(d.backdrop_path, '') = '' OR COALESCE(a.has_backdrop, 0) = 1)
-          AND COALESCE(m.sync_status, '') <> 'not_found'
-          AND t.tconst IN ({placeholders})
-        """,
-            target_tconsts,
-        ).fetchall()
-    allowed = {str(row[0]): row for row in rows}
-
+    candidate_items = get_tmdb_enrichment_targets(include_complete=True)
+    ui_config = get_ui_config()
+    primary_locale, fallback_locale = ui_config.tmdb_locale_order
+    flags_by_tconst = fetch_tmdb_completion_flags(
+        [str(item["tconst"]) for item in candidate_items],
+        primary_locale=primary_locale,
+        fallback_locale=fallback_locale,
+    )
     items: list[dict[str, Any]] = []
     for item in candidate_items:
-        row = allowed.get(str(item["tconst"]))
-        if row is None:
+        tconst = str(item["tconst"])
+        if not _tmdb_flags_indicate_complete(
+            flags_by_tconst.get(tconst),
+            primary_locale=primary_locale,
+            fallback_locale=fallback_locale,
+        ):
             continue
-        tconst = row[0]
         cache_path = _title_detail_cache_path(tconst)
         if not cache_path.exists():
             cache_status = "missing"
@@ -5906,16 +5938,14 @@ def get_title_detail_cache_targets(limit: int | None = None, include_ready: bool
                 cache_status = "ready" if isinstance(cached, dict) and cached.get("tconst") == tconst else "invalid"
             except (OSError, json.JSONDecodeError):
                 cache_status = "invalid"
-
         if cache_status == "ready" and not include_ready:
             continue
-
         items.append(
             {
-                "tconst": row[0],
-                "title_type": row[1],
-                "primary_title": row[2],
-                "start_year": row[3],
+                "tconst": item["tconst"],
+                "title_type": item["title_type"],
+                "primary_title": item["primary_title"],
+                "start_year": item["start_year"],
                 "priority": item["priority"],
                 "reasons": item.get("reasons") or [],
                 "cache_status": cache_status,
@@ -5929,218 +5959,7 @@ def get_title_detail_cache_targets(limit: int | None = None, include_ready: bool
 
 def _get_relevant_people_candidates(limit: int | None = None) -> list[dict[str, Any]]:
     main_cast_limit = 8
-    if user_lists_uses_postgres() and catalog_backend_uses_postgres():
-        return fetch_relevant_people_candidate_rows(main_cast_limit=main_cast_limit, limit=limit)
-    if user_lists_uses_postgres():
-        with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
-            active_items = fetch_active_user_list_items()
-            item_tconsts = [str(item["tconst"]) for item in active_items if item.get("tconst")]
-            series_map = _episode_series_map(conn, item_tconsts)
-            list_titles = sorted(
-                {
-                    series_map.get(str(item["tconst"]), str(item["tconst"]))
-                    for item in active_items
-                    if item.get("tconst")
-                }
-            )
-            if not list_titles:
-                list_titles = []
-            sql = """
-                WITH affinity_candidates AS (
-                    SELECT
-                        up.nconst,
-                        COALESCE(cp.primary_name, up.name) AS primary_name,
-                        cp.birth_year,
-                        cp.primary_profession,
-                        0 AS credit_count,
-                        0 AS group_priority
-                    FROM app.user_people AS up
-                    LEFT JOIN app.catalog_people AS cp ON cp.nconst = up.nconst
-                    WHERE up.nconst IS NOT NULL
-                      AND (up.affinity_rating > 0 OR up.is_favorite = TRUE)
-                )
-                SELECT
-                    nconst,
-                    primary_name,
-                    birth_year,
-                    primary_profession,
-                    MAX(credit_count) AS credit_count,
-                    MIN(group_priority) AS group_priority
-                FROM affinity_candidates
-                WHERE nconst IS NOT NULL
-                GROUP BY 1, 2, 3, 4
-                ORDER BY group_priority, credit_count DESC, birth_year DESC NULLS LAST, primary_name
-            """
-            params: list[Any] = []
-            if list_titles:
-                placeholders = ", ".join("?" for _ in list_titles)
-                sql = f"""
-                    WITH list_credit_candidates AS (
-                        SELECT
-                            c.nconst,
-                            p.primary_name,
-                            p.birth_year,
-                            p.primary_profession,
-                            COUNT(DISTINCT c.tconst) AS credit_count,
-                            MIN(
-                                CASE c.credit_group
-                                    WHEN 'director' THEN 1
-                                    WHEN 'cast' THEN 2
-                                    ELSE 5
-                                END
-                            ) AS group_priority
-                        FROM app.title_credits AS c
-                        JOIN app.catalog_people AS p USING (nconst)
-                        WHERE c.tconst IN ({placeholders})
-                          AND (c.credit_group = 'director' OR (c.credit_group = 'cast' AND c.ordering <= ?))
-                        GROUP BY 1, 2, 3, 4
-                    ),
-                    affinity_candidates AS (
-                        SELECT
-                            up.nconst,
-                            COALESCE(cp.primary_name, up.name) AS primary_name,
-                            cp.birth_year,
-                            cp.primary_profession,
-                            0 AS credit_count,
-                            0 AS group_priority
-                        FROM app.user_people AS up
-                        LEFT JOIN app.catalog_people AS cp ON cp.nconst = up.nconst
-                        WHERE up.nconst IS NOT NULL
-                          AND (up.affinity_rating > 0 OR up.is_favorite = TRUE)
-                    ),
-                    combined AS (
-                        SELECT * FROM list_credit_candidates
-                        UNION ALL
-                        SELECT * FROM affinity_candidates
-                    )
-                    SELECT
-                        nconst,
-                        primary_name,
-                        birth_year,
-                        primary_profession,
-                        MAX(credit_count) AS credit_count,
-                        MIN(group_priority) AS group_priority
-                    FROM combined
-                    WHERE nconst IS NOT NULL
-                    GROUP BY 1, 2, 3, 4
-                    ORDER BY group_priority, credit_count DESC, birth_year DESC NULLS LAST, primary_name
-                """
-                params = [*list_titles, main_cast_limit]
-            if limit is not None:
-                sql += "\nLIMIT ?"
-                params.append(limit)
-            rows = conn.execute(sql, params).fetchall()
-            if app_state_uses_postgres():
-                positive_affinities = fetch_positive_person_affinities()
-                extra_ids = [nconst for nconst in sorted(positive_affinities) if nconst]
-                if extra_ids:
-                    placeholders = ", ".join("?" for _ in extra_ids)
-                    extra_rows = conn.execute(
-                        f"""
-                        SELECT nconst, primary_name, birth_year, primary_profession
-                        FROM app.catalog_people
-                        WHERE nconst IN ({placeholders})
-                        """,
-                        extra_ids,
-                    ).fetchall()
-                    seen = {str(row[0]) for row in rows}
-                    rows.extend(
-                        (row[0], row[1], row[2], row[3], 0, 0)
-                        for row in extra_rows
-                        if str(row[0]) not in seen
-                    )
-        return [
-            {
-                "nconst": str(row[0]),
-                "name": row[1],
-                "birth_year": row[2],
-                "primary_profession": row[3],
-                "credit_count": row[4],
-                "group_priority": row[5],
-            }
-            for row in rows
-        ]
-
-    sql = """
-        WITH list_titles AS (
-            SELECT DISTINCT
-                COALESCE(e.series_tconst, i.tconst, i.parent_tconst) AS tconst
-            FROM app.user_list_items AS i
-            LEFT JOIN app.catalog_episodes AS e ON e.episode_tconst = i.tconst
-            WHERE i.is_archived = FALSE
-              AND COALESCE(e.series_tconst, i.tconst, i.parent_tconst) IS NOT NULL
-        ),
-        list_credit_candidates AS (
-            SELECT
-                c.nconst,
-                p.primary_name,
-                p.birth_year,
-                p.primary_profession,
-                COUNT(DISTINCT c.tconst) AS credit_count,
-                MIN(
-                    CASE c.credit_group
-                        WHEN 'director' THEN 1
-                        WHEN 'cast' THEN 2
-                        ELSE 5
-                    END
-                ) AS group_priority
-            FROM app.title_credits AS c
-            JOIN list_titles AS lt ON lt.tconst = c.tconst
-            JOIN app.catalog_people AS p USING (nconst)
-            WHERE
-                c.credit_group = 'director'
-                OR (c.credit_group = 'cast' AND c.ordering <= ?)
-            GROUP BY 1, 2, 3, 4
-        ),
-        affinity_candidates AS (
-            SELECT
-                up.nconst,
-                COALESCE(cp.primary_name, up.name) AS primary_name,
-                cp.birth_year,
-                cp.primary_profession,
-                0 AS credit_count,
-                0 AS group_priority
-            FROM app.user_people AS up
-            LEFT JOIN app.catalog_people AS cp ON cp.nconst = up.nconst
-            WHERE up.nconst IS NOT NULL
-              AND (up.affinity_rating > 0 OR up.is_favorite = TRUE)
-        ),
-        combined AS (
-            SELECT * FROM list_credit_candidates
-            UNION ALL
-            SELECT * FROM affinity_candidates
-        )
-        SELECT
-            nconst,
-            primary_name,
-            birth_year,
-            primary_profession,
-            MAX(credit_count) AS credit_count,
-            MIN(group_priority) AS group_priority
-        FROM combined
-        WHERE nconst IS NOT NULL
-        GROUP BY 1, 2, 3, 4
-        ORDER BY group_priority, credit_count DESC, birth_year DESC NULLS LAST, primary_name
-    """
-    if limit is not None:
-        sql += "\nLIMIT ?"
-    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
-        params: list[Any] = [main_cast_limit]
-        if limit is not None:
-            params.append(limit)
-        rows = conn.execute(sql, params).fetchall()
-
-    return [
-        {
-            "nconst": str(row[0]),
-            "name": row[1],
-            "birth_year": row[2],
-            "primary_profession": row[3],
-            "credit_count": row[4],
-            "group_priority": row[5],
-        }
-        for row in rows
-    ]
+    return fetch_relevant_people_candidate_rows(main_cast_limit=main_cast_limit, limit=limit)
 
 
 def get_person_detail_cache_targets(limit: int | None = None, include_ready: bool = False) -> list[dict[str, Any]]:
@@ -6148,50 +5967,26 @@ def get_person_detail_cache_targets(limit: int | None = None, include_ready: boo
     if not candidates:
         return []
 
-    if catalog_backend_uses_postgres():
-        items: list[dict[str, Any]] = []
-        for row in candidates:
-            nconst = str(row["nconst"])
-            fingerprint = _person_cache_source_fingerprint(None, nconst)
-            cache_status = "missing"
-            if fingerprint is not None:
-                cache_status = _person_detail_cache_status(nconst, fingerprint)
-            if not include_ready and cache_status == "ready":
-                continue
-            items.append(
-                {
-                    "nconst": nconst,
-                    "name": row["name"],
-                    "birth_year": row["birth_year"],
-                    "primary_profession": row["primary_profession"],
-                    "credit_count": row["credit_count"],
-                    "group_priority": row["group_priority"],
-                    "cache_status": cache_status,
-                }
-            )
-        return items
-
-    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
-        items: list[dict[str, Any]] = []
-        for row in candidates:
-            nconst = str(row["nconst"])
-            fingerprint = _person_cache_source_fingerprint(conn, nconst)
-            cache_status = "missing"
-            if fingerprint is not None:
-                cache_status = _person_detail_cache_status(nconst, fingerprint)
-            if not include_ready and cache_status == "ready":
-                continue
-            items.append(
-                {
-                    "nconst": nconst,
-                    "name": row["name"],
-                    "birth_year": row["birth_year"],
-                    "primary_profession": row["primary_profession"],
-                    "credit_count": row["credit_count"],
-                    "group_priority": row["group_priority"],
-                    "cache_status": cache_status,
-                }
-            )
+    items: list[dict[str, Any]] = []
+    for row in candidates:
+        nconst = str(row["nconst"])
+        fingerprint = _person_cache_source_fingerprint(None, nconst)
+        cache_status = "missing"
+        if fingerprint is not None:
+            cache_status = _person_detail_cache_status(nconst, fingerprint)
+        if not include_ready and cache_status == "ready":
+            continue
+        items.append(
+            {
+                "nconst": nconst,
+                "name": row["name"],
+                "birth_year": row["birth_year"],
+                "primary_profession": row["primary_profession"],
+                "credit_count": row["credit_count"],
+                "group_priority": row["group_priority"],
+                "cache_status": cache_status,
+            }
+        )
     return items
 
 
@@ -6211,41 +6006,22 @@ def create_import_preview(
     preview_items: list[dict[str, Any]] = []
     batch_created_at = _now_iso()
 
-    if import_backend_uses_postgres():
-        resolution_context = _build_resolution_context_postgres(source, rows)
-        for idx, row in enumerate(rows, start=1):
-            resolution = _resolve_import_row_postgres(source, row, resolver_cache, resolution_context)
-            preview_items.append({"idx": idx, "row": row, "resolution": resolution})
+    resolution_context = _build_resolution_context_postgres(source, rows)
+    for idx, row in enumerate(rows, start=1):
+        resolution = _resolve_import_row_postgres(source, row, resolver_cache, resolution_context)
+        preview_items.append({"idx": idx, "row": row, "resolution": resolution})
 
-        if source == "netflix":
-            unresolved_rows = [item["row"] for item in preview_items if item["resolution"]["status"] == "unresolved"]
-            if unresolved_rows:
-                alias_context = _build_netflix_alias_context_postgres(unresolved_rows)
-                if alias_context:
-                    for item in preview_items:
-                        if item["resolution"]["status"] != "unresolved":
-                            continue
-                        alias_resolution = _resolve_netflix_alias_resolution_postgres(item["row"], alias_context)
-                        if alias_resolution is not None:
-                            item["resolution"] = alias_resolution
-    else:
-        with duckdb.connect(DB_PATH.as_posix(), read_only=False) as conn:
-            resolution_context = _build_resolution_context(conn, source, rows)
-            for idx, row in enumerate(rows, start=1):
-                resolution = _resolve_import_row(conn, source, row, resolver_cache, resolution_context)
-                preview_items.append({"idx": idx, "row": row, "resolution": resolution})
-
-            if source == "netflix":
-                unresolved_rows = [item["row"] for item in preview_items if item["resolution"]["status"] == "unresolved"]
-                if unresolved_rows:
-                    alias_context = _build_netflix_alias_context(conn, unresolved_rows)
-                    if alias_context:
-                        for item in preview_items:
-                            if item["resolution"]["status"] != "unresolved":
-                                continue
-                            alias_resolution = _resolve_netflix_alias_resolution(conn, item["row"], alias_context)
-                            if alias_resolution is not None:
-                                item["resolution"] = alias_resolution
+    if source == "netflix":
+        unresolved_rows = [item["row"] for item in preview_items if item["resolution"]["status"] == "unresolved"]
+        if unresolved_rows:
+            alias_context = _build_netflix_alias_context_postgres(unresolved_rows)
+            if alias_context:
+                for item in preview_items:
+                    if item["resolution"]["status"] != "unresolved":
+                        continue
+                    alias_resolution = _resolve_netflix_alias_resolution_postgres(item["row"], alias_context)
+                    if alias_resolution is not None:
+                        item["resolution"] = alias_resolution
 
     import_row_values: list[dict[str, Any]] = []
     resolved_count = 0
@@ -6278,69 +6054,15 @@ def create_import_preview(
             }
         )
 
-    if import_backend_uses_postgres():
-        create_import_batch_record(
-            batch_id=batch_id,
-            source=source,
-            filename=filename,
-            checksum=checksum,
-            status="previewed",
-            created_at=batch_created_at,
-        )
-        insert_import_rows(import_row_values)
-    else:
-        with duckdb.connect(DB_PATH.as_posix(), read_only=False) as conn:
-            conn.execute(
-                """
-                INSERT INTO app.import_batches (id, source, filename, checksum, status, created_at)
-                VALUES (?, ?, ?, ?, 'previewed', ?)
-                """,
-                [batch_id, source, filename, checksum, batch_created_at],
-            )
-            conn.executemany(
-                """
-                INSERT INTO app.import_rows (
-                    id,
-                    batch_id,
-                    source,
-                    row_number,
-                    raw_json,
-                    parsed_title,
-                    parsed_year,
-                    parsed_watched_on,
-                    parsed_season_number,
-                    parsed_episode_number,
-                    parsed_imdb_id,
-                    parsed_tmdb_id,
-                    resolution_status,
-                    resolved_tconst,
-                    resolution_confidence,
-                    resolution_note
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    [
-                        item["id"],
-                        item["batch_id"],
-                        item["source"],
-                        item["row_number"],
-                        item["raw_json"],
-                        item.get("parsed_title"),
-                        item.get("parsed_year"),
-                        item.get("parsed_watched_on"),
-                        item.get("parsed_season_number"),
-                        item.get("parsed_episode_number"),
-                        item.get("parsed_imdb_id"),
-                        item.get("parsed_tmdb_id"),
-                        item["resolution_status"],
-                        item.get("resolved_tconst"),
-                        item.get("resolution_confidence"),
-                        item.get("resolution_note"),
-                    ]
-                    for item in import_row_values
-                ],
-            )
+    create_import_batch_record(
+        batch_id=batch_id,
+        source=source,
+        filename=filename,
+        checksum=checksum,
+        status="previewed",
+        created_at=batch_created_at,
+    )
+    insert_import_rows(import_row_values)
     return {
         "batch_id": batch_id,
         "source": source,
@@ -6352,163 +6074,42 @@ def create_import_preview(
 
 
 def get_import_batch(batch_id: str) -> dict[str, Any] | None:
-    if import_backend_uses_postgres():
-        batch = fetch_import_batch_record(batch_id)
-        if batch is None:
-            return None
-        return {
-            **batch,
-            "rows": fetch_import_batch_rows(batch_id, limit=100),
-        }
-
-    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
-        batch = conn.execute(
-            """
-            SELECT id, source, filename, checksum, status, created_at
-            FROM app.import_batches
-            WHERE id = ?
-            """,
-            [batch_id],
-        ).fetchone()
-        if batch is None:
-            return None
-        rows = conn.execute(
-            """
-            SELECT
-                row_number,
-                parsed_title,
-                parsed_year,
-                parsed_watched_on,
-                parsed_season_number,
-                parsed_episode_number,
-                parsed_imdb_id,
-                parsed_tmdb_id,
-                resolution_status,
-                resolved_tconst,
-                resolution_confidence,
-                resolution_note
-            FROM app.import_rows
-            WHERE batch_id = ?
-            ORDER BY row_number
-            LIMIT 100
-            """,
-            [batch_id],
-        ).fetchall()
+    batch = fetch_import_batch_record(batch_id)
+    if batch is None:
+        return None
     return {
-        "id": batch[0],
-        "source": batch[1],
-        "filename": batch[2],
-        "checksum": batch[3],
-        "status": batch[4],
-        "created_at": batch[5],
-        "rows": [
-            {
-                "row_number": row[0],
-                "parsed_title": row[1],
-                "parsed_year": row[2],
-                "parsed_watched_on": row[3],
-                "parsed_season_number": row[4],
-                "parsed_episode_number": row[5],
-                "parsed_imdb_id": row[6],
-                "parsed_tmdb_id": row[7],
-                "resolution_status": row[8],
-                "resolved_tconst": row[9],
-                "resolution_confidence": row[10],
-                "resolution_note": row[11],
-            }
-            for row in rows
-        ],
+        **batch,
+        "rows": fetch_import_batch_rows(batch_id, limit=100),
     }
 
 
 def commit_import_batch(batch_id: str) -> dict[str, Any]:
-    if import_backend_uses_postgres():
-        batch = fetch_import_batch_record(batch_id)
-        if batch is None:
-            raise ValueError("Import batch neexistuje.")
-        if batch["status"] == "committed":
-            return {"batch_id": batch_id, "committed": 0, "status": "already_committed"}
+    batch = fetch_import_batch_record(batch_id)
+    if batch is None:
+        raise ValueError("Import batch neexistuje.")
+    if batch["status"] == "committed":
+        return {"batch_id": batch_id, "committed": 0, "status": "already_committed"}
 
-        rows = fetch_resolved_import_rows(batch_id)
-        existing_row_ids = fetch_existing_import_commits(batch_id, [str(row["id"]) for row in rows])
-        committed = 0
-        for row in rows:
-            if str(row["id"]) in existing_row_ids:
-                continue
-            scope = "episode" if row.get("parsed_season_number") is not None or row.get("parsed_episode_number") is not None else "title"
-            insert_import_watch_event(
-                event_id=str(uuid.uuid4()),
-                tconst=str(row["resolved_tconst"]),
-                event_scope=scope,
-                watched_on=str(row["parsed_watched_on"]),
-                source=str(row["source"]),
-                batch_id=batch_id,
-                import_row_id=str(row["id"]),
-                created_at=_now_iso(),
-            )
-            committed += 1
-
-        mark_import_batch_committed(batch_id)
-        return {"batch_id": batch_id, "committed": committed, "status": "committed"}
-
+    rows = fetch_resolved_import_rows(batch_id)
+    existing_row_ids = fetch_existing_import_commits(batch_id, [str(row["id"]) for row in rows])
     committed = 0
-    with duckdb.connect(DB_PATH.as_posix()) as conn:
-        status = conn.execute("SELECT status FROM app.import_batches WHERE id = ?", [batch_id]).fetchone()
-        if status is None:
-            raise ValueError("Import batch neexistuje.")
-        if status[0] == "committed":
-            return {"batch_id": batch_id, "committed": 0, "status": "already_committed"}
+    for row in rows:
+        if str(row["id"]) in existing_row_ids:
+            continue
+        scope = "episode" if row.get("parsed_season_number") is not None or row.get("parsed_episode_number") is not None else "title"
+        insert_import_watch_event(
+            event_id=str(uuid.uuid4()),
+            tconst=str(row["resolved_tconst"]),
+            event_scope=scope,
+            watched_on=str(row["parsed_watched_on"]),
+            source=str(row["source"]),
+            batch_id=batch_id,
+            import_row_id=str(row["id"]),
+            created_at=_now_iso(),
+        )
+        committed += 1
 
-        rows = conn.execute(
-            """
-            SELECT id, source, parsed_watched_on, resolved_tconst, parsed_season_number, parsed_episode_number
-            FROM app.import_rows
-            WHERE batch_id = ? AND resolution_status = 'resolved' AND resolved_tconst IS NOT NULL
-            """,
-            [batch_id],
-        ).fetchall()
-        for row in rows:
-            scope = "episode" if row[4] is not None or row[5] is not None else "title"
-            exists = conn.execute(
-                """
-                SELECT COUNT(*)
-                FROM app.watch_events
-                WHERE batch_id = ? AND import_row_id = ?
-                """,
-                [batch_id, row[0]],
-            ).fetchone()[0]
-            if exists:
-                continue
-            conn.execute(
-                """
-                INSERT INTO app.watch_events (
-                    id,
-                    tconst,
-                    event_scope,
-                    watched_on,
-                    source,
-                    batch_id,
-                    import_row_id,
-                    rating,
-                    notes,
-                    created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
-                """,
-                [
-                    str(uuid.uuid4()),
-                    row[3],
-                    scope,
-                    row[2],
-                    row[1],
-                    batch_id,
-                    row[0],
-                    _now_iso(),
-                ],
-            )
-            committed += 1
-
-        conn.execute("UPDATE app.import_batches SET status = 'committed' WHERE id = ?", [batch_id])
+    mark_import_batch_committed(batch_id)
     return {"batch_id": batch_id, "committed": committed, "status": "committed"}
 
 
@@ -6547,32 +6148,7 @@ def get_trakt_sync_changes(
 
 
 def get_watch_history(limit: int = 100, source: str | None = None) -> list[dict[str, Any]]:
-    if watch_events_uses_postgres():
-        return fetch_watch_history_postgres(limit=limit, source=source)
-    sql = """
-        SELECT id, tconst, event_scope, watched_on, source, batch_id, import_row_id, rating, notes, created_at
-        FROM app.watch_events
-        WHERE (? IS NULL OR source = ?)
-        ORDER BY watched_on DESC, created_at DESC
-        LIMIT ?
-    """
-    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
-        rows = conn.execute(sql, [source, source, limit]).fetchall()
-    return [
-        {
-            "id": row[0],
-            "tconst": row[1],
-            "event_scope": row[2],
-            "watched_on": row[3],
-            "source": row[4],
-            "batch_id": row[5],
-            "import_row_id": row[6],
-            "rating": row[7],
-            "notes": row[8],
-            "created_at": row[9],
-        }
-        for row in rows
-    ]
+    return fetch_watch_history_postgres(limit=limit, source=source)
 
 
 RECENTLY_WATCHED_VIEW_ID = "view:recently-watched"
@@ -6581,105 +6157,7 @@ HOT_WATCHLIST_VIEW_ID = "view:hot-watchlist"
 
 
 def _fetch_watch_view_page(limit: int, offset: int, *, cutoff_days: int | None) -> dict[str, Any]:
-    if watch_events_uses_postgres():
-        return _fetch_watch_view_page_from_postgres(limit, offset, cutoff_days=cutoff_days)
-    where_clause = "WHERE w.tconst IS NOT NULL"
-    params: list[Any] = []
-    if cutoff_days is not None:
-        where_clause += " AND w.watched_on >= current_date - ?"
-        params.append(cutoff_days)
-
-    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
-        total = conn.execute(
-            f"""
-            WITH latest_posters AS (
-                SELECT
-                    tconst,
-                    relative_path,
-                    local_path,
-                    row_number() OVER (PARTITION BY tconst ORDER BY fetched_at DESC, id DESC) AS rn
-                FROM app.tmdb_assets
-                WHERE asset_kind = 'poster' AND status = 'fetched'
-            ),
-            watched_titles AS (
-                SELECT
-                    COALESCE(e.series_tconst, w.tconst) AS display_tconst,
-                    MAX(w.watched_on) AS latest_watched_on,
-                    MAX(w.created_at) AS latest_created_at
-                FROM app.watch_events AS w
-                LEFT JOIN app.catalog_episodes AS e ON e.episode_tconst = w.tconst
-                {where_clause}
-                GROUP BY 1
-            )
-            SELECT COUNT(*)
-            FROM watched_titles AS w
-            LEFT JOIN latest_posters AS p ON p.tconst = w.display_tconst AND p.rn = 1
-            WHERE COALESCE(p.relative_path, p.local_path) IS NOT NULL
-            """,
-            params,
-        ).fetchone()[0]
-
-        rows = conn.execute(
-            f"""
-            WITH latest_posters AS (
-                SELECT
-                    tconst,
-                    relative_path,
-                    local_path,
-                    row_number() OVER (PARTITION BY tconst ORDER BY fetched_at DESC, id DESC) AS rn
-                FROM app.tmdb_assets
-                WHERE asset_kind = 'poster' AND status = 'fetched'
-            ),
-            watched_titles AS (
-                SELECT
-                    COALESCE(e.series_tconst, w.tconst) AS display_tconst,
-                    MAX(w.watched_on) AS latest_watched_on,
-                    MAX(w.created_at) AS latest_created_at
-                FROM app.watch_events AS w
-                LEFT JOIN app.catalog_episodes AS e ON e.episode_tconst = w.tconst
-                {where_clause}
-                GROUP BY 1
-            )
-            SELECT
-                w.display_tconst,
-                t.title_type AS resolved_title_type,
-                t.primary_title AS resolved_title,
-                t.start_year AS resolved_year,
-                NULL AS season_number,
-                NULL AS episode_number,
-                NULL AS resolved_series_title,
-                p.relative_path AS poster_relative_path,
-                p.local_path AS poster_local_path,
-                w.latest_watched_on,
-                w.latest_created_at
-            FROM watched_titles AS w
-            JOIN app.catalog_titles AS t ON t.tconst = w.display_tconst
-            LEFT JOIN latest_posters AS p ON p.tconst = w.display_tconst AND p.rn = 1
-            WHERE COALESCE(p.relative_path, p.local_path) IS NOT NULL
-            ORDER BY w.latest_created_at DESC, resolved_title
-            LIMIT ? OFFSET ?
-            """,
-            [*params, limit, offset],
-        ).fetchall()
-
-    items = [
-        {
-            "tconst": row[0],
-            "title_type": row[1],
-            "title": row[2],
-            "year": row[3],
-            "season_number": row[4],
-            "episode_number": row[5],
-            "series_title": row[6],
-            "poster_url": _poster_url_from_local_path(row[7] or row[8]),
-            "last_watched_on": row[9],
-            "last_watched_at": row[10],
-            "end_year": None,
-            "runtime_minutes": None,
-        }
-        for row in rows
-    ]
-    return {"total": total, "items": items, "limit": limit, "offset": offset}
+    return _fetch_watch_view_page_from_postgres(limit, offset, cutoff_days=cutoff_days)
 
 
 def _fetch_watch_view_page_from_postgres(limit: int, offset: int, *, cutoff_days: int | None) -> dict[str, Any]:
@@ -8062,7 +7540,18 @@ def _build_local_media_identity(detail: dict[str, Any]) -> dict[str, Any]:
 
 
 def _get_library_summary_for_tconst(tconst: str) -> dict[str, Any]:
-    with duckdb.connect(DB_PATH.as_posix(), read_only=True) as conn:
+    if catalog_backend_uses_postgres():
+        title = fetch_catalog_title_row(tconst)
+        if title is not None:
+            return _fetch_library_summary(None, tconst, title[1])
+
+        episode = fetch_catalog_episode_row(tconst)
+        if episode is not None:
+            return _fetch_library_summary(None, tconst, "tvEpisode")
+
+        raise ValueError("Titul nebyl nalezen.")
+
+    def read(conn: duckdb.DuckDBPyConnection) -> dict[str, Any] | None:
         title_type = conn.execute(
             """
             SELECT title_type
@@ -8084,6 +7573,12 @@ def _get_library_summary_for_tconst(tconst: str) -> dict[str, Any]:
         ).fetchone()
         if episode is not None:
             return _fetch_library_summary(conn, tconst, "tvEpisode")
+
+        return None
+
+    summary = _run_duckdb_read(read)
+    if summary is not None:
+        return summary
 
     raise ValueError("Titul nebyl nalezen.")
 
@@ -8252,6 +7747,9 @@ def _fetch_content_state(conn: duckdb.DuckDBPyConnection | None, tconst: str) ->
 
 
 def _fetch_library_summary(conn: duckdb.DuckDBPyConnection | None, tconst: str, title_type: str | None) -> dict[str, Any]:
+    if watch_events_uses_postgres() and user_lists_uses_postgres() and user_ratings_uses_postgres():
+        return fetch_library_summary_snapshot(tconst, title_type)
+
     if watch_events_uses_postgres():
         watched_count, last_watched_at = _fetch_watch_stats_from_postgres(tconst, title_type)
     else:
@@ -8381,125 +7879,6 @@ def _fetch_watch_stats_from_postgres(tconst: str, title_type: str | None) -> tup
     if direct is None:
         return 0, None
     return int(direct.get("watched_count") or 0), direct.get("last_watched_at")
-
-
-def _fetch_trakt_summary(conn: duckdb.DuckDBPyConnection, tconst: str, title_type: str | None) -> dict[str, Any]:
-    if title_type in ("tvSeries", "tvMiniSeries"):
-        history_count = conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM old.trakt_history_events AS h
-            JOIN app.catalog_episodes AS e ON e.episode_tconst = h.tconst
-            WHERE e.series_tconst = ? AND h.is_active = TRUE
-            """,
-            [tconst],
-        ).fetchone()[0]
-        last_watched_at = conn.execute(
-            """
-            SELECT MAX(h.watched_at)
-            FROM old.trakt_history_events AS h
-            JOIN app.catalog_episodes AS e ON e.episode_tconst = h.tconst
-            WHERE e.series_tconst = ? AND h.is_active = TRUE
-            """,
-            [tconst],
-        ).fetchone()[0]
-        collection_count = conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM old.trakt_collection_items AS c
-            LEFT JOIN app.catalog_episodes AS e ON e.episode_tconst = c.tconst
-            WHERE c.is_active = TRUE AND (c.tconst = ? OR e.series_tconst = ?)
-            """,
-            [tconst, tconst],
-        ).fetchone()[0]
-    else:
-        history_count = conn.execute(
-            "SELECT COUNT(*) FROM old.trakt_history_events WHERE tconst = ? AND is_active = TRUE",
-            [tconst],
-        ).fetchone()[0]
-        last_watched_at = conn.execute(
-            "SELECT MAX(watched_at) FROM old.trakt_history_events WHERE tconst = ? AND is_active = TRUE",
-            [tconst],
-        ).fetchone()[0]
-        collection_count = conn.execute(
-            "SELECT COUNT(*) FROM old.trakt_collection_items WHERE tconst = ? AND is_active = TRUE",
-            [tconst],
-        ).fetchone()[0]
-
-    direct_rating = conn.execute(
-        """
-        SELECT rating, rated_at
-        FROM old.trakt_ratings
-        WHERE tconst = ? AND is_active = TRUE
-        ORDER BY rated_at DESC
-        LIMIT 1
-        """,
-        [tconst],
-    ).fetchone()
-    watchlist = conn.execute(
-        """
-        SELECT COUNT(*)
-        FROM old.trakt_list_items
-        WHERE tconst = ? AND list_kind = 'watchlist' AND is_active = TRUE
-        """,
-        [tconst],
-    ).fetchone()[0]
-    list_rows = conn.execute(
-        """
-        SELECT list_name, list_kind, rank, listed_at
-        FROM old.trakt_list_items
-        WHERE tconst = ? AND is_active = TRUE
-        ORDER BY
-            CASE WHEN list_kind = 'watchlist' THEN 1 ELSE 0 END,
-            listed_at DESC NULLS LAST,
-            rank NULLS LAST
-        LIMIT 10
-        """,
-        [tconst],
-    ).fetchall()
-    return {
-        "history_count": history_count,
-        "last_watched_at": last_watched_at,
-        "in_watchlist": watchlist > 0,
-        "collection_count": collection_count,
-        "rating": (
-            {
-                "value": direct_rating[0],
-                "rated_at": direct_rating[1],
-            }
-            if direct_rating
-            else None
-        ),
-        "lists": [
-            {
-                "name": row[0],
-                "kind": row[1],
-                "rank": row[2],
-                "listed_at": row[3],
-            }
-            for row in list_rows
-        ],
-    }
-
-
-def _fetch_imdb_summary(conn: duckdb.DuckDBPyConnection, tconst: str) -> dict[str, Any]:
-    row = conn.execute(
-        """
-        SELECT position, your_rating, date_rated, is_active
-        FROM old.imdb_watchlist_items
-        WHERE tconst = ? AND is_active = TRUE
-        LIMIT 1
-        """,
-        [tconst],
-    ).fetchone()
-    if row is None:
-        return {"in_watchlist": False, "position": None, "your_rating": None, "date_rated": None}
-    return {
-        "in_watchlist": True,
-        "position": row[0],
-        "your_rating": row[1],
-        "date_rated": row[2],
-    }
 
 
 def _parse_import_rows(source: str, text: str) -> list[dict[str, Any]]:

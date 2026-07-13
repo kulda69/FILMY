@@ -4,7 +4,7 @@ continue_watching_limit = 24
 
 # Počet položek zobrazených po výběru seznamu v My Lists na úvodní stránce.
 # Pokud má seznam více položek, zbytek se řeší přes Show all / detail seznamu.
-takmy_lists_selected_limit = 50
+my_lists_selected_limit = 50
 
 # Kolik posledních dní se má počítat do Recently Watched.
 # Starší watch eventy zůstávají v databázi, ale tento pohled je ignoruje.

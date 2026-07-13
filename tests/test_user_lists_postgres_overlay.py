@@ -8,19 +8,6 @@ from unittest.mock import patch
 from filmy import db_library
 
 
-class _FakeConn:
-    def execute(self, sql, params=None):
-        raise AssertionError(f"Unexpected SQL in test: {sql}")
-
-
-class _FakeOpenConnection:
-    def __enter__(self):
-        return _FakeConn()
-
-    def __exit__(self, exc_type, exc, tb):
-        return False
-
-
 class UserListsPostgresOverlayTests(unittest.TestCase):
     def test_create_user_list_routes_to_postgres_and_resolves_slug_suffix(self) -> None:
         fake_db = SimpleNamespace(
@@ -52,37 +39,13 @@ class UserListsPostgresOverlayTests(unittest.TestCase):
         )
         with (
             patch("filmy.db_library._db", return_value=fake_db),
-            patch("filmy.db_library.user_lists_uses_postgres", return_value=True),
-            patch("filmy.db_library.user_ratings_uses_postgres", return_value=True),
-            patch("filmy.db_library.open_duckdb_connection", return_value=_FakeOpenConnection()),
             patch(
-                "filmy.db_library._group_postgres_list_items",
+                "filmy.db_library.fetch_user_list_page_rows",
                 return_value=(
                     {"id": "watchlist", "slug": "watchlist", "name": "Watchlist", "description": None, "list_kind": "watchlist"},
-                    [{"display_tconst": "tt1", "media_type": "title", "parent_title": None, "season_number": None, "episode_number": None, "rank": None, "added_at": None, "notes": None, "list_name": "Watchlist", "list_kind": "watchlist"}],
+                    1,
+                    [("tt1", "title", None, None, None, None, None, None, None, "Watchlist", "watchlist", "movie", 2021, "poster.jpg", None, "Alpha")],
                 ),
-            ),
-            patch(
-                "filmy.db_library._load_group_cards",
-                return_value=[
-                    {
-                        "display_tconst": "tt1",
-                        "media_type": "title",
-                        "parent_title": None,
-                        "season_number": None,
-                        "episode_number": None,
-                        "rank": None,
-                        "added_at": None,
-                        "notes": None,
-                        "list_name": "Watchlist",
-                        "list_kind": "watchlist",
-                        "title_type": "movie",
-                        "year": 2021,
-                        "resolved_title": "Alpha",
-                        "poster_relative_path": "poster.jpg",
-                        "poster_local_path": None,
-                    }
-                ],
             ),
             patch("filmy.db_library.fetch_latest_ratings_for_tconsts", return_value={"tt1": {"rating": 8}}),
         ):
@@ -123,7 +86,6 @@ class UserListsPostgresOverlayTests(unittest.TestCase):
         with (
             patch("filmy.db_library._db", return_value=fake_db),
             patch("filmy.db_library.user_lists_uses_postgres", return_value=True),
-            patch("filmy.db_library.open_duckdb_connection", return_value=_FakeOpenConnection()),
             patch(
                 "filmy.db_library._get_postgres_group_items_for_list",
                 return_value=(
@@ -165,7 +127,6 @@ class UserListsPostgresOverlayTests(unittest.TestCase):
         with (
             patch("filmy.db_library._db", return_value=fake_db),
             patch("filmy.db_library.user_lists_uses_postgres", return_value=True),
-            patch("filmy.db_library.open_duckdb_connection", return_value=_FakeOpenConnection()),
             patch(
                 "filmy.db_library._get_postgres_group_items_for_list",
                 return_value=({"id": "list-a", "name": "List A", "list_kind": "custom"}, [item]),
@@ -207,7 +168,6 @@ class UserListsPostgresOverlayTests(unittest.TestCase):
         with (
             patch("filmy.db_library._db", return_value=fake_db),
             patch("filmy.db_library.user_lists_uses_postgres", return_value=True),
-            patch("filmy.db_library.open_duckdb_connection", return_value=_FakeOpenConnection()),
             patch(
                 "filmy.db_library._get_postgres_group_items_for_list",
                 return_value=({"id": "list-a", "name": "List A", "list_kind": "custom"}, [item]),

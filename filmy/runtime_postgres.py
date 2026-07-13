@@ -413,6 +413,32 @@ def fetch_person_catalog_row(nconst: str) -> tuple[Any, ...] | None:
         return cursor.fetchone()
 
 
+def fetch_person_lookup_row(nconst: str) -> tuple[Any, ...] | None:
+    """Read one person row with lookup-oriented credit count from PostgreSQL."""
+
+    with _connect() as conn, conn.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT
+                p.nconst,
+                p.primary_name,
+                p.birth_year,
+                p.death_year,
+                p.primary_profession,
+                p.known_for_titles,
+                COALESCE((
+                    SELECT COUNT(*)
+                    FROM app.title_credits AS c
+                    WHERE c.nconst = p.nconst
+                ), 0) AS credit_count
+            FROM app.catalog_people AS p
+            WHERE p.nconst = %s
+            """,
+            (nconst,),
+        )
+        return cursor.fetchone()
+
+
 def fetch_person_credit_rows(nconst: str, *, limit: int = 500) -> list[tuple[Any, ...]]:
     """Read joined person credit rows from PostgreSQL."""
 
@@ -1668,6 +1694,100 @@ def fetch_watch_stats_for_tconsts(tconsts: list[str]) -> dict[str, dict[str, Any
         }
         for row in rows
         if row[0] is not None
+    }
+
+
+def fetch_library_summary_snapshot(tconst: str, title_type: str | None) -> dict[str, Any]:
+    """Return one PostgreSQL-backed library summary for a title or episode."""
+
+    if title_type in ("tvSeries", "tvMiniSeries"):
+        watch_sql = """
+            SELECT COUNT(*), MAX(w.created_at)
+            FROM app.watch_events AS w
+            JOIN app.catalog_episodes AS e ON e.episode_tconst = w.tconst
+            WHERE e.series_tconst = %s
+        """
+    else:
+        watch_sql = """
+            SELECT COUNT(*), MAX(created_at)
+            FROM app.watch_events
+            WHERE tconst = %s
+        """
+
+    with _connect() as conn, conn.cursor() as cursor:
+        cursor.execute(watch_sql, (tconst,))
+        watch_row = cursor.fetchone()
+        watched_count = int((watch_row[0] if watch_row is not None else 0) or 0)
+        last_watched_at = _parse_optional_timestamp(watch_row[1] if watch_row is not None else None)
+
+        cursor.execute(
+            """
+            SELECT l.name, l.list_kind, i.rank, i.added_at
+            FROM app.user_list_items AS i
+            JOIN app.user_lists AS l ON l.id = i.list_id
+            WHERE i.tconst = %s
+              AND i.is_archived = FALSE
+              AND l.list_kind <> 'watchlist'
+            ORDER BY
+                CASE WHEN i.rank IS NULL THEN 1 ELSE 0 END,
+                i.rank,
+                i.added_at DESC NULLS LAST,
+                l.name
+            LIMIT 20
+            """,
+            (tconst,),
+        )
+        list_rows = cursor.fetchall()
+
+        cursor.execute(
+            """
+            SELECT EXISTS(
+                SELECT 1
+                FROM app.user_list_items AS i
+                JOIN app.user_lists AS l ON l.id = i.list_id
+                WHERE i.tconst = %s
+                  AND i.is_archived = FALSE
+                  AND l.list_kind = 'watchlist'
+            )
+            """,
+            (tconst,),
+        )
+        watchlist_row = cursor.fetchone()
+        raw_in_watchlist = bool(watchlist_row[0]) if watchlist_row is not None else False
+
+        cursor.execute(
+            """
+            SELECT rating, rated_at
+            FROM app.user_ratings
+            WHERE tconst = %s
+            ORDER BY rated_at DESC NULLS LAST, updated_at DESC, created_at DESC
+            LIMIT 1
+            """,
+            (tconst,),
+        )
+        rating_row = cursor.fetchone()
+
+    return {
+        "watched_count": watched_count,
+        "last_watched_at": last_watched_at,
+        "in_watchlist": raw_in_watchlist and watched_count == 0,
+        "rating": (
+            {
+                "value": rating_row[0],
+                "rated_at": _parse_optional_timestamp(rating_row[1]),
+            }
+            if rating_row is not None
+            else None
+        ),
+        "lists": [
+            {
+                "name": row[0],
+                "kind": row[1],
+                "rank": row[2],
+                "added_at": _parse_optional_timestamp(row[3]),
+            }
+            for row in list_rows
+        ],
     }
 
 
