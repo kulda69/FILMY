@@ -136,7 +136,8 @@
                                     {% if selected_list and selected_list.item_type == "list" and (selected_list.list_kind == "custom" or selected_list.id == "watchlist") %}
                                     <details>
                                         <summary class="link-light small text-decoration-none" style="cursor: pointer; list-style: none;">Edit</summary>
-                                        <form action="/ui/lists/update-description" method="post" class="mt-2 d-grid gap-2">
+                                        <div class="mt-2 d-grid gap-2">
+                                        <form action="/ui/lists/update-description" method="post" class="d-grid gap-2">
                                             <input type="hidden" name="list_id" value="{{ selected_list.id }}">
                                             <input type="hidden" name="return_to" value="{{ selected_list_return_to }}">
                                             <textarea
@@ -148,6 +149,13 @@
                                             >{{ selected_list.description or '' }}</textarea>
                                             <button type="submit" class="btn btn-sm btn-outline-light align-self-start">Save</button>
                                         </form>
+                                        {% if selected_list.list_kind == "custom" %}
+                                        <form action="/ui/lists/delete" method="post" onsubmit="return confirm('Delete this playlist?');">
+                                            <input type="hidden" name="list_id" value="{{ selected_list.id }}">
+                                            <button type="submit" class="btn btn-sm btn-outline-danger align-self-start">Delete list</button>
+                                        </form>
+                                        {% endif %}
+                                        </div>
                                     </details>
                                     {% endif %}
                                 </div>

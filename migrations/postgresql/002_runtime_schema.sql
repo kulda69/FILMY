@@ -176,12 +176,20 @@ CREATE TABLE IF NOT EXISTS app.user_ratings (
     season_number integer,
     episode_number integer,
     rating smallint NOT NULL,
+    liked_notes text,
+    disliked_notes text,
     rated_at timestamp without time zone,
     source_origin text NOT NULL,
     source_ref text,
     created_at timestamp without time zone NOT NULL,
     updated_at timestamp without time zone NOT NULL
 );
+
+ALTER TABLE app.user_ratings
+    ADD COLUMN IF NOT EXISTS liked_notes text;
+
+ALTER TABLE app.user_ratings
+    ADD COLUMN IF NOT EXISTS disliked_notes text;
 
 CREATE TABLE IF NOT EXISTS app.content_state (
     tconst text PRIMARY KEY,
@@ -262,6 +270,561 @@ CREATE TABLE IF NOT EXISTS app.genre_scores (
     explanation text,
     created_at timestamp without time zone NOT NULL
 );
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'watch_events_batch_import_row_key'
+          AND conrelid = 'app.watch_events'::regclass
+    ) THEN
+        ALTER TABLE app.watch_events
+            ADD CONSTRAINT watch_events_batch_import_row_key
+            UNIQUE (batch_id, import_row_id);
+    END IF;
+END
+$$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'watch_events_event_scope_check'
+          AND conrelid = 'app.watch_events'::regclass
+    ) THEN
+        ALTER TABLE app.watch_events
+            ADD CONSTRAINT watch_events_event_scope_check
+            CHECK (event_scope IN ('title', 'episode'));
+    END IF;
+END
+$$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'watch_events_rating_check'
+          AND conrelid = 'app.watch_events'::regclass
+    ) THEN
+        ALTER TABLE app.watch_events
+            ADD CONSTRAINT watch_events_rating_check
+            CHECK (rating IS NULL OR rating BETWEEN 1 AND 10);
+    END IF;
+END
+$$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'user_ratings_rating_check'
+          AND conrelid = 'app.user_ratings'::regclass
+    ) THEN
+        ALTER TABLE app.user_ratings
+            ADD CONSTRAINT user_ratings_rating_check
+            CHECK (rating BETWEEN 1 AND 10);
+    END IF;
+END
+$$;
+
+DO $$
+BEGIN
+        IF NOT EXISTS (
+            SELECT 1
+            FROM pg_constraint
+            WHERE conname = 'content_state_interest_state_check'
+              AND conrelid = 'app.content_state'::regclass
+        ) THEN
+            ALTER TABLE app.content_state
+            ADD CONSTRAINT content_state_interest_state_check
+            CHECK (interest_state IN ('previewed', 'in_progress', 'watched'));
+        END IF;
+END
+$$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'user_people_affinity_rating_check'
+          AND conrelid = 'app.user_people'::regclass
+    ) THEN
+        ALTER TABLE app.user_people
+            ADD CONSTRAINT user_people_affinity_rating_check
+            CHECK (affinity_rating IS NULL OR affinity_rating BETWEEN 0 AND 10);
+    END IF;
+END
+$$;
+
+CREATE OR REPLACE FUNCTION app.commit_import_batch(
+    p_batch_id text,
+    p_committed_at timestamp without time zone
+)
+RETURNS TABLE(inserted_events integer, skipped_events integer, batch_status text)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_status text;
+    v_inserted integer := 0;
+    v_skipped integer := 0;
+BEGIN
+    SELECT status
+    INTO v_status
+    FROM app.import_batches
+    WHERE id = p_batch_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Import batch % not found', p_batch_id;
+    END IF;
+
+    IF v_status = 'committed' THEN
+        RETURN QUERY SELECT 0, 0, 'already_committed'::text;
+        RETURN;
+    END IF;
+
+    IF v_status <> 'previewed' THEN
+        RAISE EXCEPTION 'Import batch % is in unsupported status %', p_batch_id, v_status;
+    END IF;
+
+    WITH resolved_rows AS (
+        SELECT
+            row.id,
+            row.source,
+            row.parsed_watched_on,
+            row.resolved_tconst,
+            CASE
+                WHEN row.parsed_season_number IS NOT NULL OR row.parsed_episode_number IS NOT NULL
+                    THEN 'episode'
+                ELSE 'title'
+            END AS event_scope
+        FROM app.import_rows AS row
+        WHERE row.batch_id = p_batch_id
+          AND row.resolution_status = 'resolved'
+          AND row.resolved_tconst IS NOT NULL
+          AND row.parsed_watched_on IS NOT NULL
+    ), inserted AS (
+        INSERT INTO app.watch_events (
+            id,
+            tconst,
+            event_scope,
+            watched_on,
+            source,
+            batch_id,
+            import_row_id,
+            rating,
+            notes,
+            created_at
+        )
+        SELECT
+            'import:' || p_batch_id || ':' || resolved.id,
+            resolved.resolved_tconst,
+            resolved.event_scope,
+            resolved.parsed_watched_on,
+            resolved.source,
+            p_batch_id,
+            resolved.id,
+            NULL,
+            NULL,
+            p_committed_at
+        FROM resolved_rows AS resolved
+        ON CONFLICT ON CONSTRAINT watch_events_batch_import_row_key DO NOTHING
+        RETURNING tconst
+    ), updated_content_state AS (
+        INSERT INTO app.content_state (
+            tconst,
+            interest_state,
+            last_previewed_at,
+            last_watched_at,
+            updated_at
+        )
+        SELECT DISTINCT
+            inserted.tconst,
+            'watched',
+            NULL,
+            p_committed_at,
+            p_committed_at
+        FROM inserted
+        ON CONFLICT (tconst) DO UPDATE
+        SET interest_state = 'watched',
+            last_watched_at = GREATEST(
+                COALESCE(app.content_state.last_watched_at, '-infinity'::timestamp),
+                EXCLUDED.last_watched_at
+            ),
+            updated_at = GREATEST(
+                COALESCE(app.content_state.updated_at, '-infinity'::timestamp),
+                EXCLUDED.updated_at
+            )
+        RETURNING 1
+    )
+    SELECT
+        (SELECT COUNT(*) FROM inserted),
+        GREATEST(
+            (SELECT COUNT(*) FROM resolved_rows) - (SELECT COUNT(*) FROM inserted),
+            0
+        )
+    INTO v_inserted, v_skipped;
+
+    UPDATE app.import_batches
+    SET status = 'committed'
+    WHERE id = p_batch_id;
+
+    RETURN QUERY SELECT v_inserted, v_skipped, 'committed'::text;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION app.record_watched(
+    p_event_id text,
+    p_tconst text,
+    p_event_scope text,
+    p_watched_on date,
+    p_notes text,
+    p_created_at timestamp without time zone,
+    p_archive_from_list_id text DEFAULT NULL,
+    p_archive_canonical_key text DEFAULT NULL,
+    p_archive_display_tconst text DEFAULT NULL
+)
+RETURNS TABLE(event_id text, content_state_changed boolean, archived_items integer)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_content_state_changed boolean := false;
+    v_archived_items integer := 0;
+BEGIN
+    INSERT INTO app.watch_events (
+        id,
+        tconst,
+        event_scope,
+        watched_on,
+        source,
+        batch_id,
+        import_row_id,
+        rating,
+        notes,
+        created_at
+    )
+    VALUES (
+        p_event_id,
+        p_tconst,
+        p_event_scope,
+        p_watched_on,
+        'local_app',
+        NULL,
+        NULL,
+        NULL,
+        p_notes,
+        p_created_at
+    );
+
+    INSERT INTO app.content_state (
+        tconst,
+        interest_state,
+        last_previewed_at,
+        last_watched_at,
+        updated_at
+    )
+    VALUES (
+        p_tconst,
+        'watched',
+        NULL,
+        p_created_at,
+        p_created_at
+    )
+    ON CONFLICT (tconst) DO UPDATE
+    SET interest_state = 'watched',
+        last_watched_at = GREATEST(
+            COALESCE(app.content_state.last_watched_at, '-infinity'::timestamp),
+            EXCLUDED.last_watched_at
+        ),
+        updated_at = GREATEST(
+            COALESCE(app.content_state.updated_at, '-infinity'::timestamp),
+            EXCLUDED.updated_at
+        );
+    GET DIAGNOSTICS v_content_state_changed = ROW_COUNT;
+    v_content_state_changed := v_content_state_changed > 0;
+
+    IF p_archive_from_list_id IS NOT NULL
+       AND (p_archive_canonical_key IS NOT NULL OR p_archive_display_tconst IS NOT NULL) THEN
+        WITH archive_candidates AS (
+            SELECT item.id
+            FROM app.user_list_items AS item
+            LEFT JOIN app.catalog_episodes AS episode
+                ON episode.episode_tconst = item.tconst
+            WHERE item.list_id = p_archive_from_list_id
+              AND item.is_archived = FALSE
+              AND (
+                  (p_archive_canonical_key IS NOT NULL AND item.canonical_key = p_archive_canonical_key)
+                  OR (
+                      p_archive_display_tconst IS NOT NULL
+                      AND COALESCE(episode.series_tconst, item.tconst, item.parent_tconst) = p_archive_display_tconst
+                  )
+              )
+        ), archived AS (
+            UPDATE app.user_list_items AS item
+            SET is_archived = TRUE,
+                updated_at = p_created_at
+            WHERE item.id IN (SELECT id FROM archive_candidates)
+            RETURNING 1
+        )
+        SELECT COUNT(*)
+        INTO v_archived_items
+        FROM archived;
+    END IF;
+
+    RETURN QUERY SELECT p_event_id, v_content_state_changed, v_archived_items;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION app.replace_favorite_genres(
+    p_items jsonb,
+    p_source_origin text,
+    p_source_ref text,
+    p_archive_missing boolean,
+    p_now timestamp without time zone
+)
+RETURNS TABLE(touched_count integer, archived_count integer)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_touched integer := 0;
+    v_archived integer := 0;
+BEGIN
+    WITH payload AS (
+        SELECT
+            trim(row.genre) AS genre,
+            row.weight,
+            row.preference_rank,
+            row.notes,
+            row.is_active
+        FROM jsonb_to_recordset(COALESCE(p_items, '[]'::jsonb)) AS row(
+            genre text,
+            weight double precision,
+            preference_rank integer,
+            notes text,
+            is_active boolean
+        )
+        WHERE trim(COALESCE(row.genre, '')) <> ''
+    ), upserted AS (
+        INSERT INTO app.favorite_genres (
+            genre,
+            weight,
+            preference_rank,
+            source_origin,
+            source_ref,
+            notes,
+            is_active,
+            created_at,
+            updated_at
+        )
+        SELECT
+            payload.genre,
+            payload.weight,
+            payload.preference_rank,
+            p_source_origin,
+            p_source_ref,
+            payload.notes,
+            COALESCE(payload.is_active, TRUE),
+            p_now,
+            p_now
+        FROM payload
+        ON CONFLICT (genre) DO UPDATE
+        SET weight = EXCLUDED.weight,
+            preference_rank = EXCLUDED.preference_rank,
+            source_origin = EXCLUDED.source_origin,
+            source_ref = EXCLUDED.source_ref,
+            notes = EXCLUDED.notes,
+            is_active = EXCLUDED.is_active,
+            updated_at = EXCLUDED.updated_at
+        RETURNING 1
+    ), archived AS (
+        UPDATE app.favorite_genres AS target
+        SET is_active = FALSE,
+            updated_at = p_now
+        WHERE p_archive_missing
+          AND NOT EXISTS (
+              SELECT 1
+              FROM payload
+              WHERE payload.genre = target.genre
+          )
+          AND target.is_active = TRUE
+        RETURNING 1
+    )
+    SELECT
+        (SELECT COUNT(*) FROM upserted),
+        (SELECT COUNT(*) FROM archived)
+    INTO v_touched, v_archived;
+
+    RETURN QUERY SELECT v_touched, v_archived;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION app.replace_favorite_traits(
+    p_items jsonb,
+    p_source_origin text,
+    p_source_ref text,
+    p_archive_missing boolean,
+    p_now timestamp without time zone
+)
+RETURNS TABLE(touched_count integer, archived_count integer)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_touched integer := 0;
+    v_archived integer := 0;
+BEGIN
+    WITH payload AS (
+        SELECT
+            trim(row.trait) AS trait,
+            row.weight,
+            row.preference_rank,
+            row.notes,
+            row.is_active
+        FROM jsonb_to_recordset(COALESCE(p_items, '[]'::jsonb)) AS row(
+            trait text,
+            weight double precision,
+            preference_rank integer,
+            notes text,
+            is_active boolean
+        )
+        WHERE trim(COALESCE(row.trait, '')) <> ''
+    ), upserted AS (
+        INSERT INTO app.favorite_traits (
+            trait,
+            weight,
+            preference_rank,
+            source_origin,
+            source_ref,
+            notes,
+            is_active,
+            created_at,
+            updated_at
+        )
+        SELECT
+            payload.trait,
+            payload.weight,
+            payload.preference_rank,
+            p_source_origin,
+            p_source_ref,
+            payload.notes,
+            COALESCE(payload.is_active, TRUE),
+            p_now,
+            p_now
+        FROM payload
+        ON CONFLICT (trait) DO UPDATE
+        SET weight = EXCLUDED.weight,
+            preference_rank = EXCLUDED.preference_rank,
+            source_origin = EXCLUDED.source_origin,
+            source_ref = EXCLUDED.source_ref,
+            notes = EXCLUDED.notes,
+            is_active = EXCLUDED.is_active,
+            updated_at = EXCLUDED.updated_at
+        RETURNING 1
+    ), archived AS (
+        UPDATE app.favorite_traits AS target
+        SET is_active = FALSE,
+            updated_at = p_now
+        WHERE p_archive_missing
+          AND NOT EXISTS (
+              SELECT 1
+              FROM payload
+              WHERE payload.trait = target.trait
+          )
+          AND target.is_active = TRUE
+        RETURNING 1
+    )
+    SELECT
+        (SELECT COUNT(*) FROM upserted),
+        (SELECT COUNT(*) FROM archived)
+    INTO v_touched, v_archived;
+
+    RETURN QUERY SELECT v_touched, v_archived;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION app.touch_updated_at()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    NEW.updated_at := CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgname = 'trg_user_lists_touch_updated_at'
+          AND tgrelid = 'app.user_lists'::regclass
+    ) THEN
+        CREATE TRIGGER trg_user_lists_touch_updated_at
+        BEFORE UPDATE ON app.user_lists
+        FOR EACH ROW
+        EXECUTE FUNCTION app.touch_updated_at();
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgname = 'trg_user_list_items_touch_updated_at'
+          AND tgrelid = 'app.user_list_items'::regclass
+    ) THEN
+        CREATE TRIGGER trg_user_list_items_touch_updated_at
+        BEFORE UPDATE ON app.user_list_items
+        FOR EACH ROW
+        EXECUTE FUNCTION app.touch_updated_at();
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgname = 'trg_user_ratings_touch_updated_at'
+          AND tgrelid = 'app.user_ratings'::regclass
+    ) THEN
+        CREATE TRIGGER trg_user_ratings_touch_updated_at
+        BEFORE UPDATE ON app.user_ratings
+        FOR EACH ROW
+        EXECUTE FUNCTION app.touch_updated_at();
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgname = 'trg_user_people_touch_updated_at'
+          AND tgrelid = 'app.user_people'::regclass
+    ) THEN
+        CREATE TRIGGER trg_user_people_touch_updated_at
+        BEFORE UPDATE ON app.user_people
+        FOR EACH ROW
+        EXECUTE FUNCTION app.touch_updated_at();
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgname = 'trg_favorite_genres_touch_updated_at'
+          AND tgrelid = 'app.favorite_genres'::regclass
+    ) THEN
+        CREATE TRIGGER trg_favorite_genres_touch_updated_at
+        BEFORE UPDATE ON app.favorite_genres
+        FOR EACH ROW
+        EXECUTE FUNCTION app.touch_updated_at();
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgname = 'trg_favorite_traits_touch_updated_at'
+          AND tgrelid = 'app.favorite_traits'::regclass
+    ) THEN
+        CREATE TRIGGER trg_favorite_traits_touch_updated_at
+        BEFORE UPDATE ON app.favorite_traits
+        FOR EACH ROW
+        EXECUTE FUNCTION app.touch_updated_at();
+    END IF;
+END;
+$$;
 
 CREATE TABLE IF NOT EXISTS app.search_recall (
     id text PRIMARY KEY,

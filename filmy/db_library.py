@@ -21,6 +21,7 @@ from filmy.runtime_postgres import (
     app_state_uses_postgres,
     content_state_uses_postgres,
     create_user_list as create_user_list_postgres,
+    delete_user_list as delete_user_list_postgres,
     fetch_all_watch_events,
     fetch_existing_watch_tconsts,
     fetch_active_user_list_items,
@@ -39,9 +40,9 @@ from filmy.runtime_postgres import (
     fetch_user_lists,
     delete_user_rating as delete_user_rating_postgres,
     fetch_latest_ratings_for_tconsts,
-    insert_watch_event as insert_watch_event_postgres,
     insert_watch_events as insert_watch_events_postgres,
     list_in_progress_content_states,
+    record_watched as record_watched_postgres,
     slug_exists,
     upsert_user_rating as upsert_user_rating_postgres,
     upsert_user_list_item,
@@ -416,7 +417,13 @@ def add_title_to_user_list(tconst: str, list_id: str, *, notes: str | None = Non
     }
 
 
-def set_user_rating(tconst: str, rating: int) -> dict[str, Any]:
+def set_user_rating(
+    tconst: str,
+    rating: int,
+    *,
+    liked_notes: str | None = None,
+    disliked_notes: str | None = None,
+) -> dict[str, Any]:
     db = _db()
     if rating < 1 or rating > 10:
         raise ValueError("Rating musí být mezi 1 a 10.")
@@ -425,6 +432,8 @@ def set_user_rating(tconst: str, rating: int) -> dict[str, Any]:
         raise ValueError("Titul nebyl nalezen.")
 
     now = db._now_iso()
+    cleaned_liked_notes = (liked_notes or "").strip() or None
+    cleaned_disliked_notes = (disliked_notes or "").strip() or None
     media = db._build_local_media_identity(detail)
     canonical_key = db._canonical_media_key(
         media["media_type"],
@@ -449,6 +458,8 @@ def set_user_rating(tconst: str, rating: int) -> dict[str, Any]:
         season_number=media["season_number"],
         episode_number=media["episode_number"],
         rating=rating,
+        liked_notes=cleaned_liked_notes,
+        disliked_notes=cleaned_disliked_notes,
         rated_at=now,
         source_origin="local_app",
         source_ref=f"manual_rating:{tconst}",
@@ -522,6 +533,8 @@ def record_watch_event(
     watched_on: str | None = None,
     notes: str | None = None,
     add_to_watched_list: bool = False,
+    archive_from_list_id: str | None = None,
+    archive_display_tconst: str | None = None,
 ) -> dict[str, Any]:
     db = _db()
     detail = db.get_content_detail(tconst)
@@ -536,24 +549,43 @@ def record_watch_event(
     except ValueError as exc:
         raise ValueError("watched_on musí být ISO datum ve formátu YYYY-MM-DD.") from exc
 
-    insert_watch_event_postgres(
+    media = db._build_local_media_identity(detail)
+    canonical_key = db._canonical_media_key(
+        media["media_type"],
+        media["tconst"],
+        media["imdb_id"],
+        media["tmdb_id"],
+        None,
+        media["season_number"],
+        media["episode_number"],
+    )
+    effective_archive_list_id = archive_from_list_id
+    effective_archive_canonical_key: str | None = None
+    if effective_archive_list_id:
+        effective_archive_canonical_key = canonical_key
+    elif detail["kind"] != "episode":
+        effective_archive_list_id = "watchlist"
+        effective_archive_canonical_key = canonical_key
+
+    action_result = record_watched_postgres(
         event_id=event_id,
         tconst=tconst,
         event_scope=event_scope,
         watched_on=effective_watched_on,
         notes=notes,
         created_at=now,
+        archive_from_list_id=effective_archive_list_id,
+        archive_canonical_key=effective_archive_canonical_key,
+        archive_display_tconst=archive_display_tconst,
     )
-    if detail["kind"] != "episode":
-        canonical_key = db._canonical_media_key("title", tconst, tconst, (detail.get("tmdb") or {}).get("tmdb_id"), None, None, None)
-        archive_user_list_item("watchlist", canonical_key, now)
     db.clear_title_presentation_cache()
     return {
-        "id": event_id,
+        "id": action_result["event_id"],
         "tconst": tconst,
         "event_scope": event_scope,
         "watched_on": effective_watched_on,
         "created_at": now,
+        "archived_items": action_result["archived_items"],
         "library": db._get_library_summary_for_tconst(tconst),
     }
 
@@ -749,6 +781,20 @@ def update_user_list_description(list_id: str, description: str | None = None) -
     if updated is None:
         raise ValueError("Seznam nebyl nalezen.")
     return updated
+
+
+def delete_user_list(list_id: str) -> dict[str, Any]:
+    row = fetch_user_list(list_id)
+    if row is None:
+        raise ValueError("Seznam nebyl nalezen.")
+    if row["list_kind"] != "custom":
+        raise ValueError("Smazat lze jen vlastní playlisty.")
+    deleted = delete_user_list_postgres(list_id)
+    if deleted is None:
+        raise ValueError("Seznam nebyl nalezen.")
+    if deleted["list_kind"] != "custom":
+        raise ValueError("Smazat lze jen vlastní playlisty.")
+    return deleted
 
 
 def get_recently_watched_page(limit: int = 50, offset: int = 0) -> dict[str, Any]:

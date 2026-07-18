@@ -398,6 +398,43 @@ def fetch_title_people_rows(tconst: str) -> list[tuple[Any, ...]]:
         return cursor.fetchall()
 
 
+def fetch_title_people_preview_rows(tconsts: list[str]) -> list[tuple[Any, ...]]:
+    """Read lightweight director/cast preview rows for many titles from PostgreSQL."""
+
+    if not tconsts:
+        return []
+    with _connect() as conn, conn.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT
+                c.tconst,
+                c.credit_group,
+                c.ordering,
+                p.primary_name
+            FROM app.title_credits AS c
+            JOIN app.catalog_people AS p USING (nconst)
+            WHERE c.tconst = ANY(%s)
+              AND c.credit_group IN ('director', 'cast')
+              AND (
+                  c.credit_group <> 'cast'
+                  OR c.ordering IS NULL
+                  OR c.ordering <= 5
+              )
+            ORDER BY
+                c.tconst,
+                CASE c.credit_group
+                    WHEN 'director' THEN 0
+                    WHEN 'cast' THEN 1
+                    ELSE 2
+                END,
+                c.ordering NULLS LAST,
+                p.primary_name
+            """,
+            (tconsts,),
+        )
+        return cursor.fetchall()
+
+
 def fetch_person_catalog_row(nconst: str) -> tuple[Any, ...] | None:
     """Read one person row from PostgreSQL catalog_people."""
 
@@ -722,6 +759,35 @@ def fetch_title_card_rows(tconsts: list[str]) -> list[tuple[Any, ...]]:
         return cursor.fetchall()
 
 
+def fetch_title_card_detail_rows(tconsts: list[str]) -> list[tuple[Any, ...]]:
+    """Read richer lightweight title-card rows for many titles from PostgreSQL."""
+
+    if not tconsts:
+        return []
+    with _connect() as conn, conn.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT
+                t.tconst,
+                t.title_type,
+                t.start_year,
+                t.primary_title,
+                t.original_title,
+                t.runtime_minutes,
+                t.genres,
+                t.average_rating,
+                t.num_votes,
+                c.poster_relative_path,
+                c.poster_local_path
+            FROM app.catalog_titles AS t
+            LEFT JOIN app.catalog_title_cards AS c ON c.tconst = t.tconst
+            WHERE t.tconst = ANY(%s)
+            """,
+            (tconsts,),
+        )
+        return cursor.fetchall()
+
+
 def fetch_catalog_brief_rows(tconsts: list[str]) -> list[tuple[Any, ...]]:
     """Read lightweight catalog rows for many tconsts from PostgreSQL."""
 
@@ -853,14 +919,12 @@ def fetch_watch_view_page_rows(
     total_sql = f"""
         WITH grouped AS (
             SELECT
-                COALESCE(e.series_tconst, w.tconst) AS display_tconst,
-                MAX(COALESCE(w.created_at, CAST(w.watched_on AS timestamp))) AS latest_created_at,
-                MAX(w.watched_on) AS latest_watched_on
-            FROM app.watch_events AS w
-            LEFT JOIN app.catalog_episodes AS e ON e.episode_tconst = w.tconst
-            WHERE w.tconst IS NOT NULL
+                w.display_tconst,
+                w.latest_created_at,
+                w.latest_watched_on
+            FROM app.watched_display_rollup AS w
+            WHERE w.display_tconst IS NOT NULL
               {cutoff_filter}
-            GROUP BY 1
         )
         SELECT COUNT(*)
         FROM grouped AS g
@@ -870,14 +934,12 @@ def fetch_watch_view_page_rows(
     rows_sql = f"""
         WITH grouped AS (
             SELECT
-                COALESCE(e.series_tconst, w.tconst) AS display_tconst,
-                MAX(COALESCE(w.created_at, CAST(w.watched_on AS timestamp))) AS latest_created_at,
-                MAX(w.watched_on) AS latest_watched_on
-            FROM app.watch_events AS w
-            LEFT JOIN app.catalog_episodes AS e ON e.episode_tconst = w.tconst
-            WHERE w.tconst IS NOT NULL
+                w.display_tconst,
+                w.latest_created_at,
+                w.latest_watched_on
+            FROM app.watched_display_rollup AS w
+            WHERE w.display_tconst IS NOT NULL
               {cutoff_filter}
-            GROUP BY 1
         )
         SELECT
             c.tconst,
@@ -913,22 +975,19 @@ def fetch_hot_watchlist_page_rows(
 
     total_sql = """
         WITH watched_titles AS (
-            SELECT DISTINCT
-                COALESCE(e.series_tconst, w.tconst) AS display_tconst
-            FROM app.watch_events AS w
-            LEFT JOIN app.catalog_episodes AS e ON e.episode_tconst = w.tconst
-            WHERE w.tconst IS NOT NULL
+            SELECT display_tconst
+            FROM app.watched_display_rollup
+            WHERE display_tconst IS NOT NULL
         ),
         ranked_items AS (
             SELECT
-                COALESCE(e.series_tconst, i.tconst, i.parent_tconst) AS display_tconst,
+                i.display_tconst,
                 row_number() OVER (
-                    PARTITION BY COALESCE(e.series_tconst, i.tconst, i.parent_tconst)
+                    PARTITION BY i.display_tconst
                     ORDER BY i.added_at DESC NULLS LAST, i.updated_at DESC, COALESCE(i.title, i.parent_title, i.tconst)
                 ) AS group_row
-            FROM app.user_list_items AS i
-            LEFT JOIN app.catalog_episodes AS e ON e.episode_tconst = i.tconst
-            WHERE i.list_id = 'watchlist' AND i.is_archived = FALSE
+            FROM app.active_user_list_display_items AS i
+            WHERE i.list_id = 'watchlist'
         )
         SELECT COUNT(*)
         FROM (
@@ -945,15 +1004,13 @@ def fetch_hot_watchlist_page_rows(
     """
     rows_sql = """
         WITH watched_titles AS (
-            SELECT DISTINCT
-                COALESCE(e.series_tconst, w.tconst) AS display_tconst
-            FROM app.watch_events AS w
-            LEFT JOIN app.catalog_episodes AS e ON e.episode_tconst = w.tconst
-            WHERE w.tconst IS NOT NULL
+            SELECT display_tconst
+            FROM app.watched_display_rollup
+            WHERE display_tconst IS NOT NULL
         ),
         ranked_items AS (
             SELECT
-                COALESCE(e.series_tconst, i.tconst, i.parent_tconst) AS display_tconst,
+                i.display_tconst,
                 i.media_type,
                 i.title,
                 i.parent_title,
@@ -961,12 +1018,11 @@ def fetch_hot_watchlist_page_rows(
                 i.added_at,
                 i.notes,
                 row_number() OVER (
-                    PARTITION BY COALESCE(e.series_tconst, i.tconst, i.parent_tconst)
+                    PARTITION BY i.display_tconst
                     ORDER BY i.added_at DESC NULLS LAST, i.updated_at DESC, COALESCE(i.title, i.parent_title, i.tconst)
                 ) AS group_row
-            FROM app.user_list_items AS i
-            LEFT JOIN app.catalog_episodes AS e ON e.episode_tconst = i.tconst
-            WHERE i.list_id = 'watchlist' AND i.is_archived = FALSE
+            FROM app.active_user_list_display_items AS i
+            WHERE i.list_id = 'watchlist'
         ),
         grouped_items AS (
             SELECT
@@ -1026,27 +1082,14 @@ def fetch_library_status_projection(*, recently_watched_days: int, hot_watchlist
         cursor.execute(
             """
             WITH grouped_list_items AS (
-                SELECT
-                    i.list_id,
-                    COALESCE(e.series_tconst, i.tconst, i.parent_tconst) AS display_tconst
-                FROM app.user_list_items AS i
-                LEFT JOIN app.catalog_episodes AS e ON e.episode_tconst = i.tconst
-                WHERE i.is_archived = FALSE
+                SELECT i.list_id, i.display_tconst
+                FROM app.active_user_list_display_items AS i
             ),
             list_counts AS (
                 SELECT list_id, COUNT(DISTINCT display_tconst) AS item_count
                 FROM grouped_list_items
                 WHERE display_tconst IS NOT NULL
                 GROUP BY list_id
-            ),
-            watched_grouped AS (
-                SELECT
-                    COALESCE(e.series_tconst, w.tconst) AS display_tconst,
-                    MAX(w.watched_on) AS latest_watched_on
-                FROM app.watch_events AS w
-                LEFT JOIN app.catalog_episodes AS e ON e.episode_tconst = w.tconst
-                WHERE w.tconst IS NOT NULL
-                GROUP BY 1
             ),
             poster_tconsts AS (
                 SELECT tconst
@@ -1056,7 +1099,7 @@ def fetch_library_status_projection(*, recently_watched_days: int, hot_watchlist
             watchlist_unwatched AS (
                 SELECT DISTINCT g.display_tconst
                 FROM grouped_list_items AS g
-                LEFT JOIN watched_grouped AS w ON w.display_tconst = g.display_tconst
+                LEFT JOIN app.watched_display_rollup AS w ON w.display_tconst = g.display_tconst
                 WHERE g.list_id = 'watchlist'
                   AND g.display_tconst IS NOT NULL
                   AND w.display_tconst IS NULL
@@ -1070,12 +1113,12 @@ def fetch_library_status_projection(*, recently_watched_days: int, hot_watchlist
                 ), 0) AS watchlist_unwatched_with_poster_count,
                 COALESCE((
                     SELECT COUNT(*)
-                    FROM watched_grouped AS w
+                    FROM app.watched_display_rollup AS w
                     JOIN poster_tconsts AS p ON p.tconst = w.display_tconst
                 ), 0) AS watched_with_poster_count,
                 COALESCE((
                     SELECT COUNT(*)
-                    FROM watched_grouped AS w
+                    FROM app.watched_display_rollup AS w
                     JOIN poster_tconsts AS p ON p.tconst = w.display_tconst
                     WHERE w.latest_watched_on >= current_date - (%s * INTERVAL '1 day')
                 ), 0) AS recently_watched_with_poster_count
@@ -1103,27 +1146,14 @@ def fetch_library_status_snapshot(*, recently_watched_days: int, hot_watchlist_l
         cursor.execute(
             """
             WITH grouped_list_items AS (
-                SELECT
-                    i.list_id,
-                    COALESCE(e.series_tconst, i.tconst, i.parent_tconst) AS display_tconst
-                FROM app.user_list_items AS i
-                LEFT JOIN app.catalog_episodes AS e ON e.episode_tconst = i.tconst
-                WHERE i.is_archived = FALSE
+                SELECT i.list_id, i.display_tconst
+                FROM app.active_user_list_display_items AS i
             ),
             list_counts AS (
                 SELECT list_id, COUNT(DISTINCT display_tconst) AS item_count
                 FROM grouped_list_items
                 WHERE display_tconst IS NOT NULL
                 GROUP BY list_id
-            ),
-            watched_grouped AS (
-                SELECT
-                    COALESCE(e.series_tconst, w.tconst) AS display_tconst,
-                    MAX(w.watched_on) AS latest_watched_on
-                FROM app.watch_events AS w
-                LEFT JOIN app.catalog_episodes AS e ON e.episode_tconst = w.tconst
-                WHERE w.tconst IS NOT NULL
-                GROUP BY 1
             ),
             poster_tconsts AS (
                 SELECT tconst
@@ -1133,7 +1163,7 @@ def fetch_library_status_snapshot(*, recently_watched_days: int, hot_watchlist_l
             watchlist_unwatched AS (
                 SELECT DISTINCT g.display_tconst
                 FROM grouped_list_items AS g
-                LEFT JOIN watched_grouped AS w ON w.display_tconst = g.display_tconst
+                LEFT JOIN app.watched_display_rollup AS w ON w.display_tconst = g.display_tconst
                 WHERE g.list_id = 'watchlist'
                   AND g.display_tconst IS NOT NULL
                   AND w.display_tconst IS NULL
@@ -1152,12 +1182,12 @@ def fetch_library_status_snapshot(*, recently_watched_days: int, hot_watchlist_l
                 ), 0) AS hot_watchlist_candidate_count,
                 COALESCE((
                     SELECT COUNT(*)
-                    FROM watched_grouped AS w
+                    FROM app.watched_display_rollup AS w
                     JOIN poster_tconsts AS p ON p.tconst = w.display_tconst
                 ), 0) AS watched_count,
                 COALESCE((
                     SELECT COUNT(*)
-                    FROM watched_grouped AS w
+                    FROM app.watched_display_rollup AS w
                     JOIN poster_tconsts AS p ON p.tconst = w.display_tconst
                     WHERE w.latest_watched_on >= current_date - (%s * INTERVAL '1 day')
                 ), 0) AS recently_watched_count
@@ -1440,6 +1470,8 @@ def upsert_user_rating(
     source_origin: str,
     source_ref: str | None,
     now: str,
+    liked_notes: str | None = None,
+    disliked_notes: str | None = None,
 ) -> dict[str, Any]:
     """Upsert one app.user_ratings row in PostgreSQL."""
 
@@ -1448,9 +1480,10 @@ def upsert_user_rating(
             """
             INSERT INTO app.user_ratings (
                 canonical_key, tconst, media_type, imdb_id, tmdb_id, trakt_id, parent_tconst, parent_title, title,
-                season_number, episode_number, rating, rated_at, source_origin, source_ref, created_at, updated_at
+                season_number, episode_number, rating, liked_notes, disliked_notes, rated_at,
+                source_origin, source_ref, created_at, updated_at
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamp, %s, %s, %s::timestamp, %s::timestamp)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamp, %s, %s, %s::timestamp, %s::timestamp)
             ON CONFLICT (canonical_key) DO UPDATE SET
                 tconst = COALESCE(app.user_ratings.tconst, excluded.tconst),
                 imdb_id = COALESCE(app.user_ratings.imdb_id, excluded.imdb_id),
@@ -1460,12 +1493,16 @@ def upsert_user_rating(
                 parent_title = COALESCE(app.user_ratings.parent_title, excluded.parent_title),
                 title = COALESCE(app.user_ratings.title, excluded.title),
                 rating = excluded.rating,
+                liked_notes = excluded.liked_notes,
+                disliked_notes = excluded.disliked_notes,
                 rated_at = COALESCE(excluded.rated_at, app.user_ratings.rated_at),
                 updated_at = excluded.updated_at
             RETURNING
                 canonical_key,
                 tconst,
                 rating,
+                liked_notes,
+                disliked_notes,
                 rated_at,
                 updated_at
             """,
@@ -1482,6 +1519,8 @@ def upsert_user_rating(
                 season_number,
                 episode_number,
                 rating,
+                liked_notes,
+                disliked_notes,
                 rated_at,
                 source_origin,
                 source_ref,
@@ -1523,6 +1562,8 @@ def fetch_latest_ratings_for_tconsts(tconsts: list[str]) -> dict[str, dict[str, 
             SELECT DISTINCT ON (tconst)
                 tconst,
                 rating,
+                liked_notes,
+                disliked_notes,
                 rated_at,
                 updated_at
             FROM app.user_ratings
@@ -1537,11 +1578,207 @@ def fetch_latest_ratings_for_tconsts(tconsts: list[str]) -> dict[str, dict[str, 
         str(row[0]): {
             "tconst": row[0],
             "rating": row[1],
-            "rated_at": _parse_optional_timestamp(row[2]),
-            "updated_at": _parse_optional_timestamp(row[3]),
+            "liked_notes": row[2],
+            "disliked_notes": row[3],
+            "rated_at": _parse_optional_timestamp(row[4]),
+            "updated_at": _parse_optional_timestamp(row[5]),
         }
         for row in rows
         if row[0] is not None
+    }
+
+
+def fetch_ai_taste_seed_rows(*, source_list: str, limit: int) -> dict[str, Any]:
+    """Return compact user-taste examples for an external AI recommender.
+
+    The source list can be a user-list id, slug, or exact name. The payload is
+    intentionally read-only and carries local signals; it does not decide new
+    recommendations inside this app.
+    """
+
+    normalized_source = str(source_list or "").strip()
+    if not normalized_source:
+        normalized_source = "kouknout-znovu"
+    source_aliases = [normalized_source]
+    if normalized_source.casefold() == "kouknout-znovu":
+        source_aliases.append("kouknout-znou")
+    with _connect() as conn, conn.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT id, slug, name, description, list_kind
+            FROM app.user_lists
+            WHERE id = ANY(%s)
+               OR slug = ANY(%s)
+               OR lower(name) = ANY(%s)
+            ORDER BY
+                CASE
+                    WHEN id = %s THEN 0
+                    WHEN slug = %s THEN 1
+                    ELSE 2
+                END
+            LIMIT 1
+            """,
+            (
+                source_aliases,
+                source_aliases,
+                [item.casefold().replace("-", " ") for item in source_aliases],
+                normalized_source,
+                normalized_source,
+            ),
+        )
+        list_row = cursor.fetchone()
+        if list_row is None:
+            return {
+                "source_list": {
+                    "query": normalized_source,
+                    "found": False,
+                },
+                "items": [],
+                "limit": limit,
+            }
+
+        cursor.execute(
+            """
+            WITH ranked_items AS (
+                SELECT
+                    i.display_tconst,
+                    i.tmdb_id,
+                    i.added_at,
+                    i.rank,
+                    row_number() OVER (
+                        PARTITION BY i.display_tconst
+                        ORDER BY i.rank NULLS LAST, i.added_at DESC NULLS LAST, COALESCE(i.title, i.parent_title, i.tconst)
+                    ) AS group_row
+                FROM app.active_user_list_display_items AS i
+                WHERE i.list_id = %s
+                  AND i.display_tconst IS NOT NULL
+            ),
+            latest_ratings AS (
+                SELECT DISTINCT ON (tconst)
+                    tconst,
+                    rating,
+                    liked_notes,
+                    disliked_notes,
+                    rated_at,
+                    updated_at
+                FROM app.user_ratings
+                WHERE tconst IS NOT NULL
+                ORDER BY tconst, rated_at DESC NULLS LAST, updated_at DESC, created_at DESC
+            ),
+            latest_scores AS (
+                SELECT DISTINCT ON (genre)
+                    genre,
+                    final_score,
+                    rating_signal_score,
+                    watch_signal_score,
+                    actor_affinity_score,
+                    generated_at
+                FROM app.genre_scores
+                WHERE score_scope = 'default'
+                ORDER BY genre, generated_at DESC, rank_in_run ASC
+            ),
+            title_actor_affinity AS (
+                SELECT
+                    c.tconst,
+                    ROUND(AVG(p.affinity_rating)::numeric, 3)::double precision AS actor_affinity_rating
+                FROM app.title_credits AS c
+                JOIN app.user_people AS p ON p.nconst = c.nconst
+                WHERE c.credit_group = 'cast'
+                  AND p.affinity_rating > 0
+                  AND (c.ordering IS NULL OR c.ordering <= 8)
+                GROUP BY c.tconst
+            )
+            SELECT
+                r.display_tconst,
+                t.primary_title,
+                t.original_title,
+                t.title_type,
+                t.start_year,
+                t.genres,
+                t.average_rating,
+                t.num_votes,
+                COALESCE(map.tmdb_id, r.tmdb_id),
+                lr.rating,
+                lr.liked_notes,
+                lr.disliked_notes,
+                lr.rated_at,
+                ta.actor_affinity_rating,
+                COALESCE(
+                    jsonb_agg(
+                        DISTINCT jsonb_build_object(
+                            'genre', score.genre,
+                            'final_score', score.final_score,
+                            'rating_signal_score', score.rating_signal_score,
+                            'watch_signal_score', score.watch_signal_score,
+                            'actor_affinity_score', score.actor_affinity_score
+                        )
+                    ) FILTER (WHERE score.genre IS NOT NULL),
+                    '[]'::jsonb
+                ) AS genre_score_signals
+            FROM ranked_items AS r
+            JOIN app.catalog_titles AS t ON t.tconst = r.display_tconst
+            LEFT JOIN app.tmdb_title_map AS map ON map.tconst = r.display_tconst
+            LEFT JOIN latest_ratings AS lr ON lr.tconst = r.display_tconst
+            LEFT JOIN title_actor_affinity AS ta ON ta.tconst = r.display_tconst
+            LEFT JOIN latest_scores AS score ON score.genre = ANY(string_to_array(COALESCE(t.genres, ''), ','))
+            WHERE r.group_row = 1
+            GROUP BY
+                r.display_tconst,
+                t.primary_title,
+                t.original_title,
+                t.title_type,
+                t.start_year,
+                t.genres,
+                t.average_rating,
+                t.num_votes,
+                map.tmdb_id,
+                r.tmdb_id,
+                lr.rating,
+                lr.liked_notes,
+                lr.disliked_notes,
+                lr.rated_at,
+                ta.actor_affinity_rating,
+                r.rank,
+                r.added_at
+            ORDER BY r.rank NULLS LAST, r.added_at DESC NULLS LAST, t.primary_title
+            LIMIT %s
+            """,
+            (list_row[0], limit),
+        )
+        rows = cursor.fetchall()
+
+    return {
+        "source_list": {
+            "query": normalized_source,
+            "found": True,
+            "id": list_row[0],
+            "slug": list_row[1],
+            "name": list_row[2],
+            "description": list_row[3],
+            "list_kind": list_row[4],
+        },
+        "limit": limit,
+        "items": [
+            {
+                "imdb_id": row[0],
+                "tconst": row[0],
+                "tmdb_id": row[8],
+                "title": row[1],
+                "original_title": row[2],
+                "title_type": row[3],
+                "year": row[4],
+                "genres": [genre for genre in str(row[5] or "").split(",") if genre],
+                "imdb_rating": row[6],
+                "imdb_votes": row[7],
+                "user_rating": row[9],
+                "liked_notes": row[10],
+                "disliked_notes": row[11],
+                "rated_at": _parse_optional_timestamp(row[12]),
+                "actor_affinity_rating": row[13],
+                "genre_score_signals": row[14] or [],
+            }
+            for row in rows
+        ],
     }
 
 
@@ -1583,6 +1820,59 @@ def insert_watch_event(
         )
         conn.commit()
     return _row_to_watch_event(row)
+
+
+def record_watched(
+    *,
+    event_id: str,
+    tconst: str,
+    event_scope: str,
+    watched_on: str,
+    notes: str | None,
+    created_at: str,
+    archive_from_list_id: str | None = None,
+    archive_canonical_key: str | None = None,
+    archive_display_tconst: str | None = None,
+) -> dict[str, Any]:
+    """Run the server-side watched action in PostgreSQL."""
+
+    with _connect() as conn, conn.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT event_id, content_state_changed, archived_items
+            FROM app.record_watched(
+                %s,
+                %s,
+                %s,
+                %s::date,
+                %s,
+                %s::timestamp,
+                %s,
+                %s,
+                %s
+            )
+            """,
+            (
+                event_id,
+                tconst,
+                event_scope,
+                watched_on,
+                notes,
+                created_at,
+                archive_from_list_id,
+                archive_canonical_key,
+                archive_display_tconst,
+            ),
+        )
+        row = cursor.fetchone()
+        conn.commit()
+    if row is None:
+        raise RuntimeError("PostgreSQL record_watched nevratil vysledek.")
+    return {
+        "event_id": str(row[0]),
+        "content_state_changed": bool(row[1]),
+        "archived_items": int(row[2] or 0),
+    }
 
 
 def insert_watch_events(
@@ -1757,7 +2047,7 @@ def fetch_library_summary_snapshot(tconst: str, title_type: str | None) -> dict[
 
         cursor.execute(
             """
-            SELECT rating, rated_at
+            SELECT rating, liked_notes, disliked_notes, rated_at
             FROM app.user_ratings
             WHERE tconst = %s
             ORDER BY rated_at DESC NULLS LAST, updated_at DESC, created_at DESC
@@ -1774,7 +2064,9 @@ def fetch_library_summary_snapshot(tconst: str, title_type: str | None) -> dict[
         "rating": (
             {
                 "value": rating_row[0],
-                "rated_at": _parse_optional_timestamp(rating_row[1]),
+                "liked_notes": rating_row[1],
+                "disliked_notes": rating_row[2],
+                "rated_at": _parse_optional_timestamp(rating_row[3]),
             }
             if rating_row is not None
             else None
@@ -1839,7 +2131,12 @@ def fetch_user_list_page_rows(
     offset: int,
     exclude_watched: bool,
 ) -> tuple[dict[str, Any] | None, int, list[tuple[Any, ...]]]:
-    """Read one grouped user-list page directly from PostgreSQL."""
+    """Read one grouped user-list page directly from PostgreSQL.
+
+    The normal path gets page rows and the filtered total in one scan. A small
+    count fallback is kept only for out-of-range offsets where a window count
+    cannot be returned with the empty page.
+    """
 
     watched_cte = ""
     watched_join = ""
@@ -1848,11 +2145,9 @@ def fetch_user_list_page_rows(
         watched_cte = """
             ,
             watched_titles AS (
-                SELECT DISTINCT
-                    COALESCE(e.series_tconst, w.tconst) AS display_tconst
-                FROM app.watch_events AS w
-                LEFT JOIN app.catalog_episodes AS e ON e.episode_tconst = w.tconst
-                WHERE w.tconst IS NOT NULL
+                SELECT display_tconst
+                FROM app.watched_display_rollup
+                WHERE display_tconst IS NOT NULL
             )
         """
         watched_join = "LEFT JOIN watched_titles AS wt ON wt.display_tconst = r.display_tconst"
@@ -1871,17 +2166,16 @@ def fetch_user_list_page_rows(
         if list_row is None:
             return None, 0, []
 
-        total_sql = f"""
+        count_sql = f"""
             WITH ranked_items AS (
                 SELECT
-                    COALESCE(e.series_tconst, i.tconst, i.parent_tconst) AS display_tconst,
+                    i.display_tconst,
                     row_number() OVER (
-                        PARTITION BY COALESCE(e.series_tconst, i.tconst, i.parent_tconst)
+                        PARTITION BY i.display_tconst
                         ORDER BY i.rank NULLS LAST, i.added_at DESC NULLS LAST, COALESCE(i.title, i.parent_title, i.tconst)
                     ) AS group_row
-                FROM app.user_list_items AS i
-                LEFT JOIN app.catalog_episodes AS e ON e.episode_tconst = i.tconst
-                WHERE i.list_id = %s AND i.is_archived = FALSE
+                FROM app.active_user_list_display_items AS i
+                WHERE i.list_id = %s
             )
             {watched_cte}
             SELECT COUNT(*)
@@ -1896,23 +2190,21 @@ def fetch_user_list_page_rows(
         rows_sql = f"""
             WITH ranked_items AS (
                 SELECT
-                    COALESCE(e.series_tconst, i.tconst, i.parent_tconst) AS display_tconst,
+                    i.display_tconst,
                     i.media_type,
                     i.title,
                     i.parent_title,
                     i.rank,
                     i.added_at,
                     i.notes,
-                    l.name,
-                    l.list_kind,
+                    i.list_name,
+                    i.list_kind,
                     row_number() OVER (
-                        PARTITION BY COALESCE(e.series_tconst, i.tconst, i.parent_tconst)
+                        PARTITION BY i.display_tconst
                         ORDER BY i.rank NULLS LAST, i.added_at DESC NULLS LAST, COALESCE(i.title, i.parent_title, i.tconst)
                     ) AS group_row
-                FROM app.user_list_items AS i
-                JOIN app.user_lists AS l ON l.id = i.list_id
-                LEFT JOIN app.catalog_episodes AS e ON e.episode_tconst = i.tconst
-                WHERE i.list_id = %s AND i.is_archived = FALSE
+                FROM app.active_user_list_display_items AS i
+                WHERE i.list_id = %s
             )
             {watched_cte}
             SELECT
@@ -1925,13 +2217,14 @@ def fetch_user_list_page_rows(
                 r.rank,
                 r.added_at,
                 r.notes,
-                r.name,
+                r.list_name,
                 r.list_kind,
                 c.title_type,
                 c.start_year,
                 c.poster_relative_path,
                 c.poster_local_path,
-                c.primary_title
+                c.primary_title,
+                COUNT(*) OVER () AS filtered_total
             FROM ranked_items AS r
             JOIN app.catalog_title_cards AS c ON c.tconst = r.display_tconst
             {watched_join}
@@ -1942,10 +2235,16 @@ def fetch_user_list_page_rows(
             ORDER BY r.rank NULLS LAST, r.added_at DESC NULLS LAST, COALESCE(r.title, r.parent_title, r.display_tconst)
             LIMIT %s OFFSET %s
         """
-        cursor.execute(total_sql, (list_id,))
-        total = int(cursor.fetchone()[0] or 0)
         cursor.execute(rows_sql, (list_id, limit, offset))
         rows = cursor.fetchall()
+        if rows:
+            total = int(rows[0][-1] or 0)
+            rows = [row[:-1] for row in rows]
+        elif offset > 0:
+            cursor.execute(count_sql, (list_id,))
+            total = int(cursor.fetchone()[0] or 0)
+        else:
+            total = 0
 
     return (
         {
@@ -2028,6 +2327,44 @@ def update_user_list_description(list_id: str, description: str | None, now: str
         conn.commit()
     if row is None:
         return None
+    return {
+        "id": row[0],
+        "slug": row[1],
+        "name": row[2],
+        "description": row[3],
+        "list_kind": row[4],
+    }
+
+
+def delete_user_list(list_id: str) -> dict[str, Any] | None:
+    """Delete one custom user list and its items from PostgreSQL."""
+
+    with _connect() as conn, conn.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT id, slug, name, description, list_kind
+            FROM app.user_lists
+            WHERE id = %s
+            """,
+            (list_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            conn.rollback()
+            return None
+        if row[4] != "custom":
+            conn.rollback()
+            return {
+                "id": row[0],
+                "slug": row[1],
+                "name": row[2],
+                "description": row[3],
+                "list_kind": row[4],
+            }
+
+        cursor.execute("DELETE FROM app.user_list_items WHERE list_id = %s", (list_id,))
+        cursor.execute("DELETE FROM app.user_lists WHERE id = %s", (list_id,))
+        conn.commit()
     return {
         "id": row[0],
         "slug": row[1],
@@ -2333,44 +2670,26 @@ def replace_favorite_genres(
 ) -> None:
     """Replace favorite genres in PostgreSQL."""
 
-    normalized_genres = {str(item["genre"]) for item in items}
     with _connect() as conn, conn.cursor() as cursor:
-        for item in items:
-            cursor.execute(
-                """
-                INSERT INTO app.favorite_genres (
-                    genre, weight, preference_rank, source_origin, source_ref, notes, is_active, created_at, updated_at
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s::timestamp, %s::timestamp)
-                ON CONFLICT (genre) DO UPDATE SET
-                    weight = excluded.weight,
-                    preference_rank = excluded.preference_rank,
-                    source_origin = excluded.source_origin,
-                    source_ref = excluded.source_ref,
-                    notes = excluded.notes,
-                    is_active = excluded.is_active,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    item["genre"],
-                    item["weight"],
-                    item["preference_rank"],
-                    source_origin,
-                    source_ref,
-                    item.get("notes"),
-                    item["is_active"],
-                    now,
-                    now,
-                ),
+        cursor.execute(
+            """
+            SELECT touched_count, archived_count
+            FROM app.replace_favorite_genres(
+                %s::jsonb,
+                %s,
+                %s,
+                %s,
+                %s::timestamp
             )
-        if archive_missing:
-            cursor.execute("SELECT genre FROM app.favorite_genres")
-            existing = {str(row[0]) for row in cursor.fetchall()}
-            for genre in sorted(existing - normalized_genres):
-                cursor.execute(
-                    "UPDATE app.favorite_genres SET is_active = FALSE, updated_at = %s::timestamp WHERE genre = %s",
-                    (now, genre),
-                )
+            """,
+            (
+                json.dumps(items),
+                source_origin,
+                source_ref,
+                archive_missing,
+                now,
+            ),
+        )
         conn.commit()
 
 
@@ -2415,44 +2734,26 @@ def replace_favorite_traits(
 ) -> None:
     """Replace favorite traits in PostgreSQL."""
 
-    normalized_traits = {str(item["trait"]) for item in items}
     with _connect() as conn, conn.cursor() as cursor:
-        for item in items:
-            cursor.execute(
-                """
-                INSERT INTO app.favorite_traits (
-                    trait, weight, preference_rank, source_origin, source_ref, notes, is_active, created_at, updated_at
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s::timestamp, %s::timestamp)
-                ON CONFLICT (trait) DO UPDATE SET
-                    weight = excluded.weight,
-                    preference_rank = excluded.preference_rank,
-                    source_origin = excluded.source_origin,
-                    source_ref = excluded.source_ref,
-                    notes = excluded.notes,
-                    is_active = excluded.is_active,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    item["trait"],
-                    item["weight"],
-                    item["preference_rank"],
-                    source_origin,
-                    source_ref,
-                    item.get("notes"),
-                    item["is_active"],
-                    now,
-                    now,
-                ),
+        cursor.execute(
+            """
+            SELECT touched_count, archived_count
+            FROM app.replace_favorite_traits(
+                %s::jsonb,
+                %s,
+                %s,
+                %s,
+                %s::timestamp
             )
-        if archive_missing:
-            cursor.execute("SELECT trait FROM app.favorite_traits")
-            existing = {str(row[0]) for row in cursor.fetchall()}
-            for trait in sorted(existing - normalized_traits):
-                cursor.execute(
-                    "UPDATE app.favorite_traits SET is_active = FALSE, updated_at = %s::timestamp WHERE trait = %s",
-                    (now, trait),
-                )
+            """,
+            (
+                json.dumps(items),
+                source_origin,
+                source_ref,
+                archive_missing,
+                now,
+            ),
+        )
         conn.commit()
 
 
@@ -3068,6 +3369,32 @@ def fetch_resolved_import_rows(batch_id: str) -> list[dict[str, Any]]:
     ]
 
 
+def commit_import_batch(
+    *,
+    batch_id: str,
+    committed_at: str,
+) -> dict[str, Any]:
+    """Commit one resolved import batch through the server-side PostgreSQL function."""
+
+    with _connect() as conn, conn.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT inserted_events, skipped_events, batch_status
+            FROM app.commit_import_batch(%s, %s::timestamp)
+            """,
+            (batch_id, committed_at),
+        )
+        row = cursor.fetchone()
+        conn.commit()
+    if row is None:
+        raise RuntimeError(f"PostgreSQL commit_import_batch({batch_id}) nevratil vysledek.")
+    return {
+        "inserted_events": int(row[0] or 0),
+        "skipped_events": int(row[1] or 0),
+        "batch_status": str(row[2] or "committed"),
+    }
+
+
 def fetch_existing_import_commits(batch_id: str, import_row_ids: list[str]) -> set[str]:
     """Return which import row ids already produced watch events in PostgreSQL."""
 
@@ -3085,54 +3412,6 @@ def fetch_existing_import_commits(batch_id: str, import_row_ids: list[str]) -> s
         )
         rows = cursor.fetchall()
     return {str(row[0]) for row in rows if row[0] is not None}
-
-
-def insert_import_watch_event(
-    *,
-    event_id: str,
-    tconst: str,
-    event_scope: str,
-    watched_on: str,
-    source: str,
-    batch_id: str,
-    import_row_id: str,
-    created_at: str,
-) -> None:
-    """Insert one import-derived watch event into PostgreSQL and sync content_state."""
-
-    with _connect() as conn, conn.cursor() as cursor:
-        cursor.execute(
-            """
-            INSERT INTO app.watch_events (
-                id, tconst, event_scope, watched_on, source, batch_id, import_row_id, rating, notes, created_at
-            )
-            VALUES (%s, %s, %s, %s::date, %s, %s, %s, NULL, NULL, %s::timestamp)
-            """,
-            (event_id, tconst, event_scope, watched_on, source, batch_id, import_row_id, created_at),
-        )
-        cursor.execute(
-            """
-            INSERT INTO app.content_state (tconst, interest_state, last_previewed_at, last_watched_at, updated_at)
-            VALUES (%s, 'watched', NULL, %s::timestamp, %s::timestamp)
-            ON CONFLICT (tconst) DO UPDATE SET
-                interest_state = 'watched',
-                last_watched_at = excluded.last_watched_at,
-                updated_at = excluded.updated_at
-            """,
-            (tconst, created_at, created_at),
-        )
-        conn.commit()
-
-
-def mark_import_batch_committed(batch_id: str) -> None:
-    """Mark one import batch as committed in PostgreSQL."""
-
-    with _connect() as conn, conn.cursor() as cursor:
-        cursor.execute(
-            "UPDATE app.import_batches SET status = 'committed' WHERE id = %s",
-            (batch_id,),
-        )
-        conn.commit()
 
 
 def upsert_tmdb_mapping_record(
@@ -3590,8 +3869,10 @@ def _row_to_user_rating(row: tuple[Any, ...] | list[Any]) -> dict[str, Any]:
         "canonical_key": row[0],
         "tconst": row[1],
         "rating": row[2],
-        "rated_at": _parse_optional_timestamp(row[3]),
-        "updated_at": _parse_optional_timestamp(row[4]),
+        "liked_notes": row[3],
+        "disliked_notes": row[4],
+        "rated_at": _parse_optional_timestamp(row[5]),
+        "updated_at": _parse_optional_timestamp(row[6]),
     }
 
 

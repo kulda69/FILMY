@@ -31,12 +31,11 @@ from filmy.app_shared import (
     safe_back_target,
     selected_panel_page,
     templates,
-    tmdb_asset_url,
 )
 from filmy.config import get_ui_config
 from filmy.db import (
+    compute_and_record_genre_scores,
     get_catalog_genres,
-    get_content_detail,
     get_continue_watching_items,
     get_favorite_genres,
     get_favorite_traits,
@@ -45,8 +44,11 @@ from filmy.db import (
     get_hot_watchlist_page,
     get_latest_genre_scores,
     get_local_library_status,
+    fetch_watch_stats_for_tconsts,
     get_person_presentation,
     get_recently_watched_page,
+    get_title_card_summaries_for_tconsts,
+    get_title_people_panel,
     get_title_presentation,
     get_title_overviews_for_tconsts,
     get_user_list_items_page,
@@ -131,6 +133,67 @@ def _build_genre_signal_cards(
             }
         )
     return cards
+
+
+def _present_suggestion_title_card(
+    item: dict[str, object],
+    summary: dict[str, object],
+    *,
+    return_to: str,
+    score_key: str,
+    reason_label: str,
+) -> dict[str, object]:
+    return {
+        "tconst": summary.get("tconst"),
+        "title": summary.get("title"),
+        "original_title": summary.get("original_title"),
+        "kind_label": summary.get("kind_label"),
+        "year": summary.get("year"),
+        "imdb_rating": item.get("average_rating"),
+        "poster_url": summary.get("poster_url"),
+        "main_cast_line": summary.get("main_cast_line"),
+        "directed_by_line": summary.get("directed_by_line"),
+        "matched_traits": item.get("matched_traits") or [],
+        "user_lists": [],
+        "detail_url": f"/titles/{summary.get('tconst')}?return_to={quote_plus(return_to)}",
+        "suggestion_score_percent": round(float(item.get(score_key) or 0.0) * 100),
+        "reason_label": reason_label,
+    }
+
+
+def _present_search_title_card_from_summary(
+    summary: dict[str, object],
+    *,
+    match: dict[str, object] | None,
+    return_to: str,
+) -> dict[str, object]:
+    fuzzy_score = match.get("fuzzy_score") if match else None
+    return {
+        "tconst": summary.get("tconst"),
+        "title": summary.get("title"),
+        "original_title": summary.get("original_title"),
+        "kind_label": summary.get("kind_label"),
+        "year": summary.get("year"),
+        "runtime_minutes": summary.get("runtime_minutes"),
+        "genres": summary.get("genres") or [],
+        "imdb_rating": summary.get("imdb_rating"),
+        "imdb_votes": summary.get("imdb_votes"),
+        "poster_url": summary.get("poster_url"),
+        "overview": None,
+        "directed_by_line": summary.get("directed_by_line"),
+        "written_by_line": None,
+        "main_cast_line": summary.get("main_cast_line"),
+        "created_by_line": None,
+        "available_in_czechia": [],
+        "watched_count": 0,
+        "user_lists": [],
+        "user_rating": None,
+        "detail_url": f"/titles/{summary.get('tconst')}?return_to={quote_plus(return_to)}",
+        "is_exact_match": bool(match and match.get("is_exact_match")),
+        "fuzzy_score": fuzzy_score,
+        "fuzzy_score_percent": round(float(fuzzy_score) * 100) if fuzzy_score is not None else None,
+        "match_kind": "Exact" if match and match.get("is_exact_match") else "Closest",
+    }
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -226,28 +289,42 @@ async def suggestions_overview_page(request: Request):
         trail=[{"url": "/", "label": "Home"}],
         label="Suggestions",
     )
+    summary_by_tconst = get_title_card_summaries_for_tconsts(
+        [
+            *(str(item["tconst"]) for item in suggestion_sections["trait_matches"] if item.get("tconst")),
+            *(str(item["tconst"]) for item in suggestion_sections["new_on_imdb"] if item.get("tconst")),
+        ]
+    )
 
     trait_suggestion_cards: list[dict[str, object]] = []
     for item in suggestion_sections["trait_matches"]:
-        presentation = get_title_presentation(str(item["tconst"]))
-        if presentation is None:
+        summary = summary_by_tconst.get(str(item["tconst"]))
+        if summary is None:
             continue
-        card = present_search_result_card(presentation, match=None, return_to=suggestions_return_to)
-        card["matched_traits"] = item.get("matched_traits") or []
-        card["suggestion_score_percent"] = round(float(item.get("total_score") or 0.0) * 100)
-        card["reason_label"] = "Trait match"
-        trait_suggestion_cards.append(card)
+        trait_suggestion_cards.append(
+            _present_suggestion_title_card(
+                item,
+                summary,
+                return_to=suggestions_return_to,
+                score_key="total_score",
+                reason_label="Trait match",
+            )
+        )
 
     new_imdb_cards: list[dict[str, object]] = []
     for item in suggestion_sections["new_on_imdb"]:
-        presentation = get_title_presentation(str(item["tconst"]))
-        if presentation is None:
+        summary = summary_by_tconst.get(str(item["tconst"]))
+        if summary is None:
             continue
-        card = present_search_result_card(presentation, match=None, return_to=suggestions_return_to)
-        card["matched_traits"] = item.get("matched_traits") or []
-        card["suggestion_score_percent"] = round(float(item.get("total_score") or 0.0) * 100)
-        card["reason_label"] = "New on IMDb"
-        new_imdb_cards.append(card)
+        new_imdb_cards.append(
+            _present_suggestion_title_card(
+                item,
+                summary,
+                return_to=suggestions_return_to,
+                score_key="total_score",
+                reason_label="New on IMDb",
+            )
+        )
 
     response = templates.TemplateResponse(
         request,
@@ -320,16 +397,22 @@ async def search_results_page(
                     key=lambda item: float(item.get("fuzzy_score") or 0.0),
                     reverse=True,
                 )
+                alternate_candidates = [
+                    candidate
+                    for candidate in scored_candidates
+                    if candidate["tconst"] != lookup["selected_tconst"]
+                ][:alternate_limit]
+                alternate_summaries = get_title_card_summaries_for_tconsts(
+                    [str(candidate["tconst"]) for candidate in alternate_candidates]
+                )
                 alternate_count = 0
-                for candidate in scored_candidates:
-                    if candidate["tconst"] == lookup["selected_tconst"]:
-                        continue
-                    candidate_presentation = get_title_presentation(candidate["tconst"])
-                    if candidate_presentation is None:
+                for candidate in alternate_candidates:
+                    candidate_summary = alternate_summaries.get(str(candidate["tconst"]))
+                    if candidate_summary is None:
                         continue
                     alternate_results.append(
-                        present_search_result_card(
-                            candidate_presentation,
+                        _present_search_title_card_from_summary(
+                            candidate_summary,
                             match=candidate,
                             return_to=page_return_to,
                         )
@@ -593,16 +676,23 @@ async def trait_suggestions_detail(request: Request, page: int = Query(default=1
         trail=[{"url": "/", "label": "Home"}],
         label="Matches your traits",
     )
+    summary_by_tconst = get_title_card_summaries_for_tconsts(
+        [str(item["tconst"]) for item in page_items if item.get("tconst")]
+    )
     suggestion_cards: list[dict[str, object]] = []
     for item in page_items:
-        presentation = get_title_presentation(str(item["tconst"]))
-        if presentation is None:
+        summary = summary_by_tconst.get(str(item["tconst"]))
+        if summary is None:
             continue
-        card = present_search_result_card(presentation, match=None, return_to=list_return_to)
-        card["matched_traits"] = item.get("matched_traits") or []
-        card["suggestion_score_percent"] = round(float(item.get("total_score") or 0.0) * 100)
-        card["reason_label"] = "Trait match"
-        suggestion_cards.append(card)
+        suggestion_cards.append(
+            _present_suggestion_title_card(
+                item,
+                summary,
+                return_to=list_return_to,
+                score_key="total_score",
+                reason_label="Trait match",
+            )
+        )
 
     response = templates.TemplateResponse(
         request,
@@ -637,43 +727,68 @@ async def genre_signal_detail(request: Request, genre: str):
 
     genre_candidates = get_genre_suggestion_candidates(resolved_genre, limit=24)
     active_traits = genre_candidates["active_traits"]
+    genre_return_to = f"/views/suggestions/genres/{quote_plus(resolved_genre)}"
+
+    evidence_rows = [
+        row
+        for row in [
+            *list(genre_item.get("contributing_titles") or []),
+            *list(genre_item.get("excluded_titles") or []),
+        ]
+        if isinstance(row, dict) and row.get("tconst")
+    ]
+    summary_by_tconst = get_title_card_summaries_for_tconsts(
+        [
+            *(str(row["tconst"]) for row in genre_candidates["items"] if row.get("tconst")),
+            *(str(row["tconst"]) for row in evidence_rows),
+        ]
+    )
+    overview_by_tconst = get_title_overviews_for_tconsts(
+        [str(row["tconst"]) for row in evidence_rows if row.get("tconst")]
+    )
 
     def build_cards(rows: list[dict[str, object]], reason_label: str) -> list[dict[str, object]]:
         cards: list[dict[str, object]] = []
+        watch_stats = fetch_watch_stats_for_tconsts(
+            [str(row["tconst"]) for row in rows if isinstance(row, dict) and row.get("tconst")]
+        )
         for row in rows:
-            tconst = row.get("tconst")
+            if not isinstance(row, dict):
+                continue
+            tconst = str(row.get("tconst") or "").strip()
             if not tconst:
                 continue
-            presentation = get_title_presentation(str(tconst))
-            if presentation is None:
+            summary = summary_by_tconst.get(tconst)
+            if summary is None:
                 continue
-            if (presentation.get("library_state") or {}).get("watched_count"):
+            if (watch_stats.get(tconst) or {}).get("watched_count"):
                 continue
-            card = present_search_result_card(
-                presentation,
-                match=None,
-                return_to=f"/views/suggestions/genres/{quote_plus(resolved_genre)}",
+            card = _present_suggestion_title_card(
+                row,
+                summary,
+                return_to=genre_return_to,
+                score_key="title_affinity",
+                reason_label=reason_label,
             )
-            card["matched_traits"] = match_traits_for_text(str(presentation.get("overview") or ""), active_traits)
-            card["suggestion_score_percent"] = round(float(row.get("title_affinity") or 0.0) * 100)
-            card["reason_label"] = reason_label
+            card["matched_traits"] = match_traits_for_text(overview_by_tconst.get(tconst) or "", active_traits)
             cards.append(card)
         return cards
 
     recommended_cards = []
     for row in genre_candidates["items"]:
-        presentation = get_title_presentation(str(row["tconst"]))
-        if presentation is None:
+        summary = summary_by_tconst.get(str(row["tconst"]))
+        if summary is None:
             continue
-        card = present_search_result_card(
-            presentation,
-            match=None,
-            return_to=f"/views/suggestions/genres/{quote_plus(resolved_genre)}",
+        recommended_cards.append(
+            _present_suggestion_title_card(
+                row,
+                summary,
+                return_to=genre_return_to,
+                score_key="candidate_score",
+                reason_label="Recommend",
+            )
         )
-        card["matched_traits"] = row.get("matched_traits") or []
-        card["suggestion_score_percent"] = round(float(row.get("candidate_score") or 0.0) * 100)
-        card["reason_label"] = "Recommend"
-        recommended_cards.append(card)
+        recommended_cards[-1]["matched_traits"] = row.get("matched_traits") or []
 
     contributing_cards = build_cards(list(genre_item.get("contributing_titles") or []), "Signal evidence")
     excluded_cards = build_cards(list(genre_item.get("excluded_titles") or []), "Weak fit")
@@ -763,6 +878,65 @@ async def imdb_refresh_page(
             "refresh_snapshot": snapshot,
             "format_czech_datetime": format_czech_datetime,
         },
+    )
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    return response
+
+
+@router.get("/system/suggestion-scoring", response_class=HTMLResponse)
+async def suggestion_scoring_page(
+    request: Request,
+    return_to: str | None = Query(default=None),
+    recomputed: int = Query(default=0),
+    error: str | None = Query(default=None),
+):
+    breadcrumb_context = build_breadcrumb_context(
+        request,
+        "Suggestion Scoring",
+        return_to=return_to,
+        default_trail=[{"url": "/", "label": "Home"}],
+    )
+    latest_scores = get_latest_genre_scores(limit=8)
+    response = templates.TemplateResponse(
+        request,
+        "suggestion_scoring.html",
+        {
+            **breadcrumb_context,
+            "return_to": breadcrumb_context["page_return_to"],
+            "recomputed": bool(recomputed),
+            "error_message": str(error or "").strip() or None,
+            "latest_scores": latest_scores,
+            "favorite_genres_count": len(get_favorite_genres(active_only=True)),
+            "favorite_traits_count": len(get_favorite_traits(active_only=True)),
+            "format_czech_datetime": format_czech_datetime,
+        },
+    )
+    return apply_html_cache_headers(response)
+
+
+@router.post("/system/suggestion-scoring/recompute")
+async def suggestion_scoring_recompute(request: Request):
+    form = await request.form()
+    return_to = safe_back_target(str(form.get("return_to") or "")) or "/system/suggestion-scoring"
+    try:
+        compute_and_record_genre_scores(
+            score_scope="default",
+            source_origin="local_app",
+            source_ref="system.suggestion_scoring",
+        )
+    except ValueError as exc:
+        response = RedirectResponse(
+            url=f"/system/suggestion-scoring?{urlencode({'return_to': return_to, 'error': str(exc)})}",
+            status_code=303,
+        )
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        return response
+
+    response = RedirectResponse(
+        url=f"/system/suggestion-scoring?{urlencode({'return_to': return_to, 'recomputed': 1})}",
+        status_code=303,
     )
     response.headers["Cache-Control"] = "no-store, max-age=0"
     response.headers["Pragma"] = "no-cache"
@@ -977,8 +1151,7 @@ async def favorite_traits_save(request: Request):
 async def title_detail_page(request: Request, tconst: str, return_to: str | None = Query(default=None)):
     started_at = perf_counter()
     presentation = get_title_presentation(tconst)
-    detail = get_content_detail(tconst)
-    if presentation is None or detail is None:
+    if presentation is None:
         raise HTTPException(status_code=404, detail="Titul nebyl nalezen.")
 
     signal_metadata_pipeline("title_detail_open", target_tconst=tconst)
@@ -1005,15 +1178,14 @@ async def title_detail_page(request: Request, tconst: str, return_to: str | None
             "title_episode_seasons": present_episode_seasons(presentation.get("episodes") or []),
             "title_main_cast": main_cast,
             "title_main_cast_pending_count": main_cast_pending_count,
-            "title_detail": detail,
             **breadcrumb_context,
             "title_return_to": detail_return_target(f"/titles/{tconst}", parent_return_to),
             "poster_url": presentation.get("poster_url"),
-            "backdrop_url": tmdb_asset_url(detail, "backdrop"),
-            "provider_groups": group_tmdb_providers(detail),
-            "tmdb_details": ((detail.get("tmdb") or {}).get("details") or {}),
+            "backdrop_url": presentation.get("backdrop_url"),
+            "provider_groups": group_tmdb_providers({"tmdb": {"providers": presentation.get("tmdb_providers") or []}}),
+            "tmdb_details": presentation.get("tmdb_details") or {},
             "library_state": presentation.get("library_state") or {},
-            "content_state": detail.get("content_state") or {},
+            "content_state": presentation.get("content_state") or {},
             "title_action_targets": [item for item in get_local_library_status()["visible_lists"] if item.get("item_type") == "list"],
             "background_fetch_pending": background_fetch_pending,
             "format_czech_datetime": format_czech_datetime,
@@ -1027,23 +1199,23 @@ async def title_detail_page(request: Request, tconst: str, return_to: str | None
 
 @router.get("/titles/{tconst}/main-cast", response_class=HTMLResponse)
 async def title_main_cast_partial(request: Request, tconst: str, return_to: str | None = Query(default=None)):
-    presentation = get_title_presentation(tconst)
-    if presentation is None:
+    people_panel = get_title_people_panel(tconst)
+    if people_panel is None:
         raise HTTPException(status_code=404, detail="Titul nebyl nalezen.")
 
-    main_cast = present_main_cast(presentation.get("main_cast") or [])
+    main_cast = present_main_cast(people_panel.get("main_cast") or [])
     launch_person_presentation_warmup(main_cast)
     launch_person_portrait_warmup(main_cast)
     response = templates.TemplateResponse(
         request,
         "_title_main_cast.html",
         {
-            "title_item": presentation,
+            "title_item": {"tconst": people_panel["tconst"]},
             "title_main_cast": main_cast,
             "title_main_cast_pending_count": count_missing_portraits(main_cast),
             "title_return_to": detail_return_target(
                 f"/titles/{tconst}",
-                return_to or build_breadcrumb_target(f"/titles/{tconst}", label=str(presentation["title"])),
+                return_to or build_breadcrumb_target(f"/titles/{tconst}", label="Title detail"),
             ),
         },
     )

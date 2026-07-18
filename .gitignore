@@ -16,6 +16,8 @@ __pycache__/
 .idea/
 .playwright-cli/
 .playwright-mcp/
+.playwright-local/
+node_modules/
 
 # local databases and exports
 data/filmy.duckdb

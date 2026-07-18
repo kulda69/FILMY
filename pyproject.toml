@@ -20,3 +20,11 @@ filmy-jobs-status = "filmy.scripts.background_jobs_status:main"
 filmy-sync-plex = "filmy.scripts.sync_plex:main"
 filmy-inspect-plex = "filmy.scripts.inspect_plex:main"
 filmy-probe-plex = "filmy.scripts.probe_plex_import:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

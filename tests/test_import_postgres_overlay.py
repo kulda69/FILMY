@@ -59,27 +59,16 @@ class ImportPostgresOverlayTests(unittest.TestCase):
                 return_value={"id": "b1", "status": "previewed"},
             ),
             patch(
-                "filmy.db.fetch_resolved_import_rows",
-                return_value=[
-                    {
-                        "id": "r1",
-                        "source": "netflix",
-                        "parsed_watched_on": "2026-07-10",
-                        "resolved_tconst": "tt1",
-                        "parsed_season_number": None,
-                        "parsed_episode_number": None,
-                    }
-                ],
-            ),
-            patch("filmy.db.fetch_existing_import_commits", return_value=set()),
-            patch("filmy.db.insert_import_watch_event") as insert_event,
-            patch("filmy.db.mark_import_batch_committed") as mark_committed,
+                "filmy.db.commit_import_batch_postgres",
+                return_value={"inserted_events": 1, "skipped_events": 0, "batch_status": "committed"},
+            ) as commit_batch,
         ):
             result = db.commit_import_batch("b1")
 
-        insert_event.assert_called_once()
-        mark_committed.assert_called_once_with("b1")
+        commit_batch.assert_called_once()
         self.assertEqual(result["committed"], 1)
+        self.assertEqual(result["skipped"], 0)
+        self.assertEqual(result["status"], "committed")
 
 
 if __name__ == "__main__":

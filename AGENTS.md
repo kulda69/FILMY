@@ -14,6 +14,8 @@ Technické prostředí
 - Bez Reactu a složitých abstrakcí — jednoduchá, čitelná řešení.
 - Lokálně může běžet Ollama (modely nomic-embed-text pro embeddingy, qwen3:14b pro generování).
 - Appka se spouští jako desktopová přes Brave/Chrome app mód, případně později pywebview.
+- DuckDB větve už neaktualizovat o nové funkce ani nové schéma. Cílový směr je PostgreSQL-only; zbylý DuckDB kód pouze inventarizovat, držet bez dalšího rozvoje nebo plánovaně odstranit.
+- `API_ENDPOINTY.md` je živý kontrakt pro navazující projekty. Při přidání, změně nebo upřesnění veřejného/navazujícího endpointu ho průběžně aktualizovat.
 
 Pracovní styl
 

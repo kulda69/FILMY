@@ -44,6 +44,70 @@ LEGACY_RUNTIME_TABLES = (
     "content_state",
     "user_people",
 )
+OPTIONAL_RUNTIME_VIEWS = (
+    "latest_title_posters",
+    "catalog_title_cards",
+    "watched_display_rollup",
+    "active_user_list_display_items",
+)
+OPTIONAL_RUNTIME_TRIGGERS = (
+    "user_lists.trg_user_lists_touch_updated_at",
+    "user_list_items.trg_user_list_items_touch_updated_at",
+    "user_ratings.trg_user_ratings_touch_updated_at",
+    "user_people.trg_user_people_touch_updated_at",
+    "favorite_genres.trg_favorite_genres_touch_updated_at",
+    "favorite_traits.trg_favorite_traits_touch_updated_at",
+)
+APP_READ_ONLY_RELATIONS = (
+    "catalog_titles",
+    "catalog_episodes",
+    "title_aliases",
+    "catalog_people",
+    "title_credits",
+    "title_alias_lookup",
+    "title_lookup",
+    "person_lookup",
+    "latest_title_posters",
+    "catalog_title_cards",
+    "watched_display_rollup",
+    "active_user_list_display_items",
+)
+CATALOG_APP_TABLES = (
+    "catalog_titles",
+    "catalog_episodes",
+    "title_aliases",
+    "catalog_people",
+    "title_credits",
+    "title_alias_lookup",
+    "title_lookup",
+    "person_lookup",
+)
+RAW_READ_ONLY_RELATIONS = (
+    "title_episode",
+    "title_principals",
+)
+OLD_RUNTIME_TABLES = (
+    "trakt_sync_runs",
+    "trakt_sync_files",
+    "trakt_history_events",
+    "trakt_ratings",
+    "trakt_lists",
+    "trakt_list_items",
+    "trakt_collection_items",
+    "trakt_history_snapshot",
+    "trakt_ratings_snapshot",
+    "trakt_list_items_snapshot",
+    "trakt_collection_snapshot",
+    "imdb_list_sync_runs",
+    "imdb_watchlist_items",
+    "imdb_favorite_people",
+    "plex_sync_runs",
+    "plex_library_items",
+)
+ALLOWED_FUNCTION_EXECUTE_PRIVILEGES = (
+    "app.normalize_match_key",
+    "app.alias_priority",
+)
 
 TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
     "imdb_file_manifest": (
@@ -95,8 +159,8 @@ TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
     "user_ratings": (
         "canonical_key", "tconst", "media_type", "imdb_id", "tmdb_id",
         "trakt_id", "parent_tconst", "parent_title", "title", "season_number",
-        "episode_number", "rating", "rated_at", "source_origin", "source_ref",
-        "created_at", "updated_at",
+        "episode_number", "rating", "liked_notes", "disliked_notes", "rated_at",
+        "source_origin", "source_ref", "created_at", "updated_at",
     ),
     "content_state": (
         "tconst", "interest_state", "last_previewed_at", "last_watched_at", "updated_at",
@@ -222,6 +286,7 @@ EXPECTED_COLUMNS: dict[str, tuple[tuple[str, str, bool, str], ...]] = {
         ("parent_tconst", "text", False, ""), ("parent_title", "text", False, ""),
         ("title", "text", False, ""), ("season_number", "integer", False, ""),
         ("episode_number", "integer", False, ""), ("rating", "smallint", True, ""),
+        ("liked_notes", "text", False, ""), ("disliked_notes", "text", False, ""),
         ("rated_at", "timestamp without time zone", False, ""),
         ("source_origin", "text", True, ""), ("source_ref", "text", False, ""),
         ("created_at", "timestamp without time zone", True, ""),
@@ -302,9 +367,15 @@ EXPECTED_CONSTRAINTS = (
     ("user_list_items", "user_list_items_pkey", "p", "id", False, False, True),
     ("user_list_items", "user_list_items_list_id_canonical_key_key", "u", "list_id,canonical_key", False, False, True),
     ("watch_events", "watch_events_pkey", "p", "id", False, False, True),
+    ("watch_events", "watch_events_batch_import_row_key", "u", "batch_id,import_row_id", False, False, True),
+    ("watch_events", "watch_events_event_scope_check", "c", "CHECK (event_scope = ANY (ARRAY['title'::text, 'episode'::text]))", False, False, True),
+    ("watch_events", "watch_events_rating_check", "c", "CHECK (rating IS NULL OR rating >= 1 AND rating <= 10)", False, False, True),
     ("user_ratings", "user_ratings_pkey", "p", "canonical_key", False, False, True),
+    ("user_ratings", "user_ratings_rating_check", "c", "CHECK (rating >= 1 AND rating <= 10)", False, False, True),
     ("content_state", "content_state_pkey", "p", "tconst", False, False, True),
+    ("content_state", "content_state_interest_state_check", "c", "CHECK (interest_state = ANY (ARRAY['previewed'::text, 'in_progress'::text, 'watched'::text]))", False, False, True),
     ("user_people", "user_people_pkey", "p", "person_key", False, False, True),
+    ("user_people", "user_people_affinity_rating_check", "c", "CHECK (affinity_rating IS NULL OR affinity_rating >= 0 AND affinity_rating <= 10)", False, False, True),
     ("favorite_genres", "favorite_genres_pkey", "p", "genre", False, False, True),
     ("favorite_traits", "favorite_traits_pkey", "p", "trait", False, False, True),
     ("genre_scores", "genre_scores_pkey", "p", "id", False, False, True),
@@ -328,6 +399,7 @@ EXPECTED_INDEXES = (
     ("user_list_items", "idx_user_list_items_list_active", False, False, True, True, "btree", "list_id,is_archived,rank", "text_ops,bool_ops,int4_ops", "default,,", "0,0,0"),
     ("user_list_items", "idx_user_list_items_tconst", False, False, True, True, "btree", "tconst", "text_ops", "default", "0"),
     ("watch_events", "watch_events_pkey", True, True, True, True, "btree", "id", "text_ops", "default", "0"),
+    ("watch_events", "watch_events_batch_import_row_key", True, False, True, True, "btree", "batch_id,import_row_id", "text_ops,text_ops", "default,default", "0,0"),
     ("watch_events", "idx_watch_events_tconst_watched", False, False, True, True, "btree", "tconst,watched_on", "text_ops,date_ops", "default,", "0,3"),
     ("user_ratings", "user_ratings_pkey", True, True, True, True, "btree", "canonical_key", "text_ops", "default", "0"),
     ("user_ratings", "idx_user_ratings_tconst", False, False, True, True, "btree", "tconst", "text_ops", "default", "0"),
@@ -546,12 +618,24 @@ COPY (
     }
     expected = set(TABLE_COLUMNS)
     legacy_expected = set(LEGACY_RUNTIME_TABLES)
+    allowed_catalog_tables = set(CATALOG_APP_TABLES)
     if not relations:
         return "fresh"
-    if tables == expected:
+    views = {
+        line.split(",", 1)[0].strip('"')
+        for line in relations
+        if line.rsplit(",", 1)[-1].strip('"') == "v"
+    }
+    if not views.issubset(set(OPTIONAL_RUNTIME_VIEWS)):
+        extras = sorted(views - set(OPTIONAL_RUNTIME_VIEWS))
+        raise RuntimeError(
+            "Cílové app schéma je před 002 částečné nebo obsahuje cizí relace; "
+            f"neočekávané views={extras}, relace={relations[:20]}"
+        )
+    if not (expected - tables) and not (tables - expected - allowed_catalog_tables):
         verify_schema_fingerprint(config)
         return "existing"
-    if tables == legacy_expected:
+    if not (legacy_expected - tables) and not (tables - legacy_expected - allowed_catalog_tables):
         verify_schema_fingerprint(config, tables_override=LEGACY_RUNTIME_TABLES)
         return "legacy-runtime"
     missing = sorted(expected - tables)
@@ -631,6 +715,13 @@ expected_columns(table_name,position,column_name,data_type,not_null,default_expr
     SELECT c.relname::text AS table_name
     FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
     WHERE n.nspname='app' AND c.relkind='r' AND c.relpersistence='p'
+      AND c.relname IN ({', '.join(_sql_literal(table) for table in table_names)})
+), expected_optional_views(view_name) AS (
+    VALUES {_values_sql([(name,) for name in OPTIONAL_RUNTIME_VIEWS])}
+), actual_views AS (
+    SELECT c.relname::text AS view_name
+    FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+    WHERE n.nspname='app' AND c.relkind='v'
 ), actual_columns AS (
     SELECT c.relname::text, a.attnum::integer, a.attname::text,
            format_type(a.atttypid,a.atttypmod), a.attnotnull,
@@ -639,17 +730,23 @@ expected_columns(table_name,position,column_name,data_type,not_null,default_expr
     JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped
     LEFT JOIN pg_attrdef d ON d.adrelid=c.oid AND d.adnum=a.attnum
     WHERE n.nspname='app' AND c.relkind='r'
+      AND c.relname IN ({', '.join(_sql_literal(table) for table in table_names)})
 ), actual_constraints AS (
     SELECT c.relname::text, con.conname::text, con.contype::text,
-           string_agg(a.attname::text, ',' ORDER BY keys.ordinality),
+           CASE
+               WHEN con.contype = 'c' THEN pg_get_constraintdef(con.oid, true)
+               ELSE string_agg(a.attname::text, ',' ORDER BY keys.ordinality)
+           END,
            con.condeferrable, con.condeferred, con.convalidated
     FROM pg_constraint con JOIN pg_class c ON c.oid=con.conrelid
     JOIN pg_namespace n ON n.oid=c.relnamespace
-    CROSS JOIN LATERAL unnest(con.conkey) WITH ORDINALITY keys(attnum,ordinality)
-    JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum=keys.attnum
+    LEFT JOIN LATERAL unnest(con.conkey) WITH ORDINALITY keys(attnum,ordinality)
+        ON con.contype <> 'c'
+    LEFT JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum=keys.attnum
     WHERE n.nspname='app' AND c.relkind='r'
+      AND c.relname IN ({', '.join(_sql_literal(table) for table in table_names)})
     GROUP BY c.relname,con.conname,con.contype,con.condeferrable,
-             con.condeferred,con.convalidated
+             con.condeferred,con.convalidated,con.oid
 ), actual_indexes AS (
     SELECT c.relname::text, ci.relname::text, i.indisunique, i.indisprimary,
            i.indisvalid, i.indisready, am.amname::text,
@@ -668,6 +765,7 @@ expected_columns(table_name,position,column_name,data_type,not_null,default_expr
     JOIN pg_opclass opc ON opc.oid=keys.opclass
     LEFT JOIN pg_collation coll ON coll.oid=keys.collation_oid
     WHERE n.nspname='app' AND c.relkind='r' AND i.indexprs IS NULL
+      AND c.relname IN ({', '.join(_sql_literal(table) for table in table_names)})
       AND i.indpred IS NULL AND i.indnkeyatts=i.indnatts
       AND keys.ordinality<=i.indnkeyatts
     GROUP BY c.relname,ci.relname,i.indisunique,i.indisprimary,i.indisvalid,
@@ -676,6 +774,12 @@ expected_columns(table_name,position,column_name,data_type,not_null,default_expr
     SELECT 'table missing/extra: ' || table_name FROM (
         (SELECT * FROM expected_tables EXCEPT SELECT * FROM actual_tables)
         UNION ALL (SELECT * FROM actual_tables EXCEPT SELECT * FROM expected_tables)
+    ) q
+    UNION ALL
+    SELECT 'unexpected view object: ' || view_name FROM (
+        SELECT * FROM actual_views
+        EXCEPT
+        SELECT * FROM expected_optional_views
     ) q
     UNION ALL SELECT 'column missing/extra/drift: ' || row_to_json(q)::text FROM (
         (SELECT * FROM expected_columns EXCEPT SELECT * FROM actual_columns)
@@ -694,9 +798,16 @@ expected_columns(table_name,position,column_name,data_type,not_null,default_expr
     FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
     WHERE n.nspname='app' AND c.relkind='r' AND c.relowner<>current_user::regrole
     UNION ALL
+    SELECT 'unexpected view owner: ' || c.relname || '=' || pg_get_userbyid(c.relowner)
+    FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+    WHERE n.nspname='app' AND c.relkind='v'
+      AND c.relname IN ({', '.join(_sql_literal(name) for name in OPTIONAL_RUNTIME_VIEWS)})
+      AND c.relowner<>current_user::regrole
+    UNION ALL
     SELECT 'table security/persistence drift: ' || c.relname
     FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
     WHERE n.nspname='app' AND c.relkind='r'
+      AND c.relname IN ({', '.join(_sql_literal(table) for table in table_names)})
       AND (c.relpersistence<>'p' OR c.relrowsecurity OR c.relforcerowsecurity)
     UNION ALL
     SELECT 'unexpected row security policy: ' || c.relname || '.' || p.polname
@@ -705,22 +816,28 @@ expected_columns(table_name,position,column_name,data_type,not_null,default_expr
     UNION ALL
     SELECT 'unexpected relation object: ' || c.relname || ' (' || c.relkind || ')'
     FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-    WHERE n.nspname='app' AND c.relkind NOT IN ('r','i')
+    WHERE n.nspname='app' AND (
+        c.relkind NOT IN ('r','i','v')
+        OR (c.relkind='v' AND c.relname NOT IN ({', '.join(_sql_literal(name) for name in OPTIONAL_RUNTIME_VIEWS)}))
+    )
     UNION ALL
     SELECT 'unexpected trigger: ' || c.relname || '.' || t.tgname
     FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid
     JOIN pg_namespace n ON n.oid=c.relnamespace
     WHERE n.nspname='app' AND NOT t.tgisinternal
+      AND (c.relname || '.' || t.tgname) NOT IN ({', '.join(_sql_literal(name) for name in OPTIONAL_RUNTIME_TRIGGERS)})
     UNION ALL
     SELECT 'unsupported/extra constraint: ' || c.relname || '.' || con.conname
     FROM pg_constraint con JOIN pg_class c ON c.oid=con.conrelid
     JOIN pg_namespace n ON n.oid=c.relnamespace
-    WHERE n.nspname='app' AND (con.contype NOT IN ('p','u') OR con.conkey IS NULL)
+    WHERE n.nspname='app' AND c.relname IN ({', '.join(_sql_literal(table) for table in table_names)})
+      AND con.contype NOT IN ('p','u','c')
     UNION ALL
     SELECT 'expression/partial/include/non-permanent index is forbidden: ' || c.relname || '.' || ci.relname
     FROM pg_index i JOIN pg_class c ON c.oid=i.indrelid
     JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_class ci ON ci.oid=i.indexrelid
-    WHERE n.nspname='app' AND (i.indexprs IS NOT NULL OR i.indpred IS NOT NULL
+    WHERE n.nspname='app' AND c.relname IN ({', '.join(_sql_literal(table) for table in table_names)})
+      AND (i.indexprs IS NOT NULL OR i.indpred IS NOT NULL
           OR i.indnkeyatts<>i.indnatts OR ci.relpersistence<>'p')
 )
 SELECT detail FROM violations ORDER BY detail
@@ -744,6 +861,37 @@ def _duckdb_csv_literal(path: Path) -> str:
     return "'" + path.as_posix().replace("'", "''") + "'"
 
 
+DUCKDB_OPTIONAL_SOURCE_COLUMNS: dict[str, dict[str, str]] = {
+    "user_ratings": {
+        "liked_notes": "CAST(NULL AS VARCHAR)",
+        "disliked_notes": "CAST(NULL AS VARCHAR)",
+    }
+}
+
+
+def _duckdb_table_columns(connection: duckdb.DuckDBPyConnection, table: str) -> set[str]:
+    rows = connection.execute(f"PRAGMA table_info('app.{table}')").fetchall()
+    return {str(row[1]) for row in rows}
+
+
+def _duckdb_select_list(
+    connection: duckdb.DuckDBPyConnection,
+    table: str,
+    columns: tuple[str, ...],
+) -> str:
+    available_columns = _duckdb_table_columns(connection, table)
+    optional_columns = DUCKDB_OPTIONAL_SOURCE_COLUMNS.get(table, {})
+    expressions: list[str] = []
+    for column in columns:
+        if column in available_columns:
+            expressions.append(column)
+        elif column in optional_columns:
+            expressions.append(f"{optional_columns[column]} AS {column}")
+        else:
+            raise RuntimeError(f"DuckDB zdrojova tabulka app.{table} nema ocekavany sloupec {column}.")
+    return ", ".join(expressions)
+
+
 def export_source(directory: Path) -> SourceSnapshot:
     """Exportuje konzistentni read-only snapshot app-state tabulek do CSV."""
 
@@ -756,7 +904,7 @@ def export_source(directory: Path) -> SourceSnapshot:
                 counts[table] = connection.execute(
                     f"SELECT count(*) FROM app.{table}"
                 ).fetchone()[0]
-                column_sql = ", ".join(columns)
+                column_sql = _duckdb_select_list(connection, table, columns)
                 path = directory / f"{table}.csv"
                 connection.execute(
                     f"COPY (SELECT {column_sql} FROM app.{table}) "
@@ -764,8 +912,9 @@ def export_source(directory: Path) -> SourceSnapshot:
                     "(FORMAT CSV, HEADER TRUE, NULL '\\N')"
                 )
                 sample_columns = SAMPLE_COLUMNS[table]
+                sample_sql = _duckdb_select_list(connection, table, sample_columns)
                 sample = connection.execute(
-                    f"SELECT {', '.join(sample_columns)} FROM app.{table} "
+                    f"SELECT {sample_sql} FROM app.{table} "
                     f"ORDER BY {sample_columns[0]} LIMIT 1"
                 ).fetchone()
                 if sample is not None:
@@ -907,36 +1056,72 @@ def verify_role(admin: ConnectionConfig, app: ConnectionConfig) -> None:
     target_admin = ConnectionConfig(
         admin.psql, admin.host, admin.port, TARGET_DATABASE, admin.user, admin.password
     )
-    table_privileges = [
-        (table, privilege)
+    relation_privileges = [
+        ("app", table, privilege)
         for table in TABLE_COLUMNS
         for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE")
     ]
+    relation_privileges.extend(
+        ("app", relation, "SELECT")
+        for relation in APP_READ_ONLY_RELATIONS
+    )
+    relation_privileges.extend(
+        ("raw", relation, "SELECT")
+        for relation in RAW_READ_ONLY_RELATIONS
+    )
+    relation_privileges.extend(
+        ("old", table, privilege)
+        for table in OLD_RUNTIME_TABLES
+        for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE")
+    )
     owner_privileges = [
-        (table, admin.user, privilege)
+        ("app", table, admin.user, privilege)
         for table in TABLE_COLUMNS
         for privilege in (
             "SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"
         )
     ]
-    exact_table_acl = owner_privileges + [
-        (table, APP_ROLE, privilege) for table, privilege in table_privileges
+    owner_privileges.extend(
+        ("app", relation, admin.user, privilege)
+        for relation in APP_READ_ONLY_RELATIONS
+        for privilege in (
+            "SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"
+        )
+    )
+    owner_privileges.extend(
+        ("raw", relation, admin.user, privilege)
+        for relation in RAW_READ_ONLY_RELATIONS
+        for privilege in (
+            "SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"
+        )
+    )
+    owner_privileges.extend(
+        ("old", table, admin.user, privilege)
+        for table in OLD_RUNTIME_TABLES
+        for privilege in (
+            "SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"
+        )
+    )
+    exact_relation_acl = owner_privileges + [
+        (schema_name, relation_name, APP_ROLE, privilege)
+        for schema_name, relation_name, privilege in relation_privileges
     ]
     role_state = _psql(
         target_admin,
         sql=f"""
 COPY (
-WITH expected_table_privileges(table_name,privilege_type) AS (
-    VALUES {_values_sql(table_privileges)}
-), expected_table_acl(table_name,grantee,privilege_type) AS (
-    VALUES {_values_sql(exact_table_acl)}
-), actual_table_acl AS (
-    SELECT c.relname::text,
+WITH expected_relation_privileges(schema_name,relation_name,privilege_type) AS (
+    VALUES {_values_sql(relation_privileges)}
+), expected_relation_acl(schema_name,relation_name,grantee,privilege_type) AS (
+    VALUES {_values_sql(exact_relation_acl)}
+), actual_relation_acl AS (
+    SELECT n.nspname::text,
+           c.relname::text,
            CASE WHEN acl.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(acl.grantee)::text END,
            acl.privilege_type::text
     FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace,
          LATERAL aclexplode(c.relacl) acl
-    WHERE n.nspname='app' AND c.relkind='r'
+    WHERE n.nspname IN ('app', 'raw', 'old') AND c.relkind IN ('r', 'v')
 ), violations(detail) AS (
     SELECT 'role missing or cluster flags/INHERIT not locked down'
     WHERE NOT EXISTS (
@@ -962,31 +1147,32 @@ WITH expected_table_privileges(table_name,privilege_type) AS (
     SELECT 'schema privilege drift: ' || n.nspname || ':' || acl.privilege_type
     FROM pg_namespace n, LATERAL aclexplode(n.nspacl) acl
     WHERE acl.grantee='filmy_app'::regrole
-      AND NOT (n.nspname='app' AND acl.privilege_type='USAGE')
+      AND NOT (n.nspname IN ('app', 'raw', 'old') AND acl.privilege_type='USAGE')
     UNION ALL
     SELECT 'app USAGE missing' WHERE NOT has_schema_privilege('filmy_app','app','USAGE')
     UNION ALL
+    SELECT 'raw USAGE missing' WHERE NOT has_schema_privilege('filmy_app','raw','USAGE')
+    UNION ALL
+    SELECT 'old USAGE missing' WHERE NOT has_schema_privilege('filmy_app','old','USAGE')
+    UNION ALL
     SELECT 'schema CREATE unexpectedly allowed: ' || name
-    FROM (VALUES ('app'),('old'),('public')) schemas(name)
+    FROM (VALUES ('app'),('raw'),('old'),('public')) schemas(name)
     WHERE has_schema_privilege('filmy_app',name,'CREATE')
     UNION ALL
-    SELECT 'old schema USAGE unexpectedly allowed'
-    WHERE has_schema_privilege('filmy_app','old','USAGE')
-    UNION ALL
-    SELECT 'table ACL missing/extra: ' || table_name || ':' || grantee || ':' || privilege_type FROM (
-        (SELECT * FROM expected_table_acl EXCEPT SELECT * FROM actual_table_acl)
+    SELECT 'table ACL missing/extra: ' || schema_name || '.' || relation_name || ':' || grantee || ':' || privilege_type FROM (
+        (SELECT * FROM expected_relation_acl EXCEPT SELECT * FROM actual_relation_acl)
         UNION ALL
-        (SELECT * FROM actual_table_acl EXCEPT SELECT * FROM expected_table_acl)
+        (SELECT * FROM actual_relation_acl EXCEPT SELECT * FROM expected_relation_acl)
     ) q
     UNION ALL
-    SELECT 'required table privilege ineffective: ' || table_name || ':' || privilege_type
-    FROM expected_table_privileges
-    WHERE NOT has_table_privilege('filmy_app','app.' || table_name,privilege_type)
+    SELECT 'required table privilege ineffective: ' || schema_name || '.' || relation_name || ':' || privilege_type
+    FROM expected_relation_privileges
+    WHERE NOT has_table_privilege('filmy_app', schema_name || '.' || relation_name, privilege_type)
     UNION ALL
-    SELECT 'forbidden table privilege effective: ' || table_name || ':' || privilege_type
+    SELECT 'forbidden table privilege effective: ' || schema_name || '.' || relation_name || ':' || privilege_type
     FROM (VALUES ('TRUNCATE'),('REFERENCES'),('TRIGGER')) forbidden(privilege_type)
-    CROSS JOIN (SELECT table_name FROM expected_table_privileges GROUP BY table_name) tables
-    WHERE has_table_privilege('filmy_app','app.' || table_name,privilege_type)
+    CROSS JOIN (SELECT schema_name, relation_name FROM expected_relation_privileges GROUP BY schema_name, relation_name) relations
+    WHERE has_table_privilege('filmy_app', schema_name || '.' || relation_name, privilege_type)
     UNION ALL
     SELECT 'default privilege for PUBLIC/filmy_app is forbidden: ' ||
            CASE WHEN acl.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(acl.grantee)::text END
@@ -1023,11 +1209,27 @@ WITH expected_table_privileges(table_name,privilege_type) AS (
           n.nspname='app' AND c.relname IN ({', '.join(_sql_literal(table) for table in TABLE_COLUMNS)})
           AND acl.privilege_type IN ('SELECT','INSERT','UPDATE','DELETE')
       )
+      AND NOT (
+          n.nspname='app' AND c.relname IN ({', '.join(_sql_literal(name) for name in APP_READ_ONLY_RELATIONS)})
+          AND acl.privilege_type = 'SELECT'
+      )
+      AND NOT (
+          n.nspname='raw' AND c.relname IN ({', '.join(_sql_literal(name) for name in RAW_READ_ONLY_RELATIONS)})
+          AND acl.privilege_type = 'SELECT'
+      )
+      AND NOT (
+          n.nspname='old' AND c.relname IN ({', '.join(_sql_literal(name) for name in OLD_RUNTIME_TABLES)})
+          AND acl.privilege_type IN ('SELECT','INSERT','UPDATE','DELETE')
+      )
     UNION ALL
     SELECT 'unexpected function privilege: ' || n.nspname || '.' || p.proname || ':' || acl.privilege_type
     FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace,
          LATERAL aclexplode(p.proacl) acl
     WHERE acl.grantee='filmy_app'::regrole
+      AND NOT (
+          (n.nspname || '.' || p.proname) IN ({', '.join(_sql_literal(name) for name in ALLOWED_FUNCTION_EXECUTE_PRIVILEGES)})
+          AND acl.privilege_type = 'EXECUTE'
+      )
     UNION ALL
     SELECT 'unexpected type privilege: ' || n.nspname || '.' || t.typname || ':' || acl.privilege_type
     FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace,

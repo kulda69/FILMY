@@ -89,15 +89,48 @@ class RuntimePostgresTests(unittest.TestCase):
     def test_fetch_latest_ratings_for_tconsts(self, connect_mock) -> None:
         cursor = MagicMock()
         cursor.fetchall.return_value = [
-            ("tt1", 8, datetime(2026, 7, 11, 21, 15, 0), datetime(2026, 7, 11, 21, 15, 0)),
-            ("tt2", 6, None, datetime(2026, 7, 10, 10, 0, 0)),
+            ("tt1", 8, "silna atmosfera", "pomalejsi konec", datetime(2026, 7, 11, 21, 15, 0), datetime(2026, 7, 11, 21, 15, 0)),
+            ("tt2", 6, None, None, None, datetime(2026, 7, 10, 10, 0, 0)),
         ]
         conn = MagicMock()
         conn.cursor.return_value.__enter__.return_value = cursor
         connect_mock.return_value.__enter__.return_value = conn
         result = runtime_postgres.fetch_latest_ratings_for_tconsts(["tt1", "tt2"])
         self.assertEqual(result["tt1"]["rating"], 8)
+        self.assertEqual(result["tt1"]["liked_notes"], "silna atmosfera")
+        self.assertEqual(result["tt1"]["disliked_notes"], "pomalejsi konec")
         self.assertEqual(result["tt2"]["updated_at"], datetime(2026, 7, 10, 10, 0, 0))
+
+    def test_row_to_user_rating_includes_taste_notes(self) -> None:
+        row = [
+            "movie|tt1",
+            "tt1",
+            9,
+            "tempo a herci",
+            "malo civilni konec",
+            "2026-07-18 12:00:00",
+            "2026-07-18 12:05:00",
+        ]
+        result = runtime_postgres._row_to_user_rating(row)
+        self.assertEqual(result["liked_notes"], "tempo a herci")
+        self.assertEqual(result["disliked_notes"], "malo civilni konec")
+
+    @patch("filmy.runtime_postgres._connect")
+    def test_fetch_library_summary_snapshot_includes_rating_notes(self, connect_mock) -> None:
+        cursor = MagicMock()
+        cursor.fetchone.side_effect = [
+            (0, None),
+            (False,),
+            (8, "dobry svet", "dlouhe sceny", datetime(2026, 7, 18, 15, 40, 0)),
+        ]
+        cursor.fetchall.return_value = []
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cursor
+        connect_mock.return_value.__enter__.return_value = conn
+        result = runtime_postgres.fetch_library_summary_snapshot("tt5464086", "tvSeries")
+        self.assertEqual(result["rating"]["value"], 8)
+        self.assertEqual(result["rating"]["liked_notes"], "dobry svet")
+        self.assertEqual(result["rating"]["disliked_notes"], "dlouhe sceny")
 
     @patch("filmy.runtime_postgres._connect")
     def test_fetch_watch_stats_for_tconsts(self, connect_mock) -> None:

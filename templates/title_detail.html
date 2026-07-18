@@ -9,6 +9,9 @@
 {% set user_rating_full_stars = user_rating_value // 2 %}
 {% set user_rating_has_half_star = user_rating_value % 2 == 1 %}
 {% set user_rating_empty_stars = 5 - user_rating_full_stars - (1 if user_rating_has_half_star else 0) %}
+{% set liked_notes = library_state.rating.liked_notes if library_state and library_state.rating else none %}
+{% set disliked_notes = library_state.rating.disliked_notes if library_state and library_state.rating else none %}
+{% set has_rating_notes = liked_notes or disliked_notes %}
 
 <section class="mb-4">
     <div class="card bg-black border-secondary-subtle overflow-hidden">
@@ -64,7 +67,7 @@
                                 popovertarget="{{ title_menu_id }}"
                                 aria-label="Item actions for {{ title_item.title }}"
                             >...</button>
-                            <div id="{{ title_menu_id }}" popover class="card-menu-panel">
+                            <div id="{{ title_menu_id }}" popover class="card-menu-panel" style="width: min(92vw, 34rem);">
                                 <div class="card-menu-view" data-menu-view="root">
                                     <form action="/ui/list-actions/watched" method="post" class="m-0">
                                         <input type="hidden" name="tconst" value="{{ title_item.tconst }}">
@@ -83,6 +86,14 @@
                                         <span class="text-secondary">›</span>
                                         {% endif %}
                                     </button>
+                                    <button
+                                        type="button"
+                                        class="card-menu-item d-flex justify-content-between align-items-center"
+                                        data-menu-open="rating-notes"
+                                    >
+                                        <span>{{ "Upravit slovní hodnocení" if has_rating_notes else "Přidat slovní hodnocení" }}</span>
+                                        <span class="text-secondary">›</span>
+                                    </button>
                                     {% if title_action_targets %}
                                     <div class="border-top border-secondary-subtle my-1"></div>
                                     <button
@@ -94,6 +105,35 @@
                                         <span class="text-secondary">›</span>
                                     </button>
                                     {% endif %}
+                                </div>
+
+                                <div class="card-menu-view d-none" data-menu-view="rating-notes">
+                                    <button type="button" class="card-menu-item d-flex align-items-center gap-2" data-menu-back>
+                                        <span class="text-secondary">‹</span>
+                                        <span>Back</span>
+                                    </button>
+                                    <div class="card-menu-label">Slovní hodnocení</div>
+                                    <form action="/ui/list-actions/rating-notes" method="post" class="m-0 px-2 pb-2">
+                                        <input type="hidden" name="tconst" value="{{ title_item.tconst }}">
+                                        <input type="hidden" name="return_to" value="{{ title_return_to }}">
+                                        {% if user_rating_value > 0 %}
+                                        <input type="hidden" name="rating" value="{{ user_rating_value }}">
+                                        <div class="small text-secondary mb-2">Číselný rating zůstane {{ user_rating_value }}/10.</div>
+                                        {% else %}
+                                        <label class="form-label small text-secondary mb-1" for="rating-notes-rating-{{ title_item.tconst }}">Číselný rating</label>
+                                        <select id="rating-notes-rating-{{ title_item.tconst }}" name="rating" class="form-select form-select-sm bg-body text-light border-secondary-subtle mb-3" required>
+                                            <option value="">Vyber rating</option>
+                                            {% for rating_value in range(10, 0, -1) %}
+                                            <option value="{{ rating_value }}">{{ rating_value }}/10 · {{ "%.1f"|format(rating_value / 2) }}★</option>
+                                            {% endfor %}
+                                        </select>
+                                        {% endif %}
+                                        <label class="form-label small text-secondary mb-1" for="liked-notes-{{ title_item.tconst }}">Klady Markdown</label>
+                                        <textarea id="liked-notes-{{ title_item.tconst }}" name="liked_notes" class="form-control bg-body text-light border-secondary-subtle mb-3" rows="4">{{ liked_notes or "" }}</textarea>
+                                        <label class="form-label small text-secondary mb-1" for="disliked-notes-{{ title_item.tconst }}">Zápory Markdown</label>
+                                        <textarea id="disliked-notes-{{ title_item.tconst }}" name="disliked_notes" class="form-control bg-body text-light border-secondary-subtle mb-3" rows="4">{{ disliked_notes or "" }}</textarea>
+                                        <button type="submit" class="btn btn-sm btn-outline-light w-100">Save</button>
+                                    </form>
                                 </div>
 
                                 <div class="card-menu-view d-none" data-menu-view="copy">
@@ -242,6 +282,41 @@
     </div>
 </section>
 {% endif %}
+
+<section class="mb-4">
+    <div class="card bg-black border-secondary-subtle">
+        <div class="card-body p-4">
+            <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-3">
+                <div class="text-uppercase small" style="color: #b56a33;">Slovní hodnocení</div>
+                {% if user_rating_value > 0 %}
+                <span class="badge text-bg-dark border border-secondary-subtle">Rating {{ user_rating_value }}/10</span>
+                {% endif %}
+            </div>
+            <div class="row g-3">
+                <div class="col-12 col-lg-6">
+                    <div class="rounded-4 border border-secondary-subtle bg-body p-3 h-100">
+                        <div class="small mb-2" style="color: #b56a33;">Klady</div>
+                        {% if liked_notes %}
+                        <div class="lh-lg">{{ liked_notes | markdown }}</div>
+                        {% else %}
+                        <div class="text-secondary">Zatím bez poznámky.</div>
+                        {% endif %}
+                    </div>
+                </div>
+                <div class="col-12 col-lg-6">
+                    <div class="rounded-4 border border-secondary-subtle bg-body p-3 h-100">
+                        <div class="small mb-2" style="color: #b56a33;">Zápory</div>
+                        {% if disliked_notes %}
+                        <div class="lh-lg">{{ disliked_notes | markdown }}</div>
+                        {% else %}
+                        <div class="text-secondary">Zatím bez poznámky.</div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
 
 {% if title_aliases_display %}
 <section class="mb-4">

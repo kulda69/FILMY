@@ -29,11 +29,11 @@ from filmy.runtime_postgres import (
     app_state_uses_postgres,
     catalog_backend_uses_postgres,
     create_import_batch_record,
+    commit_import_batch as commit_import_batch_postgres,
     content_state_uses_postgres,
     fetch_catalog_brief_rows,
     fetch_catalog_genres as fetch_catalog_genres_postgres,
     fetch_catalog_search_rows,
-    fetch_existing_import_commits,
     fetch_active_user_list_items,
     fetch_all_watch_events,
     fetch_catalog_episode_row,
@@ -43,6 +43,7 @@ from filmy.runtime_postgres import (
     fetch_catalog_stats_row as fetch_catalog_stats_row_postgres,
     fetch_favorite_genres as fetch_favorite_genres_postgres,
     fetch_favorite_traits as fetch_favorite_traits_postgres,
+    fetch_ai_taste_seed_rows,
     fetch_genre_score_source_rows as fetch_genre_score_source_rows_postgres,
     fetch_home_suggestion_candidate_rows as fetch_home_suggestion_candidate_rows_postgres,
     fetch_import_batch_record,
@@ -66,7 +67,6 @@ from filmy.runtime_postgres import (
     fetch_people_for_lookup_levenshtein_rows,
     fetch_people_for_lookup_rows,
     fetch_positive_person_affinities,
-    fetch_resolved_import_rows,
     fetch_relevant_people_candidate_rows,
     fetch_search_recall_match,
     fetch_series_episode_rows,
@@ -75,7 +75,9 @@ from filmy.runtime_postgres import (
     fetch_title_by_primary_title_year,
     fetch_title_lookup_primary_key_matches,
     fetch_title_overviews,
+    fetch_title_card_detail_rows,
     fetch_title_people_rows,
+    fetch_title_people_preview_rows,
     fetch_tconst_for_tmdb_id,
     fetch_tmdb_completion_flags,
     fetch_tmdb_mapping_record,
@@ -87,11 +89,9 @@ from filmy.runtime_postgres import (
     fetch_primary_title_matches,
     import_backend_uses_postgres,
     insert_import_rows,
-    insert_import_watch_event,
     insert_tmdb_asset_record,
     local_seed_exists,
     list_in_progress_content_states,
-    mark_import_batch_committed,
     meta_backend_uses_postgres,
     insert_genre_score_snapshot,
     record_local_seed_meta,
@@ -113,7 +113,7 @@ from filmy.paths import ASSETS_DIR, DB_PATH, IMDB_DIR, PEOPLE_ASSETS_DIR, PROJEC
 from filmy.suggestion_engine import evaluate_new_imdb_candidate, evaluate_trait_candidate
 
 BASE_DIR = PROJECT_ROOT
-TITLE_PRESENTATION_CACHE_VERSION = 2
+TITLE_PRESENTATION_CACHE_VERSION = 3
 logger = logging.getLogger(__name__)
 
 
@@ -1434,10 +1434,12 @@ def _get_title_presentation_cached(tconst: str) -> dict[str, Any] | None:
 
         people, cache_fingerprint = _run_duckdb_read(read_people)
 
-    overview = (((detail.get("tmdb") or {}).get("details") or {}).get("overview"))
+    tmdb_payload = detail.get("tmdb") or {}
+    tmdb_details = (tmdb_payload.get("details") or {})
+    overview = tmdb_details.get("overview")
     providers = [
         provider["provider_name"]
-        for provider in ((detail.get("tmdb") or {}).get("providers") or [])
+        for provider in (tmdb_payload.get("providers") or [])
         if provider.get("provider_name")
     ]
     unique_providers = list(dict.fromkeys(providers))
@@ -1456,23 +1458,27 @@ def _get_title_presentation_cached(tconst: str) -> dict[str, Any] | None:
         "imdb_rating": detail.get("average_rating"),
         "imdb_votes": detail.get("num_votes"),
         "overview": overview,
+        "tmdb_details": tmdb_details,
+        "tmdb_providers": tmdb_payload.get("providers") or [],
         "directed_by": people["directors"],
         "written_by": people["writers"],
         "created_by": people["creators"],
         "main_cast": people["cast"],
         "available_in_czechia": unique_providers,
         "library_state": detail.get("library") or {},
+        "content_state": detail.get("content_state") or {},
         "episodes": detail.get("episodes") or [],
         "aliases": detail.get("aliases") or [],
         "tmdb_locales": ((detail.get("tmdb") or {}).get("detail_locales") or []),
         "poster_url": _poster_url_from_detail(detail),
+        "backdrop_url": _backdrop_url_from_detail(detail),
         "series_tconst": detail.get("series_tconst"),
         "series_title": series_title,
         "season_number": detail.get("season_number"),
         "episode_number": detail.get("episode_number"),
-        "has_poster": any(asset.get("asset_kind") == "poster" for asset in ((detail.get("tmdb") or {}).get("assets") or [])),
+        "has_poster": any(asset.get("asset_kind") == "poster" for asset in (tmdb_payload.get("assets") or [])),
         "has_backdrop": any(
-            asset.get("asset_kind") == "backdrop" for asset in ((detail.get("tmdb") or {}).get("assets") or [])
+            asset.get("asset_kind") == "backdrop" for asset in (tmdb_payload.get("assets") or [])
         ),
     }
     presentation["display_text"] = render_title_presentation(presentation)
@@ -1482,6 +1488,48 @@ def _get_title_presentation_cached(tconst: str) -> dict[str, Any] | None:
 
 def get_title_presentation(tconst: str) -> dict[str, Any] | None:
     return _get_title_presentation_cached(tconst)
+
+
+def get_title_people_panel(tconst: str) -> dict[str, Any] | None:
+    """Return only title credits needed by the detail people panel.
+
+    This avoids rebuilding the whole title presentation for lightweight partial
+    refreshes such as `/titles/{tconst}/main-cast`.
+    """
+
+    if catalog_backend_uses_postgres():
+        exists = fetch_catalog_title_row(tconst) is not None or fetch_catalog_episode_row(tconst) is not None
+        if not exists:
+            return None
+        people = _fetch_title_people(None, tconst)
+    else:
+        def read(conn: duckdb.DuckDBPyConnection) -> tuple[bool, dict[str, list[dict[str, Any]]]]:
+            title_exists = conn.execute(
+                """
+                SELECT 1
+                FROM (
+                    SELECT tconst AS target_tconst FROM app.catalog_titles
+                    UNION ALL
+                    SELECT episode_tconst AS target_tconst FROM app.catalog_episodes
+                ) AS all_titles
+                WHERE target_tconst = ?
+                LIMIT 1
+                """,
+                [tconst],
+            ).fetchone() is not None
+            return title_exists, _fetch_title_people(conn, tconst)
+
+        exists, people = _run_duckdb_read(read)
+        if not exists:
+            return None
+
+    return {
+        "tconst": tconst,
+        "directed_by": people["directors"],
+        "written_by": people["writers"],
+        "created_by": people["creators"],
+        "main_cast": people["cast"],
+    }
 
 
 def get_title_overviews_for_tconsts(tconsts: Sequence[str]) -> dict[str, str]:
@@ -1522,6 +1570,86 @@ def get_title_overviews_for_tconsts(tconsts: Sequence[str]) -> dict[str, str]:
         ).fetchall()
     )
     return {str(row[0]): str(row[1]) for row in rows if row[0] and row[1]}
+
+
+def get_title_card_summaries_for_tconsts(tconsts: Sequence[str]) -> dict[str, dict[str, Any]]:
+    """Return lightweight card summaries for many titles without full detail assembly."""
+
+    normalized = [str(tconst).strip() for tconst in tconsts if str(tconst).strip()]
+    unique_tconsts = [tconst for tconst in dict.fromkeys(normalized) if tconst]
+    if not unique_tconsts:
+        return {}
+
+    if not catalog_backend_uses_postgres():
+        summaries: dict[str, dict[str, Any]] = {}
+        for tconst in unique_tconsts:
+            presentation = get_title_presentation(tconst)
+            if presentation is None:
+                continue
+            summaries[tconst] = {
+                "tconst": tconst,
+                "title": presentation.get("title"),
+                "original_title": presentation.get("original_title"),
+                "kind_label": presentation.get("kind_label"),
+                "year": presentation.get("year"),
+                "runtime_minutes": presentation.get("runtime_minutes"),
+                "genres": presentation.get("genres") or [],
+                "imdb_rating": presentation.get("imdb_rating"),
+                "imdb_votes": presentation.get("imdb_votes"),
+                "poster_url": presentation.get("poster_url"),
+                "directed_by_line": ", ".join(
+                    str(item.get("name") or "").strip()
+                    for item in (presentation.get("directed_by") or [])[:4]
+                    if str(item.get("name") or "").strip()
+                ) or None,
+                "main_cast_line": ", ".join(
+                    str(item.get("name") or "").strip()
+                    for item in (presentation.get("main_cast") or [])[:5]
+                    if str(item.get("name") or "").strip()
+                ) or None,
+            }
+        return summaries
+
+    card_rows = fetch_title_card_detail_rows(unique_tconsts)
+    preview_rows = fetch_title_people_preview_rows(unique_tconsts)
+
+    preview_by_tconst: dict[str, dict[str, list[str]]] = {}
+    for row in preview_rows:
+        tconst = str(row[0] or "").strip()
+        credit_group = str(row[1] or "").strip()
+        primary_name = str(row[3] or "").strip()
+        if not tconst or not primary_name:
+            continue
+        grouped = preview_by_tconst.setdefault(tconst, {"director": [], "cast": []})
+        names = grouped.get(credit_group)
+        if names is None or primary_name in names:
+            continue
+        if credit_group == "director" and len(names) < 4:
+            names.append(primary_name)
+        elif credit_group == "cast" and len(names) < 5:
+            names.append(primary_name)
+
+    summaries: dict[str, dict[str, Any]] = {}
+    for row in card_rows:
+        tconst = str(row[0] or "").strip()
+        if not tconst:
+            continue
+        grouped = preview_by_tconst.get(tconst) or {"director": [], "cast": []}
+        summaries[tconst] = {
+            "tconst": tconst,
+            "title": row[3],
+            "original_title": row[4],
+            "kind_label": _title_type_label(row[1]),
+            "year": row[2],
+            "runtime_minutes": row[5],
+            "genres": [part.strip() for part in str(row[6] or "").split(",") if part.strip()],
+            "imdb_rating": row[7],
+            "imdb_votes": row[8],
+            "poster_url": _poster_url_from_local_path(row[9] or row[10]),
+            "directed_by_line": ", ".join(grouped["director"]) or None,
+            "main_cast_line": ", ".join(grouped["cast"]) or None,
+        }
+    return summaries
 
 
 def render_title_presentation(presentation: dict[str, Any]) -> str:
@@ -2252,10 +2380,16 @@ def add_title_to_user_list(tconst: str, list_id: str, *, notes: str | None = Non
     return _impl(tconst, list_id, notes=notes)
 
 
-def set_user_rating(tconst: str, rating: int) -> dict[str, Any]:
+def set_user_rating(
+    tconst: str,
+    rating: int,
+    *,
+    liked_notes: str | None = None,
+    disliked_notes: str | None = None,
+) -> dict[str, Any]:
     from filmy.db_library import set_user_rating as _impl
 
-    return _impl(tconst, rating)
+    return _impl(tconst, rating, liked_notes=liked_notes, disliked_notes=disliked_notes)
 
 
 def set_person_affinity_rating(nconst: str, rating: int) -> dict[str, Any]:
@@ -2268,6 +2402,59 @@ def clear_user_rating(tconst: str) -> dict[str, Any]:
     from filmy.db_library import clear_user_rating as _impl
 
     return _impl(tconst)
+
+
+def get_ai_taste_seed(source_list: str = "kouknout-znovu", limit: int = 50) -> dict[str, Any]:
+    """Return read-only taste examples for an external AI recommendation layer."""
+
+    safe_limit = max(1, min(int(limit), 200))
+    return fetch_ai_taste_seed_rows(source_list=source_list, limit=safe_limit)
+
+
+def get_ai_context() -> dict[str, Any]:
+    """Return stable local taste context for an external AI recommendation layer."""
+
+    return {
+        "contract_version": 1,
+        "rating_scales": {
+            "user_rating": {
+                "min": 1,
+                "max": 10,
+                "type": "integer",
+                "description": "Jiriho lokalni hodnoceni titulu; vyssi cislo znamena silnejsi oblibu.",
+            },
+            "person_affinity_rating": {
+                "min": 0,
+                "max": 10,
+                "type": "integer",
+                "description": "Jiriho oblibenost osoby; 0 znamena bez pozitivni affinity.",
+            },
+            "imdb_rating": {
+                "min": 0,
+                "max": 10,
+                "type": "decimal",
+                "description": "Externi IMDb rating; neni to Jiriho lokalni hodnoceni.",
+            },
+            "favorite_preference_rank": {
+                "min": 1,
+                "max": 10,
+                "type": "integer",
+                "description": "Rucni priorita favorite genres/traits; nizsi cislo znamena silnejsi preferenci, null znamena nehodnoceno.",
+            },
+        },
+        "favorite_genres": get_favorite_genres(active_only=False),
+        "favorite_traits": get_favorite_traits(active_only=False),
+        "score_signal_notes": {
+            "genre_score_signals": "Lokalni preference zanru podle historie, ratingu a dalsich signalu.",
+            "actor_affinity_rating": "Souhrnny signal oblibenosti hodnocenych hercu navazanych na titul.",
+            "people_affinity": "Konkretni osoby z titulu, ktere maji rucni affinity rating; kontrakt pro navazujici rozsireni taste-seed.",
+        },
+        "usage_notes": [
+            "Endpoint je read-only a nevola externi AI ani online katalogy.",
+            "Navazujici AI projekt ho ma volat jako obecny kontext pred praci s konkretnimi tituly.",
+            "Favorite genres a favorite traits se vraci cele, vcetne neaktivnich polozek.",
+        ],
+    }
 
 
 def get_favorite_genres(active_only: bool = True) -> list[dict[str, Any]]:
@@ -3345,10 +3532,19 @@ def record_watch_event(
     watched_on: str | None = None,
     notes: str | None = None,
     add_to_watched_list: bool = False,
+    archive_from_list_id: str | None = None,
+    archive_display_tconst: str | None = None,
 ) -> dict[str, Any]:
     from filmy.db_library import record_watch_event as _impl
 
-    return _impl(tconst, watched_on=watched_on, notes=notes, add_to_watched_list=add_to_watched_list)
+    return _impl(
+        tconst,
+        watched_on=watched_on,
+        notes=notes,
+        add_to_watched_list=add_to_watched_list,
+        archive_from_list_id=archive_from_list_id,
+        archive_display_tconst=archive_display_tconst,
+    )
 
 
 def record_watch_events_through_episode(
@@ -3390,6 +3586,12 @@ def update_user_list_description(list_id: str, description: str | None = None) -
     from filmy.db_library import update_user_list_description as _impl
 
     return _impl(list_id, description)
+
+
+def delete_user_list(list_id: str) -> dict[str, Any]:
+    from filmy.db_library import delete_user_list as _impl
+
+    return _impl(list_id)
 
 
 def _pick_best_title_match(query: str, candidates: list[dict[str, Any]]) -> dict[str, Any]:
@@ -6090,27 +6292,13 @@ def commit_import_batch(batch_id: str) -> dict[str, Any]:
     if batch["status"] == "committed":
         return {"batch_id": batch_id, "committed": 0, "status": "already_committed"}
 
-    rows = fetch_resolved_import_rows(batch_id)
-    existing_row_ids = fetch_existing_import_commits(batch_id, [str(row["id"]) for row in rows])
-    committed = 0
-    for row in rows:
-        if str(row["id"]) in existing_row_ids:
-            continue
-        scope = "episode" if row.get("parsed_season_number") is not None or row.get("parsed_episode_number") is not None else "title"
-        insert_import_watch_event(
-            event_id=str(uuid.uuid4()),
-            tconst=str(row["resolved_tconst"]),
-            event_scope=scope,
-            watched_on=str(row["parsed_watched_on"]),
-            source=str(row["source"]),
-            batch_id=batch_id,
-            import_row_id=str(row["id"]),
-            created_at=_now_iso(),
-        )
-        committed += 1
-
-    mark_import_batch_committed(batch_id)
-    return {"batch_id": batch_id, "committed": committed, "status": "committed"}
+    result = commit_import_batch_postgres(batch_id=batch_id, committed_at=_now_iso())
+    return {
+        "batch_id": batch_id,
+        "committed": int(result["inserted_events"]),
+        "skipped": int(result["skipped_events"]),
+        "status": str(result["batch_status"]),
+    }
 
 
 def inspect_trakt_export(export_dir: str = "trakt-export") -> dict[str, Any]:
@@ -6314,6 +6502,15 @@ def _poster_url_from_detail(detail: dict[str, Any] | None) -> str | None:
     if not poster_asset or not poster_asset.get("local_path"):
         return None
     return _poster_url_from_local_path(str(poster_asset["local_path"]))
+
+
+def _backdrop_url_from_detail(detail: dict[str, Any] | None) -> str | None:
+    tmdb = (detail or {}).get("tmdb") or {}
+    assets = tmdb.get("assets") or []
+    backdrop_asset = next((asset for asset in assets if asset.get("asset_kind") == "backdrop" and asset.get("local_path")), None)
+    if not backdrop_asset or not backdrop_asset.get("local_path"):
+        return None
+    return _poster_url_from_local_path(str(backdrop_asset["local_path"]))
 
 
 def _poster_url_from_local_path(local_path_value: str | None) -> str | None:
@@ -7207,6 +7404,8 @@ def _create_base_schema(conn: duckdb.DuckDBPyConnection) -> None:
             season_number INTEGER,
             episode_number INTEGER,
             rating SMALLINT NOT NULL,
+            liked_notes VARCHAR,
+            disliked_notes VARCHAR,
             rated_at TIMESTAMP,
             source_origin VARCHAR NOT NULL,
             source_ref VARCHAR,
@@ -7289,6 +7488,8 @@ def _create_base_schema(conn: duckdb.DuckDBPyConnection) -> None:
         """
     )
     conn.execute("ALTER TABLE app.user_people ADD COLUMN IF NOT EXISTS affinity_rating INTEGER")
+    conn.execute("ALTER TABLE app.user_ratings ADD COLUMN IF NOT EXISTS liked_notes VARCHAR")
+    conn.execute("ALTER TABLE app.user_ratings ADD COLUMN IF NOT EXISTS disliked_notes VARCHAR")
     conn.execute("ALTER TABLE app.genre_scores ADD COLUMN IF NOT EXISTS actor_affinity_score DOUBLE")
     conn.execute("UPDATE app.user_people SET affinity_rating = 0 WHERE affinity_rating IS NULL")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_favorite_genres_active_rank ON app.favorite_genres(is_active, preference_rank)")
@@ -7451,14 +7652,17 @@ def _upsert_user_rating(
     source_origin: str,
     source_ref: str | None,
     now: str,
+    liked_notes: str | None = None,
+    disliked_notes: str | None = None,
 ) -> None:
     conn.execute(
         """
         INSERT INTO app.user_ratings (
             canonical_key, tconst, media_type, imdb_id, tmdb_id, trakt_id, parent_tconst, parent_title, title,
-            season_number, episode_number, rating, rated_at, source_origin, source_ref, created_at, updated_at
+            season_number, episode_number, rating, liked_notes, disliked_notes, rated_at,
+            source_origin, source_ref, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (canonical_key) DO UPDATE SET
             tconst = COALESCE(app.user_ratings.tconst, excluded.tconst),
             imdb_id = COALESCE(app.user_ratings.imdb_id, excluded.imdb_id),
@@ -7468,6 +7672,8 @@ def _upsert_user_rating(
             parent_title = COALESCE(app.user_ratings.parent_title, excluded.parent_title),
             title = COALESCE(app.user_ratings.title, excluded.title),
             rating = excluded.rating,
+            liked_notes = excluded.liked_notes,
+            disliked_notes = excluded.disliked_notes,
             rated_at = COALESCE(excluded.rated_at, app.user_ratings.rated_at),
             updated_at = excluded.updated_at
         """,
@@ -7484,6 +7690,8 @@ def _upsert_user_rating(
             season_number,
             episode_number,
             rating,
+            liked_notes,
+            disliked_notes,
             rated_at,
             source_origin,
             source_ref,
@@ -7823,13 +8031,16 @@ def _fetch_library_summary(conn: duckdb.DuckDBPyConnection | None, tconst: str, 
             [tconst],
         ).fetchall()
     in_watchlist = raw_in_watchlist and watched_count == 0
+    rating_payload: dict[str, Any] | None = None
     if user_ratings_uses_postgres():
         latest_rating = fetch_latest_rating_for_tconst_postgres(tconst)
-        rating = (
-            (latest_rating["rating"], latest_rating["rated_at"])
-            if latest_rating is not None
-            else None
-        )
+        if latest_rating is not None:
+            rating_payload = {
+                "value": latest_rating["rating"],
+                "rated_at": latest_rating["rated_at"],
+                "liked_notes": latest_rating.get("liked_notes"),
+                "disliked_notes": latest_rating.get("disliked_notes"),
+            }
     else:
         if conn is None:
             raise RuntimeError("DuckDB connection chybi pro fallback _fetch_library_summary().")
@@ -7843,18 +8054,18 @@ def _fetch_library_summary(conn: duckdb.DuckDBPyConnection | None, tconst: str, 
             """,
             [tconst],
         ).fetchone()
+        if rating:
+            rating_payload = {
+                "value": rating[0],
+                "rated_at": rating[1],
+                "liked_notes": None,
+                "disliked_notes": None,
+            }
     return {
         "watched_count": watched_count,
         "last_watched_at": last_watched_at,
         "in_watchlist": in_watchlist,
-        "rating": (
-            {
-                "value": rating[0],
-                "rated_at": rating[1],
-            }
-            if rating
-            else None
-        ),
+        "rating": rating_payload,
         "lists": [
             {
                 "name": row[0],

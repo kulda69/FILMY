@@ -25,7 +25,9 @@ REVOKE ALL PRIVILEGES ON TABLE
     app.title_lookup,
     app.person_lookup,
     app.latest_title_posters,
-    app.catalog_title_cards
+    app.catalog_title_cards,
+    app.watched_display_rollup,
+    app.active_user_list_display_items
 FROM filmy_app;
 
 GRANT USAGE ON SCHEMA raw TO filmy_app;
@@ -43,7 +45,9 @@ GRANT SELECT ON TABLE
     app.title_lookup,
     app.person_lookup,
     app.latest_title_posters,
-    app.catalog_title_cards
+    app.catalog_title_cards,
+    app.watched_display_rollup,
+    app.active_user_list_display_items
 TO filmy_app;
 
 GRANT EXECUTE ON FUNCTION app.normalize_match_key(text, boolean) TO filmy_app;

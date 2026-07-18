@@ -22,10 +22,12 @@ from filmy.db import (
     get_watched_page,
 )
 from filmy.integrations.tmdb import fetch_person_portrait
+from filmy.markdown import render_user_markdown
 from filmy.paths import PROJECT_ROOT
 
 background_supervisor = BackgroundJobSupervisor()
 templates = Jinja2Templates(directory=(PROJECT_ROOT / "templates").as_posix())
+templates.env.filters["markdown"] = render_user_markdown
 _homepage_warmup_lock = threading.Lock()
 _homepage_warmup_thread: threading.Thread | None = None
 _person_portrait_warmup_lock = threading.Lock()
@@ -48,6 +50,8 @@ class RatingUpdateRequest(BaseModel):
     """Local user rating on the 1-10 IMDb-like scale."""
 
     rating: int = Field(ge=1, le=10)
+    liked_notes: str | None = None
+    disliked_notes: str | None = None
 
 
 class WatchEventCreateRequest(BaseModel):

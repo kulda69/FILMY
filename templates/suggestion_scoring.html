@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+
+{% block title %}Filmy | Suggestion Scoring{% endblock %}
+
+{% block content %}
+{% set current_label = "Suggestion Scoring" %}
+{% include "_top_breadcrumbs.html" %}
+
+<section class="mb-4">
+    <div class="card bg-black border-secondary-subtle">
+        <div class="card-body p-4 p-lg-5">
+            <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4">
+                <div>
+                    <h1 class="h2 mb-2" style="color: #b56a33;">Suggestion Scoring</h1>
+                    <p class="text-secondary mb-0">Rucni prepocet lokalniho snapshotu `genre_scores`, ze ktereho pak ziji suggestion sekce na homepage i detailni suggestion pohledy.</p>
+                </div>
+                <form method="post" action="/system/suggestion-scoring/recompute" class="m-0">
+                    <input type="hidden" name="return_to" value="{{ return_to }}">
+                    <button type="submit" class="btn btn-light text-dark">Recompute Now</button>
+                </form>
+            </div>
+
+            <div class="d-flex flex-wrap gap-2 mb-4">
+                <span class="badge text-bg-dark border border-secondary-subtle px-3 py-2">{{ favorite_genres_count }} favorite genres</span>
+                <span class="badge text-bg-dark border border-secondary-subtle px-3 py-2">{{ favorite_traits_count }} active traits</span>
+                {% if latest_scores %}
+                <span class="badge text-bg-dark border border-secondary-subtle px-3 py-2">Updated {{ format_czech_datetime(latest_scores["generated_at"]) }}</span>
+                {% else %}
+                <span class="badge text-bg-dark border border-secondary-subtle px-3 py-2">No snapshot yet</span>
+                {% endif %}
+            </div>
+
+            {% if recomputed %}
+            <div class="alert alert-success border-0 mb-4" role="alert">
+                Suggestion scoring byl prepocitany.
+            </div>
+            {% endif %}
+
+            {% if error_message %}
+            <div class="alert alert-danger border-0 mb-4" role="alert">
+                {{ error_message }}
+            </div>
+            {% endif %}
+
+            <div class="small text-secondary mb-4">
+                Tohle nespousti IMDb refresh ani TMDB enrichment. Jen prepocita lokalni preferencni scoring nad aktualnimi watched/rating/list daty.
+            </div>
+
+            <div class="row g-4">
+                <div class="col-12 col-xl-7">
+                    <div class="rounded-4 border border-secondary-subtle bg-body p-4 h-100">
+                        <div class="text-uppercase small mb-3" style="color: #b56a33;">Latest Snapshot</div>
+                        {% if latest_scores and latest_scores["items"] %}
+                        <div class="d-grid gap-3">
+                            {% for item in latest_scores["items"] %}
+                            <div class="rounded-4 border border-secondary-subtle bg-black p-3">
+                                <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                                    <div class="fw-semibold">{{ item.genre }}</div>
+                                    {% if item.final_score is not none %}
+                                    <span class="badge text-white border-0" style="background-color: #b56a33;">{{ "%.2f"|format(item.final_score) }}</span>
+                                    {% endif %}
+                                </div>
+                                <div class="small text-secondary">
+                                    Rank {{ item.rank_in_run }}
+                                    {% if item.titles_considered %}
+                                    · titles {{ item.titles_considered }}
+                                    {% endif %}
+                                    {% if item.watched_titles_considered %}
+                                    · watched {{ item.watched_titles_considered }}
+                                    {% endif %}
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <div class="rounded-4 border border-secondary-subtle bg-black p-4 text-secondary">
+                            Suggestion snapshot zatim neni spocitany.
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+
+                <div class="col-12 col-xl-5">
+                    <div class="rounded-4 border border-secondary-subtle bg-body p-4 h-100">
+                        <div class="text-uppercase small mb-3" style="color: #b56a33;">Related Controls</div>
+                        <div class="d-grid gap-2">
+                            <a class="btn btn-outline-light text-start" href="/views/suggestions">Open Suggestions Overview</a>
+                            <a class="btn btn-outline-light text-start" href="/system/favorite-genres">Edit Favorite Genres</a>
+                            <a class="btn btn-outline-light text-start" href="/system/favorite-traits">Edit Favorite Traits</a>
+                        </div>
+                        <div class="small text-secondary mt-4">
+                            Pokud po zmene genres nebo traits chces hned videt novy signal na homepage, tohle je ten chybejici zkratovy knoflik.
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock %}

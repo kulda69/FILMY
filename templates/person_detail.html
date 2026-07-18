@@ -46,14 +46,15 @@
                 <div class="d-flex align-items-start gap-3 mb-3">
                     <h1 class="display-4 mb-0 lh-1 flex-grow-1" style="color: #b56a33;">{{ person_item.name }}</h1>
                     {% set person_menu_id = "person-menu-" ~ person_item.nconst %}
-                    <div class="ms-auto">
+                    <div class="ms-auto flex-shrink-0">
                         <button
                             type="button"
                             class="card-menu-trigger text-secondary border-0 bg-transparent p-0"
                             popovertarget="{{ person_menu_id }}"
                             aria-label="Person affinity actions for {{ person_item.name }}"
+                            data-person-menu-anchor="{{ person_menu_id }}"
                         >...</button>
-                        <div id="{{ person_menu_id }}" popover class="card-menu-panel">
+                        <div id="{{ person_menu_id }}" popover class="card-menu-panel" data-person-menu-panel>
                             <div class="card-menu-view" data-menu-view="root">
                                 <button
                                     type="button"

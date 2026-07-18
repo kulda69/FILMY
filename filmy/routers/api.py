@@ -18,6 +18,8 @@ from filmy.db import (
     create_import_preview,
     describe_person_by_query,
     describe_title_by_query,
+    get_ai_context,
+    get_ai_taste_seed,
     get_catalog_stats,
     get_content_detail,
     get_imdb_favorite_people,
@@ -271,13 +273,35 @@ async def library_update_watchlist(tconst: str, payload: WatchlistUpdateRequest)
 @router.post("/api/library/content/{tconst}/rating")
 async def library_set_rating(tconst: str, payload: RatingUpdateRequest):
     try:
-        result = set_user_rating(tconst, payload.rating)
+        result = set_user_rating(
+            tconst,
+            payload.rating,
+            liked_notes=payload.liked_notes,
+            disliked_notes=payload.disliked_notes,
+        )
     except ValueError as exc:
         detail = str(exc)
         status_code = 404 if "nebyl nalezen" in detail else 400
         raise HTTPException(status_code=status_code, detail=detail) from exc
     signal_metadata_pipeline("api_rating_set")
     return result
+
+
+@router.get("/api/ai/taste-seed")
+async def ai_taste_seed(
+    source_list: str = Query(default="kouknout-znovu"),
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    """Read local taste examples for a separate AI recommendation workflow."""
+
+    return get_ai_taste_seed(source_list=source_list, limit=limit)
+
+
+@router.get("/api/ai/context")
+async def ai_context():
+    """Read stable preference context for a separate AI recommendation workflow."""
+
+    return get_ai_context()
 
 
 @router.delete("/api/library/content/{tconst}/rating")

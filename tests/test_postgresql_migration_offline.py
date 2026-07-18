@@ -164,6 +164,13 @@ class RuntimeMigrationOfflineTests(unittest.TestCase):
             self.assertEqual(migration.inspect_target_schema_before_apply(_config()), "existing")
             fingerprint.assert_called_once()
 
+        with_catalog = exact + "\n".join(f"{table},r" for table in migration.CATALOG_APP_TABLES) + "\n"
+        with patch.object(
+            migration, "_psql", return_value=CompletedProcess([], 0, with_catalog, "")
+        ), patch.object(migration, "verify_schema_fingerprint") as fingerprint:
+            self.assertEqual(migration.inspect_target_schema_before_apply(_config()), "existing")
+            fingerprint.assert_called_once()
+
         partial = "user_lists,r\n"
         with patch.object(
             migration, "_psql", return_value=CompletedProcess([], 0, partial, "")
@@ -181,6 +188,42 @@ class RuntimeMigrationOfflineTests(unittest.TestCase):
         self.assertIn("REVOKE ALL PRIVILEGES", grants_sql)
         self.assertIn("GRANT SELECT, INSERT, UPDATE, DELETE", grants_sql)
         self.assertNotIn("DEFAULT PRIVILEGES", grants_sql)
+
+    def test_runtime_schema_contains_import_commit_function_and_constraints(self) -> None:
+        schema_sql = migration.SCHEMA_MIGRATION.read_text(encoding="utf-8")
+        self.assertIn("CREATE OR REPLACE FUNCTION app.commit_import_batch", schema_sql)
+        self.assertIn("CREATE OR REPLACE FUNCTION app.record_watched", schema_sql)
+        self.assertIn("CREATE OR REPLACE FUNCTION app.replace_favorite_genres", schema_sql)
+        self.assertIn("CREATE OR REPLACE FUNCTION app.replace_favorite_traits", schema_sql)
+        self.assertIn("CREATE OR REPLACE FUNCTION app.touch_updated_at()", schema_sql)
+        self.assertIn("CREATE TRIGGER trg_favorite_genres_touch_updated_at", schema_sql)
+        self.assertIn("CREATE TRIGGER trg_user_list_items_touch_updated_at", schema_sql)
+        self.assertIn("watch_events_batch_import_row_key", schema_sql)
+        self.assertIn("watch_events_event_scope_check", schema_sql)
+        self.assertIn("content_state_interest_state_check", schema_sql)
+
+    def test_schema_fingerprint_allows_expected_runtime_triggers(self) -> None:
+        sql = migration._schema_verification_sql()
+        for trigger_name in migration.OPTIONAL_RUNTIME_TRIGGERS:
+            with self.subTest(trigger_name=trigger_name):
+                self.assertIn(trigger_name, sql)
+
+    def test_verify_role_sql_allows_catalog_acl_and_function_exec(self) -> None:
+        self.assertIn("catalog_title_cards", migration.APP_READ_ONLY_RELATIONS)
+        self.assertIn("title_episode", migration.RAW_READ_ONLY_RELATIONS)
+        self.assertIn("app.normalize_match_key", migration.ALLOWED_FUNCTION_EXECUTE_PRIVILEGES)
+
+    def test_catalog_schema_contains_runtime_projection_views_and_grants(self) -> None:
+        catalog_schema = (migration.PROJECT_ROOT / "migrations" / "postgresql" / "004_catalog_schema.sql").read_text(encoding="utf-8")
+        catalog_grants = (migration.PROJECT_ROOT / "migrations" / "postgresql" / "005_catalog_grants.sql").read_text(encoding="utf-8")
+        self.assertIn("CREATE OR REPLACE VIEW app.latest_title_posters", catalog_schema)
+        self.assertIn("CREATE OR REPLACE VIEW app.catalog_title_cards", catalog_schema)
+        self.assertIn("CREATE OR REPLACE VIEW app.watched_display_rollup", catalog_schema)
+        self.assertIn("CREATE OR REPLACE VIEW app.active_user_list_display_items", catalog_schema)
+        self.assertIn("app.latest_title_posters", catalog_grants)
+        self.assertIn("app.catalog_title_cards", catalog_grants)
+        self.assertIn("app.watched_display_rollup", catalog_grants)
+        self.assertIn("app.active_user_list_display_items", catalog_grants)
 
     def test_main_preflight_role_runs_before_export_and_import(self) -> None:
         events: list[str] = []

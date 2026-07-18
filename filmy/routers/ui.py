@@ -15,6 +15,7 @@ from filmy.db import (
     clear_user_rating,
     copy_group_to_user_list,
     create_user_list,
+    delete_user_list,
     delete_group_from_user_list,
     move_group_between_user_lists,
     record_watch_event,
@@ -94,9 +95,12 @@ async def ui_list_action_watched(
     return_to: str | None = Form(default=None),
 ):
     try:
-        record_watch_event(tconst, add_to_watched_list=True)
-        if list_id and display_tconst:
-            delete_group_from_user_list(list_id, display_tconst)
+        record_watch_event(
+            tconst,
+            add_to_watched_list=True,
+            archive_from_list_id=list_id,
+            archive_display_tconst=display_tconst,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     signal_metadata_pipeline("ui_mark_watched")
@@ -114,6 +118,27 @@ async def ui_list_action_rating(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     signal_metadata_pipeline("ui_rating_set")
+    return redirect_back(return_to)
+
+
+@router.post("/ui/list-actions/rating-notes")
+async def ui_list_action_rating_notes(
+    tconst: str = Form(),
+    rating: int = Form(),
+    liked_notes: str | None = Form(default=None),
+    disliked_notes: str | None = Form(default=None),
+    return_to: str | None = Form(default=None),
+):
+    try:
+        set_user_rating(
+            tconst,
+            rating,
+            liked_notes=liked_notes,
+            disliked_notes=disliked_notes,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    signal_metadata_pipeline("ui_rating_notes_set")
     return redirect_back(return_to)
 
 
@@ -181,6 +206,21 @@ async def ui_update_list_description(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     signal_metadata_pipeline("ui_list_update_description")
     return redirect_back(return_to)
+
+
+@router.post("/ui/lists/delete")
+async def ui_delete_list(
+    list_id: str = Form(),
+):
+    try:
+        delete_user_list(list_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    signal_metadata_pipeline("ui_list_delete")
+    response = RedirectResponse(url="/#lists-section", status_code=303)
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    return response
 
 
 @router.get("/ui/cards/background-activity", response_class=HTMLResponse)

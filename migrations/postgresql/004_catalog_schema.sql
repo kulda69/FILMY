@@ -332,4 +332,46 @@ SELECT
 FROM app.catalog_titles AS t
 LEFT JOIN app.latest_title_posters AS p ON p.tconst = t.tconst;
 
+CREATE OR REPLACE VIEW app.watched_display_rollup AS
+SELECT
+    COALESCE(e.series_tconst, w.tconst) AS display_tconst,
+    COUNT(*)::integer AS watch_count,
+    MAX(w.watched_on) AS latest_watched_on,
+    MAX(COALESCE(w.created_at, CAST(w.watched_on AS timestamp without time zone))) AS latest_created_at
+FROM app.watch_events AS w
+LEFT JOIN app.catalog_episodes AS e ON e.episode_tconst = w.tconst
+WHERE w.tconst IS NOT NULL
+GROUP BY 1;
+
+CREATE OR REPLACE VIEW app.active_user_list_display_items AS
+SELECT
+    i.id,
+    i.list_id,
+    l.slug AS list_slug,
+    l.name AS list_name,
+    l.list_kind,
+    i.canonical_key,
+    i.tconst,
+    i.media_type,
+    i.imdb_id,
+    i.tmdb_id,
+    i.trakt_id,
+    i.parent_tconst,
+    i.parent_title,
+    i.title,
+    i.season_number,
+    i.episode_number,
+    i.rank,
+    i.added_at,
+    i.notes,
+    i.source_origin,
+    i.source_ref,
+    i.created_at,
+    i.updated_at,
+    COALESCE(e.series_tconst, i.tconst, i.parent_tconst) AS display_tconst
+FROM app.user_list_items AS i
+JOIN app.user_lists AS l ON l.id = i.list_id
+LEFT JOIN app.catalog_episodes AS e ON e.episode_tconst = i.tconst
+WHERE i.is_archived = FALSE;
+
 COMMIT;

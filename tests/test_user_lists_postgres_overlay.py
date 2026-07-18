@@ -61,6 +61,17 @@ class UserListsPostgresOverlayTests(unittest.TestCase):
             _now_iso=lambda: "2026-07-11T10:00:00",
             uuid=SimpleNamespace(uuid4=lambda: "event-1"),
             datetime=__import__("datetime").datetime,
+            _build_local_media_identity=lambda detail: {
+                "media_type": "title",
+                "tconst": detail["tconst"],
+                "imdb_id": detail["tconst"],
+                "tmdb_id": detail["tmdb"]["tmdb_id"],
+                "parent_tconst": None,
+                "parent_title": None,
+                "title": "Alpha",
+                "season_number": None,
+                "episode_number": None,
+            },
             _canonical_media_key=lambda *args: "title:tt1",
             clear_title_presentation_cache=lambda: None,
             _get_library_summary_for_tconst=lambda tconst: {"tconst": tconst},
@@ -69,14 +80,26 @@ class UserListsPostgresOverlayTests(unittest.TestCase):
             patch("filmy.db_library._db", return_value=fake_db),
             patch("filmy.db_library.watch_events_uses_postgres", return_value=True),
             patch("filmy.db_library.user_lists_uses_postgres", return_value=True),
-            patch("filmy.db_library.insert_watch_event_postgres") as insert_mock,
-            patch("filmy.db_library.archive_user_list_item") as archive_mock,
+            patch(
+                "filmy.db_library.record_watched_postgres",
+                return_value={"event_id": "event-1", "content_state_changed": True, "archived_items": 1},
+            ) as record_mock,
         ):
             result = db_library.record_watch_event("tt1")
 
-        insert_mock.assert_called_once()
-        archive_mock.assert_called_once_with("watchlist", "title:tt1", "2026-07-11T10:00:00")
+        record_mock.assert_called_once_with(
+            event_id="event-1",
+            tconst="tt1",
+            event_scope="title",
+            watched_on="2026-07-11",
+            notes=None,
+            created_at="2026-07-11T10:00:00",
+            archive_from_list_id="watchlist",
+            archive_canonical_key="title:tt1",
+            archive_display_tconst=None,
+        )
         self.assertEqual(result["tconst"], "tt1")
+        self.assertEqual(result["archived_items"], 1)
 
     def test_delete_group_from_user_list_archives_postgres_items(self) -> None:
         fake_db = SimpleNamespace(
