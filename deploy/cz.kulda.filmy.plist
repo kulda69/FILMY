@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>cz.kulda.filmy</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Volumes/kulda/apps/FILMY/.venv/bin/python</string>
+    <string>/Volumes/kulda/apps/FILMY/main.py</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Volumes/kulda/apps/FILMY</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/Volumes/kulda/apps/FILMY/logs/launchd.stdout.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Volumes/kulda/apps/FILMY/logs/launchd.stderr.log</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

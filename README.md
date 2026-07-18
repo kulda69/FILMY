@@ -25,6 +25,9 @@ Kdyz uz mas pripravene lokalni virtualni prostredi, jde i kratka varianta:
 
 Na Mac mini, ktery bude slouzit jako domaci server, se appka bude spoustet pres `main.py`, protoze pobehzi pod `LaunchAgents`.
 
+Krátký postup instalace nebo aktualizace projektu na jiném počítači je v
+[`INSTALACE.md`](INSTALACE.md).
+
 ## Poznamka k TMDB
 
 Appka se umi spustit i bez TMDB, ale funkce zavisle na TMDB potrebuji v `.env`:
