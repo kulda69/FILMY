@@ -106,6 +106,42 @@ def present_main_cast(main_cast: list[dict[str, object]]) -> list[dict[str, obje
     return items
 
 
+def attach_title_role_signals(
+    main_cast: list[dict[str, object]],
+    role_signals: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Attach title-local role signals to visible cast rows."""
+
+    signals_by_nconst: dict[str, list[dict[str, object]]] = {}
+    signals_by_character: dict[str, list[dict[str, object]]] = {}
+    for signal in role_signals:
+        nconst = str(signal.get("nconst") or "").strip()
+        character_name = str(signal.get("character_name") or "").strip().casefold()
+        if nconst:
+            signals_by_nconst.setdefault(nconst, []).append(signal)
+        if character_name:
+            signals_by_character.setdefault(character_name, []).append(signal)
+
+    items: list[dict[str, object]] = []
+    for person in main_cast:
+        item = dict(person)
+        nconst = str(item.get("nconst") or "").strip()
+        character_name = str(item.get("character") or "").strip().casefold()
+        matched: list[dict[str, object]] = []
+        if nconst:
+            matched.extend(signals_by_nconst.get(nconst, []))
+        if character_name:
+            for signal in signals_by_character.get(character_name, []):
+                if signal not in matched:
+                    matched.append(signal)
+        matched.sort(key=lambda signal: (int(signal.get("strength") or 0), str(signal.get("updated_at") or "")), reverse=True)
+        item["role_signals"] = matched
+        item["top_role_signal"] = matched[0] if matched else None
+        item["role_signal_type_values"] = [str(signal.get("signal_type")) for signal in matched if signal.get("signal_type")]
+        items.append(item)
+    return items
+
+
 def launch_person_portrait_warmup(main_cast: list[dict[str, object]]) -> None:
     """Fetch missing main-cast portraits in the background, one worker per person.
 

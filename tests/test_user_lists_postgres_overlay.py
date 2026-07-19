@@ -33,6 +33,120 @@ class UserListsPostgresOverlayTests(unittest.TestCase):
         )
         self.assertEqual(result["slug"], "moje-listina-2")
 
+    def test_update_user_list_description_updates_ai_input_role(self) -> None:
+        fake_db = SimpleNamespace(_now_iso=lambda: "2026-07-19T10:00:00")
+        with (
+            patch("filmy.db_library._db", return_value=fake_db),
+            patch(
+                "filmy.db_library.fetch_user_list",
+                return_value={"id": "list-a", "name": "List A", "list_kind": "custom"},
+            ),
+            patch(
+                "filmy.db_library.update_user_list_description_postgres",
+                return_value={
+                    "id": "list-a",
+                    "description": "updated",
+                    "ai_input_role": "negative",
+                },
+            ) as update_mock,
+        ):
+            result = db_library.update_user_list_description(
+                "list-a",
+                " updated ",
+                ai_input_role="negative",
+            )
+
+        update_mock.assert_called_once_with(
+            "list-a",
+            "updated",
+            "negative",
+            "2026-07-19T10:00:00",
+        )
+        self.assertEqual(result["ai_input_role"], "negative")
+
+    def test_update_user_list_description_rejects_unknown_ai_input_role(self) -> None:
+        fake_db = SimpleNamespace(_now_iso=lambda: "2026-07-19T10:00:00")
+        with (
+            patch("filmy.db_library._db", return_value=fake_db),
+            patch(
+                "filmy.db_library.fetch_user_list",
+                return_value={"id": "list-a", "name": "List A", "list_kind": "custom"},
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "Neznámá role"):
+                db_library.update_user_list_description(
+                    "list-a",
+                    "updated",
+                    ai_input_role="wat",
+                )
+
+    def test_set_title_role_signal_upserts_stable_character_signal(self) -> None:
+        fake_db = SimpleNamespace(
+            _now_iso=lambda: "2026-07-19T11:00:00",
+            _slugify=lambda value: "ephram-brown",
+            clear_title_presentation_cache=lambda: None,
+        )
+        expected = {
+            "signal_key": "role-signal:tt0379623:nm0395777:ephram-brown:dialogue",
+            "tconst": "tt0379623",
+            "nconst": "nm0395777",
+            "character_name": "Ephram Brown",
+            "signal_type": "dialogue",
+            "polarity": "positive",
+            "strength": 10,
+            "notes": "dialogy a chování",
+        }
+        with (
+            patch("filmy.db_library._db", return_value=fake_db),
+            patch("filmy.db_library.fetch_title_card_rows", return_value=[("tt0379623",)]),
+            patch("filmy.db_library.fetch_person_catalog_row", return_value=("nm0395777", "Gregory Smith", None, None)),
+            patch("filmy.db_library.upsert_title_role_signal", return_value=expected) as upsert_mock,
+        ):
+            result = db_library.set_title_role_signal(
+                " tt0379623 ",
+                nconst=" nm0395777 ",
+                character_name=" Ephram Brown ",
+                signal_type="dialogue",
+                polarity="positive",
+                strength="10",
+                notes=" dialogy a chování ",
+            )
+
+        upsert_mock.assert_called_once_with(
+            signal_key="role-signal:tt0379623:nm0395777:ephram-brown:dialogue",
+            tconst="tt0379623",
+            nconst="nm0395777",
+            character_name="Ephram Brown",
+            signal_type="dialogue",
+            polarity="positive",
+            strength=10,
+            notes="dialogy a chování",
+            source_ref="manual_role_signal:tt0379623",
+            now="2026-07-19T11:00:00",
+        )
+        self.assertEqual(result["signal_key"], expected["signal_key"])
+
+    def test_set_title_role_signal_rejects_unknown_signal_type(self) -> None:
+        fake_db = SimpleNamespace(
+            _slugify=lambda value: "ephram-brown",
+            _now_iso=lambda: "2026-07-19T11:00:00",
+        )
+        with patch("filmy.db_library._db", return_value=fake_db):
+            with self.assertRaisesRegex(ValueError, "Neznámý typ"):
+                db_library.set_title_role_signal(
+                    "tt0379623",
+                    character_name="Ephram Brown",
+                    signal_type="seed",
+                )
+
+    def test_get_title_role_signals_reads_postgres_rows(self) -> None:
+        rows = [{"signal_key": "role-signal:tt0379623:nm0395777:ephram-brown:character"}]
+        with patch("filmy.db_library.fetch_title_role_signals_postgres", return_value=rows) as fetch_mock:
+            result = db_library.get_title_role_signals(" tt0379623 ")
+
+        fetch_mock.assert_called_once_with("tt0379623")
+        self.assertEqual(result, rows)
+
     def test_get_user_list_items_page_assembles_postgres_groups(self) -> None:
         fake_db = SimpleNamespace(
             _poster_url_from_local_path=lambda path: f"/assets/{path}",

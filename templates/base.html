@@ -103,6 +103,14 @@
             display: block;
         }
 
+        .card-menu-panel[data-centered-menu-panel]:popover-open {
+            position: fixed;
+            inset: 50% auto auto 50%;
+            transform: translate(-50%, -50%);
+            max-width: calc(100vw - 1.5rem);
+            max-height: calc(100vh - 1.5rem);
+        }
+
         .card-menu-panel::backdrop {
             background: transparent;
         }
@@ -325,12 +333,15 @@
                         if (anchor instanceof HTMLElement) {
                             const anchorRect = anchor.getBoundingClientRect();
                             const panelWidth = panel.offsetWidth || 260;
+                            const panelHeight = panel.offsetHeight || 420;
                             const viewportWidth = window.innerWidth;
+                            const viewportHeight = window.innerHeight;
                             const left = Math.max(
                                 12,
                                 Math.min(anchorRect.right - panelWidth, viewportWidth - panelWidth - 12),
                             );
-                            const top = Math.max(8, Math.min(anchorRect.top - 64, window.innerHeight - 24));
+                            const preferredTop = anchorRect.top - 64;
+                            const top = Math.max(8, Math.min(preferredTop, viewportHeight - panelHeight - 12));
                             panel.style.position = "fixed";
                             panel.style.inset = "auto";
                             panel.style.left = `${left}px`;

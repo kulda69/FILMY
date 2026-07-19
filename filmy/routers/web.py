@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from starlette.responses import HTMLResponse, RedirectResponse
 
 from filmy.app_shared import (
+    attach_title_role_signals,
     apply_html_cache_headers,
     background_supervisor,
     build_breadcrumb_context,
@@ -44,6 +45,7 @@ from filmy.db import (
     get_hot_watchlist_page,
     get_latest_genre_scores,
     get_local_library_status,
+    get_title_role_signals,
     fetch_watch_stats_for_tconsts,
     get_person_presentation,
     get_recently_watched_page,
@@ -57,8 +59,8 @@ from filmy.db import (
     lookup_title_by_query,
     replace_favorite_genres,
     replace_favorite_traits,
-    update_user_list_description,
 )
+from filmy.db_library import AI_INPUT_ROLE_OPTIONS, TITLE_ROLE_SIGNAL_POLARITY_OPTIONS, TITLE_ROLE_SIGNAL_TYPE_OPTIONS
 from filmy.integrations.tmdb import get_tmdb_status
 from filmy.imdb_refresh import get_imdb_refresh_snapshot, start_imdb_refresh_job
 from filmy.suggestion_engine import match_traits_for_text
@@ -261,6 +263,7 @@ async def root(request: Request, list_id: str | None = Query(default=None)):
             "selected_list_actions_enabled": bool(selected_list),
             "selected_list_return_to": selected_list_return_to,
             "selected_list_detail_return_to": selected_list_return_to,
+            "ai_input_role_options": AI_INPUT_ROLE_OPTIONS,
             "continue_watching": continue_watching,
             "continue_watching_return_to": continue_watching_return_to,
             "suggestion_scores_generated_at": latest_genre_scores["generated_at"] if latest_genre_scores else None,
@@ -527,6 +530,7 @@ async def list_detail(request: Request, list_id: str, page: int = Query(default=
             "selected_list_actions_enabled": True,
             "selected_list_return_to": list_return_to,
             "selected_list_detail_return_to": list_return_to,
+            "ai_input_role_options": AI_INPUT_ROLE_OPTIONS,
             "format_czech_datetime": format_czech_datetime,
         },
     )
@@ -1163,7 +1167,8 @@ async def title_detail_page(request: Request, tconst: str, return_to: str | None
 
     breadcrumb_context = build_breadcrumb_context(request, str(presentation["title"]), return_to=return_to)
     parent_return_to = str(breadcrumb_context["page_return_to"])
-    main_cast = present_main_cast(presentation.get("main_cast") or [])
+    role_signals = get_title_role_signals(tconst)
+    main_cast = attach_title_role_signals(present_main_cast(presentation.get("main_cast") or []), role_signals)
     launch_person_presentation_warmup(main_cast)
     launch_person_portrait_warmup(main_cast)
     main_cast_pending_count = count_missing_portraits(main_cast)
@@ -1177,6 +1182,9 @@ async def title_detail_page(request: Request, tconst: str, return_to: str | None
             "title_episode_items": present_title_episodes(presentation.get("episodes") or []),
             "title_episode_seasons": present_episode_seasons(presentation.get("episodes") or []),
             "title_main_cast": main_cast,
+            "title_role_signals": role_signals,
+            "title_role_signal_type_options": TITLE_ROLE_SIGNAL_TYPE_OPTIONS,
+            "title_role_signal_polarity_options": TITLE_ROLE_SIGNAL_POLARITY_OPTIONS,
             "title_main_cast_pending_count": main_cast_pending_count,
             **breadcrumb_context,
             "title_return_to": detail_return_target(f"/titles/{tconst}", parent_return_to),
@@ -1203,7 +1211,8 @@ async def title_main_cast_partial(request: Request, tconst: str, return_to: str 
     if people_panel is None:
         raise HTTPException(status_code=404, detail="Titul nebyl nalezen.")
 
-    main_cast = present_main_cast(people_panel.get("main_cast") or [])
+    role_signals = get_title_role_signals(tconst)
+    main_cast = attach_title_role_signals(present_main_cast(people_panel.get("main_cast") or []), role_signals)
     launch_person_presentation_warmup(main_cast)
     launch_person_portrait_warmup(main_cast)
     response = templates.TemplateResponse(
@@ -1212,6 +1221,9 @@ async def title_main_cast_partial(request: Request, tconst: str, return_to: str 
         {
             "title_item": {"tconst": people_panel["tconst"]},
             "title_main_cast": main_cast,
+            "title_role_signals": role_signals,
+            "title_role_signal_type_options": TITLE_ROLE_SIGNAL_TYPE_OPTIONS,
+            "title_role_signal_polarity_options": TITLE_ROLE_SIGNAL_POLARITY_OPTIONS,
             "title_main_cast_pending_count": count_missing_portraits(main_cast),
             "title_return_to": detail_return_target(
                 f"/titles/{tconst}",

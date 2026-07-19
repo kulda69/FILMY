@@ -416,6 +416,10 @@
             if (!panel) {
                 return;
             }
+            if (panel.querySelector(".card-menu-panel:popover-open")) {
+                window.setTimeout(refreshMainCast, intervalMs);
+                return;
+            }
             const pending = Number(panel.dataset.pendingCount || "0");
             if (pending <= 0 || attempts >= maxAttempts) {
                 return;

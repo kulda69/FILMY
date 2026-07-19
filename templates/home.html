@@ -147,6 +147,18 @@
                                                 rows="2"
                                                 maxlength="400"
                                             >{{ selected_list.description or '' }}</textarea>
+                                            <div>
+                                                <label class="form-label small text-secondary mb-1" for="home-ai-input-role-{{ selected_list.id }}">Pro AI tipy</label>
+                                                <select
+                                                    id="home-ai-input-role-{{ selected_list.id }}"
+                                                    name="ai_input_role"
+                                                    class="form-select form-select-sm bg-body-tertiary border-secondary-subtle text-light"
+                                                >
+                                                    {% for option in ai_input_role_options %}
+                                                    <option value="{{ option.value }}" {% if selected_list.ai_input_role == option.value %}selected{% endif %}>{{ option.label }}</option>
+                                                    {% endfor %}
+                                                </select>
+                                            </div>
                                             <button type="submit" class="btn btn-sm btn-outline-light align-self-start">Save</button>
                                         </form>
                                         {% if selected_list.list_kind == "custom" %}

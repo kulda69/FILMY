@@ -22,6 +22,7 @@ from filmy.runtime_postgres import (
     content_state_uses_postgres,
     create_user_list as create_user_list_postgres,
     delete_user_list as delete_user_list_postgres,
+    delete_title_role_signals as delete_title_role_signals_postgres,
     fetch_all_watch_events,
     fetch_existing_watch_tconsts,
     fetch_active_user_list_items,
@@ -29,6 +30,7 @@ from filmy.runtime_postgres import (
     fetch_episode_series_map,
     fetch_hot_watchlist_page_rows,
     fetch_person_catalog_row,
+    fetch_title_role_signals as fetch_title_role_signals_postgres,
     fetch_library_status_projection,
     fetch_library_status_snapshot,
     fetch_person_affinity_rating,
@@ -47,6 +49,7 @@ from filmy.runtime_postgres import (
     upsert_user_rating as upsert_user_rating_postgres,
     upsert_user_list_item,
     upsert_person_affinity,
+    upsert_title_role_signal,
     update_content_state as update_content_state_postgres,
     update_user_list_description as update_user_list_description_postgres,
     watch_events_uses_postgres,
@@ -63,6 +66,36 @@ _LOCAL_LIBRARY_STATUS_CACHE_TTL_SECONDS = 5.0
 _local_library_status_cache_lock = threading.Lock()
 _local_library_status_cache: dict[str, Any] | None = None
 _local_library_status_cached_at = 0.0
+
+AI_INPUT_ROLE_OPTIONS: tuple[dict[str, str], ...] = (
+    {"value": "strong_positive", "label": "Silně se mi líbí"},
+    {"value": "interested_owned", "label": "Mám / dal jsem si s tím práci"},
+    {"value": "interested_planned", "label": "Chci vidět / stojí za pozornost"},
+    {"value": "in_progress", "label": "Rozkoukané"},
+    {"value": "negative", "label": "Nelíbí / nechci podobné"},
+    {"value": "external_suggestion", "label": "Návrh od AI"},
+    {"value": "ignore", "label": "Nepoužívat pro AI"},
+)
+AI_INPUT_ROLE_VALUES = frozenset(option["value"] for option in AI_INPUT_ROLE_OPTIONS)
+
+TITLE_ROLE_SIGNAL_TYPE_OPTIONS: tuple[dict[str, str], ...] = (
+    {"value": "character", "label": "Postava"},
+    {"value": "dialogue", "label": "Dialogy"},
+    {"value": "behavior", "label": "Chování"},
+    {"value": "relationship_dynamic", "label": "Vztahová dynamika"},
+    {"value": "performance", "label": "Herecké provedení"},
+    {"value": "visual_appeal", "label": "Vzhled"},
+    {"value": "attraction", "label": "Přitažlivost"},
+    {"value": "other", "label": "Jiné"},
+)
+TITLE_ROLE_SIGNAL_TYPE_VALUES = frozenset(option["value"] for option in TITLE_ROLE_SIGNAL_TYPE_OPTIONS)
+
+TITLE_ROLE_SIGNAL_POLARITY_OPTIONS: tuple[dict[str, str], ...] = (
+    {"value": "positive", "label": "Pozitivní"},
+    {"value": "negative", "label": "Negativní"},
+    {"value": "mixed", "label": "Smíšené"},
+)
+TITLE_ROLE_SIGNAL_POLARITY_VALUES = frozenset(option["value"] for option in TITLE_ROLE_SIGNAL_POLARITY_OPTIONS)
 
 
 def _get_cached_local_library_status() -> dict[str, Any] | None:
@@ -505,6 +538,171 @@ def set_person_affinity_rating(nconst: str, rating: int) -> dict[str, Any]:
     return {"nconst": nconst, "rating": rating, "updated_at": now}
 
 
+def set_title_role_signal(
+    tconst: str,
+    *,
+    nconst: str | None = None,
+    character_name: str | None = None,
+    signal_type: str = "character",
+    polarity: str = "positive",
+    strength: int = 8,
+    notes: str | None = None,
+) -> dict[str, Any]:
+    """Store a title-specific character/role signal separate from title rating."""
+
+    db = _db()
+    cleaned_tconst = (tconst or "").strip()
+    cleaned_nconst = (nconst or "").strip() or None
+    cleaned_character_name = (character_name or "").strip() or None
+    cleaned_signal_type = (signal_type or "").strip() or "character"
+    cleaned_polarity = (polarity or "").strip() or "positive"
+    cleaned_notes = (notes or "").strip() or None
+
+    try:
+        cleaned_strength = int(strength)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Síla signálu musí být číslo mezi 0 a 10.") from exc
+    if cleaned_strength < 0 or cleaned_strength > 10:
+        raise ValueError("Síla signálu musí být mezi 0 a 10.")
+    if cleaned_signal_type not in TITLE_ROLE_SIGNAL_TYPE_VALUES:
+        raise ValueError("Neznámý typ signálu role/postavy.")
+    if cleaned_polarity not in TITLE_ROLE_SIGNAL_POLARITY_VALUES:
+        raise ValueError("Neznámá polarita signálu role/postavy.")
+    if not cleaned_tconst:
+        raise ValueError("Titul nebyl zadán.")
+    if not fetch_title_card_rows([cleaned_tconst]):
+        raise ValueError("Titul nebyl nalezen.")
+    if cleaned_nconst is not None and fetch_person_catalog_row(cleaned_nconst) is None:
+        raise ValueError("Osoba nebyla nalezena.")
+    if cleaned_nconst is None and cleaned_character_name is None:
+        raise ValueError("Zadej osobu nebo jméno postavy.")
+
+    identity_part = cleaned_nconst or "bez-osoby"
+    character_part = db._slugify(cleaned_character_name or "bez-postavy") or "bez-postavy"
+    signal_key = f"role-signal:{cleaned_tconst}:{identity_part}:{character_part}:{cleaned_signal_type}"
+    now = db._now_iso()
+
+    result = upsert_title_role_signal(
+        signal_key=signal_key,
+        tconst=cleaned_tconst,
+        nconst=cleaned_nconst,
+        character_name=cleaned_character_name,
+        signal_type=cleaned_signal_type,
+        polarity=cleaned_polarity,
+        strength=cleaned_strength,
+        notes=cleaned_notes,
+        source_ref=f"manual_role_signal:{cleaned_tconst}",
+        now=now,
+    )
+    db.clear_title_presentation_cache()
+    return result
+
+
+def replace_title_role_signals(
+    tconst: str,
+    *,
+    nconst: str | None = None,
+    character_name: str | None = None,
+    signal_types: list[str] | tuple[str, ...] | None = None,
+    polarity: str = "positive",
+    strength: int = 8,
+    notes: str | None = None,
+) -> dict[str, Any]:
+    """Replace all checked signal types for one role/person in one title."""
+
+    cleaned_types = tuple(dict.fromkeys((value or "").strip() for value in (signal_types or []) if (value or "").strip()))
+    if not cleaned_types:
+        raise ValueError("Vyber aspoň jeden typ signálu role/postavy.")
+    unknown_types = [value for value in cleaned_types if value not in TITLE_ROLE_SIGNAL_TYPE_VALUES]
+    if unknown_types:
+        raise ValueError("Neznámý typ signálu role/postavy.")
+
+    db = _db()
+    cleaned_tconst = (tconst or "").strip()
+    cleaned_nconst = (nconst or "").strip() or None
+    cleaned_character_name = (character_name or "").strip() or None
+    cleaned_polarity = (polarity or "").strip() or "positive"
+    cleaned_notes = (notes or "").strip() or None
+    try:
+        cleaned_strength = int(strength)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Síla signálu musí být číslo mezi 0 a 10.") from exc
+    if cleaned_strength < 0 or cleaned_strength > 10:
+        raise ValueError("Síla signálu musí být mezi 0 a 10.")
+    if cleaned_polarity not in TITLE_ROLE_SIGNAL_POLARITY_VALUES:
+        raise ValueError("Neznámá polarita signálu role/postavy.")
+    if not cleaned_tconst:
+        raise ValueError("Titul nebyl zadán.")
+    if not fetch_title_card_rows([cleaned_tconst]):
+        raise ValueError("Titul nebyl nalezen.")
+    if cleaned_nconst is not None and fetch_person_catalog_row(cleaned_nconst) is None:
+        raise ValueError("Osoba nebyla nalezena.")
+    if cleaned_nconst is None and cleaned_character_name is None:
+        raise ValueError("Zadej osobu nebo jméno postavy.")
+
+    deleted_count = delete_title_role_signals_postgres(
+        tconst=cleaned_tconst,
+        nconst=cleaned_nconst,
+        character_name=cleaned_character_name,
+    )
+    saved = [
+        set_title_role_signal(
+            cleaned_tconst,
+            nconst=cleaned_nconst,
+            character_name=cleaned_character_name,
+            signal_type=signal_type,
+            polarity=cleaned_polarity,
+            strength=cleaned_strength,
+            notes=cleaned_notes,
+        )
+        for signal_type in cleaned_types
+    ]
+    db.clear_title_presentation_cache()
+    return {
+        "tconst": cleaned_tconst,
+        "nconst": cleaned_nconst,
+        "character_name": cleaned_character_name,
+        "signal_types": list(cleaned_types),
+        "saved": saved,
+        "deleted_count": deleted_count,
+    }
+
+
+def delete_title_role_signals(
+    tconst: str,
+    *,
+    nconst: str | None = None,
+    character_name: str | None = None,
+) -> dict[str, Any]:
+    db = _db()
+    cleaned_tconst = (tconst or "").strip()
+    cleaned_nconst = (nconst or "").strip() or None
+    cleaned_character_name = (character_name or "").strip() or None
+    if not cleaned_tconst:
+        raise ValueError("Titul nebyl zadán.")
+    if cleaned_nconst is None and cleaned_character_name is None:
+        raise ValueError("Zadej osobu nebo jméno postavy.")
+    deleted_count = delete_title_role_signals_postgres(
+        tconst=cleaned_tconst,
+        nconst=cleaned_nconst,
+        character_name=cleaned_character_name,
+    )
+    db.clear_title_presentation_cache()
+    return {
+        "tconst": cleaned_tconst,
+        "nconst": cleaned_nconst,
+        "character_name": cleaned_character_name,
+        "deleted_count": deleted_count,
+    }
+
+
+def get_title_role_signals(tconst: str) -> list[dict[str, Any]]:
+    cleaned_tconst = (tconst or "").strip()
+    if not cleaned_tconst:
+        return []
+    return fetch_title_role_signals_postgres(cleaned_tconst)
+
+
 def clear_user_rating(tconst: str) -> dict[str, Any]:
     db = _db()
     detail = db.get_content_detail(tconst)
@@ -767,9 +965,14 @@ def create_user_list(name: str, description: str | None = None) -> dict[str, Any
     )
 
 
-def update_user_list_description(list_id: str, description: str | None = None) -> dict[str, Any]:
+def update_user_list_description(
+    list_id: str,
+    description: str | None = None,
+    ai_input_role: str | None = None,
+) -> dict[str, Any]:
     db = _db()
     cleaned_description = (description or "").strip() or None
+    cleaned_ai_input_role = (ai_input_role or "").strip() or None
     now = db._now_iso()
 
     row = fetch_user_list(list_id)
@@ -777,7 +980,9 @@ def update_user_list_description(list_id: str, description: str | None = None) -
         raise ValueError("Seznam nebyl nalezen.")
     if row["list_kind"] != "custom" and row["id"] != "watchlist":
         raise ValueError("Popis lze upravit jen u uživatelských seznamů.")
-    updated = update_user_list_description_postgres(list_id, cleaned_description, now)
+    if cleaned_ai_input_role is not None and cleaned_ai_input_role not in AI_INPUT_ROLE_VALUES:
+        raise ValueError("Neznámá role seznamu pro AI tipy.")
+    updated = update_user_list_description_postgres(list_id, cleaned_description, cleaned_ai_input_role, now)
     if updated is None:
         raise ValueError("Seznam nebyl nalezen.")
     return updated

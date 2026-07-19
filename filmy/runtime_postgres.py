@@ -913,7 +913,7 @@ def fetch_watch_view_page_rows(
     cutoff_filter = ""
     params: list[Any] = []
     if cutoff_days is not None:
-        cutoff_filter = "AND w.watched_on >= current_date - (%s * INTERVAL '1 day')"
+        cutoff_filter = "AND w.latest_watched_on >= current_date - (%s * INTERVAL '1 day')"
         params.append(cutoff_days)
 
     total_sql = f"""
@@ -1218,6 +1218,7 @@ def fetch_library_status_snapshot(*, recently_watched_days: int, hot_watchlist_l
                 l.name,
                 l.description,
                 l.list_kind,
+                l.ai_input_role,
                 COALESCE(c.item_count, 0) AS item_count
             FROM app.user_lists AS l
             LEFT JOIN list_counts AS c ON c.list_id = l.id
@@ -1246,7 +1247,8 @@ def fetch_library_status_snapshot(*, recently_watched_days: int, hot_watchlist_l
                 "name": row[2],
                 "description": row[3],
                 "list_kind": row[4],
-                "item_count": int(row[5] or 0),
+                "ai_input_role": row[5],
+                "item_count": int(row[6] or 0),
                 "item_type": "list",
             }
             for row in list_rows
@@ -1605,7 +1607,7 @@ def fetch_ai_taste_seed_rows(*, source_list: str, limit: int) -> dict[str, Any]:
     with _connect() as conn, conn.cursor() as cursor:
         cursor.execute(
             """
-            SELECT id, slug, name, description, list_kind
+            SELECT id, slug, name, description, list_kind, ai_input_role
             FROM app.user_lists
             WHERE id = ANY(%s)
                OR slug = ANY(%s)
@@ -1677,16 +1679,64 @@ def fetch_ai_taste_seed_rows(*, source_list: str, limit: int) -> dict[str, Any]:
                 WHERE score_scope = 'default'
                 ORDER BY genre, generated_at DESC, rank_in_run ASC
             ),
-            title_actor_affinity AS (
+            title_people_affinity AS (
                 SELECT
                     c.tconst,
-                    ROUND(AVG(p.affinity_rating)::numeric, 3)::double precision AS actor_affinity_rating
+                    ROUND(
+                        AVG(p.affinity_rating) FILTER (
+                            WHERE c.credit_group = 'cast'
+                              AND (c.ordering IS NULL OR c.ordering <= 8)
+                        )::numeric,
+                        3
+                    )::double precision AS actor_affinity_rating,
+                    jsonb_agg(
+                        jsonb_build_object(
+                            'nconst', c.nconst,
+                            'name', person.primary_name,
+                            'credit_group', c.credit_group,
+                            'ordering', c.ordering,
+                            'affinity_rating', p.affinity_rating,
+                            'is_favorite', p.is_favorite
+                        )
+                        ORDER BY
+                            CASE c.credit_group
+                                WHEN 'director' THEN 0
+                                WHEN 'creator' THEN 1
+                                WHEN 'writer' THEN 2
+                                WHEN 'cast' THEN 3
+                                ELSE 4
+                            END,
+                            c.ordering NULLS LAST,
+                            person.primary_name
+                    ) AS people_affinity
                 FROM app.title_credits AS c
                 JOIN app.user_people AS p ON p.nconst = c.nconst
-                WHERE c.credit_group = 'cast'
-                  AND p.affinity_rating > 0
-                  AND (c.ordering IS NULL OR c.ordering <= 8)
+                JOIN app.catalog_people AS person ON person.nconst = c.nconst
+                WHERE p.affinity_rating > 0
                 GROUP BY c.tconst
+            ),
+            title_role_signals AS (
+                SELECT
+                    s.tconst,
+                    jsonb_agg(
+                        jsonb_build_object(
+                            'signal_key', s.signal_key,
+                            'nconst', s.nconst,
+                            'person_name', person.primary_name,
+                            'character_name', s.character_name,
+                            'signal_type', s.signal_type,
+                            'polarity', s.polarity,
+                            'strength', s.strength,
+                            'notes', s.notes,
+                            'source_origin', s.source_origin,
+                            'source_ref', s.source_ref,
+                            'updated_at', s.updated_at
+                        )
+                        ORDER BY s.strength DESC, s.updated_at DESC, s.character_name NULLS LAST, s.signal_type
+                    ) AS title_role_signals
+                FROM app.user_title_role_signals AS s
+                LEFT JOIN app.catalog_people AS person ON person.nconst = s.nconst
+                GROUP BY s.tconst
             )
             SELECT
                 r.display_tconst,
@@ -1702,7 +1752,9 @@ def fetch_ai_taste_seed_rows(*, source_list: str, limit: int) -> dict[str, Any]:
                 lr.liked_notes,
                 lr.disliked_notes,
                 lr.rated_at,
-                ta.actor_affinity_rating,
+                pa.actor_affinity_rating,
+                COALESCE(pa.people_affinity, '[]'::jsonb) AS people_affinity,
+                COALESCE(trs.title_role_signals, '[]'::jsonb) AS title_role_signals,
                 COALESCE(
                     jsonb_agg(
                         DISTINCT jsonb_build_object(
@@ -1719,7 +1771,8 @@ def fetch_ai_taste_seed_rows(*, source_list: str, limit: int) -> dict[str, Any]:
             JOIN app.catalog_titles AS t ON t.tconst = r.display_tconst
             LEFT JOIN app.tmdb_title_map AS map ON map.tconst = r.display_tconst
             LEFT JOIN latest_ratings AS lr ON lr.tconst = r.display_tconst
-            LEFT JOIN title_actor_affinity AS ta ON ta.tconst = r.display_tconst
+            LEFT JOIN title_people_affinity AS pa ON pa.tconst = r.display_tconst
+            LEFT JOIN title_role_signals AS trs ON trs.tconst = r.display_tconst
             LEFT JOIN latest_scores AS score ON score.genre = ANY(string_to_array(COALESCE(t.genres, ''), ','))
             WHERE r.group_row = 1
             GROUP BY
@@ -1737,7 +1790,9 @@ def fetch_ai_taste_seed_rows(*, source_list: str, limit: int) -> dict[str, Any]:
                 lr.liked_notes,
                 lr.disliked_notes,
                 lr.rated_at,
-                ta.actor_affinity_rating,
+                pa.actor_affinity_rating,
+                pa.people_affinity,
+                trs.title_role_signals,
                 r.rank,
                 r.added_at
             ORDER BY r.rank NULLS LAST, r.added_at DESC NULLS LAST, t.primary_title
@@ -1756,6 +1811,7 @@ def fetch_ai_taste_seed_rows(*, source_list: str, limit: int) -> dict[str, Any]:
             "name": list_row[2],
             "description": list_row[3],
             "list_kind": list_row[4],
+            "ai_input_role": list_row[5],
         },
         "limit": limit,
         "items": [
@@ -1775,7 +1831,203 @@ def fetch_ai_taste_seed_rows(*, source_list: str, limit: int) -> dict[str, Any]:
                 "disliked_notes": row[11],
                 "rated_at": _parse_optional_timestamp(row[12]),
                 "actor_affinity_rating": row[13],
-                "genre_score_signals": row[14] or [],
+                "people_affinity": row[14] or [],
+                "title_role_signals": row[15] or [],
+                "genre_score_signals": row[16] or [],
+            }
+            for row in rows
+        ],
+    }
+
+
+def fetch_ai_rated_title_rows(
+    *,
+    min_user_rating: int,
+    limit: int,
+    title_type: str | None = None,
+) -> dict[str, Any]:
+    """Return locally rated titles for an external AI recommender."""
+
+    type_filter = ""
+    params: list[Any] = [min_user_rating]
+    if title_type:
+        type_filter = "AND t.title_type = %s"
+        params.append(title_type)
+    params.append(limit)
+
+    with _connect() as conn, conn.cursor() as cursor:
+        cursor.execute(
+            f"""
+            WITH latest_ratings AS (
+                SELECT DISTINCT ON (tconst)
+                    tconst,
+                    rating,
+                    liked_notes,
+                    disliked_notes,
+                    rated_at,
+                    updated_at
+                FROM app.user_ratings
+                WHERE tconst IS NOT NULL
+                ORDER BY tconst, rated_at DESC NULLS LAST, updated_at DESC, created_at DESC
+            ),
+            latest_scores AS (
+                SELECT DISTINCT ON (genre)
+                    genre,
+                    final_score,
+                    rating_signal_score,
+                    watch_signal_score,
+                    actor_affinity_score,
+                    generated_at
+                FROM app.genre_scores
+                WHERE score_scope = 'default'
+                ORDER BY genre, generated_at DESC, rank_in_run ASC
+            ),
+            title_people_affinity AS (
+                SELECT
+                    c.tconst,
+                    ROUND(
+                        AVG(p.affinity_rating) FILTER (
+                            WHERE c.credit_group = 'cast'
+                              AND (c.ordering IS NULL OR c.ordering <= 8)
+                        )::numeric,
+                        3
+                    )::double precision AS actor_affinity_rating,
+                    jsonb_agg(
+                        jsonb_build_object(
+                            'nconst', c.nconst,
+                            'name', person.primary_name,
+                            'credit_group', c.credit_group,
+                            'ordering', c.ordering,
+                            'affinity_rating', p.affinity_rating,
+                            'is_favorite', p.is_favorite
+                        )
+                        ORDER BY
+                            CASE c.credit_group
+                                WHEN 'director' THEN 0
+                                WHEN 'creator' THEN 1
+                                WHEN 'writer' THEN 2
+                                WHEN 'cast' THEN 3
+                                ELSE 4
+                            END,
+                            c.ordering NULLS LAST,
+                            person.primary_name
+                    ) AS people_affinity
+                FROM app.title_credits AS c
+                JOIN app.user_people AS p ON p.nconst = c.nconst
+                JOIN app.catalog_people AS person ON person.nconst = c.nconst
+                WHERE p.affinity_rating > 0
+                GROUP BY c.tconst
+            ),
+            title_role_signals AS (
+                SELECT
+                    s.tconst,
+                    jsonb_agg(
+                        jsonb_build_object(
+                            'signal_key', s.signal_key,
+                            'nconst', s.nconst,
+                            'person_name', person.primary_name,
+                            'character_name', s.character_name,
+                            'signal_type', s.signal_type,
+                            'polarity', s.polarity,
+                            'strength', s.strength,
+                            'notes', s.notes,
+                            'source_origin', s.source_origin,
+                            'source_ref', s.source_ref,
+                            'updated_at', s.updated_at
+                        )
+                        ORDER BY s.strength DESC, s.updated_at DESC, s.character_name NULLS LAST, s.signal_type
+                    ) AS title_role_signals
+                FROM app.user_title_role_signals AS s
+                LEFT JOIN app.catalog_people AS person ON person.nconst = s.nconst
+                GROUP BY s.tconst
+            )
+            SELECT
+                t.tconst,
+                t.primary_title,
+                t.original_title,
+                t.title_type,
+                t.start_year,
+                t.genres,
+                t.average_rating,
+                t.num_votes,
+                map.tmdb_id,
+                lr.rating,
+                lr.liked_notes,
+                lr.disliked_notes,
+                lr.rated_at,
+                pa.actor_affinity_rating,
+                COALESCE(pa.people_affinity, '[]'::jsonb) AS people_affinity,
+                COALESCE(trs.title_role_signals, '[]'::jsonb) AS title_role_signals,
+                COALESCE(
+                    jsonb_agg(
+                        DISTINCT jsonb_build_object(
+                            'genre', score.genre,
+                            'final_score', score.final_score,
+                            'rating_signal_score', score.rating_signal_score,
+                            'watch_signal_score', score.watch_signal_score,
+                            'actor_affinity_score', score.actor_affinity_score
+                        )
+                    ) FILTER (WHERE score.genre IS NOT NULL),
+                    '[]'::jsonb
+                ) AS genre_score_signals
+            FROM latest_ratings AS lr
+            JOIN app.catalog_titles AS t ON t.tconst = lr.tconst
+            LEFT JOIN app.tmdb_title_map AS map ON map.tconst = t.tconst
+            LEFT JOIN title_people_affinity AS pa ON pa.tconst = t.tconst
+            LEFT JOIN title_role_signals AS trs ON trs.tconst = t.tconst
+            LEFT JOIN latest_scores AS score ON score.genre = ANY(string_to_array(COALESCE(t.genres, ''), ','))
+            WHERE lr.rating >= %s
+              {type_filter}
+            GROUP BY
+                t.tconst,
+                t.primary_title,
+                t.original_title,
+                t.title_type,
+                t.start_year,
+                t.genres,
+                t.average_rating,
+                t.num_votes,
+                map.tmdb_id,
+                lr.rating,
+                lr.liked_notes,
+                lr.disliked_notes,
+                lr.rated_at,
+                pa.actor_affinity_rating,
+                pa.people_affinity,
+                trs.title_role_signals
+            ORDER BY lr.rating DESC, lr.rated_at DESC NULLS LAST, t.primary_title
+            LIMIT %s
+            """,
+            params,
+        )
+        rows = cursor.fetchall()
+
+    return {
+        "filters": {
+            "min_user_rating": min_user_rating,
+            "title_type": title_type,
+        },
+        "limit": limit,
+        "items": [
+            {
+                "imdb_id": row[0],
+                "tconst": row[0],
+                "tmdb_id": row[8],
+                "title": row[1],
+                "original_title": row[2],
+                "title_type": row[3],
+                "year": row[4],
+                "genres": [genre for genre in str(row[5] or "").split(",") if genre],
+                "imdb_rating": row[6],
+                "imdb_votes": row[7],
+                "user_rating": row[9],
+                "liked_notes": row[10],
+                "disliked_notes": row[11],
+                "rated_at": _parse_optional_timestamp(row[12]),
+                "actor_affinity_rating": row[13],
+                "people_affinity": row[14] or [],
+                "title_role_signals": row[15] or [],
+                "genre_score_signals": row[16] or [],
             }
             for row in rows
         ],
@@ -2106,7 +2358,7 @@ def fetch_user_list(list_id: str) -> dict[str, Any] | None:
     with _connect() as conn, conn.cursor() as cursor:
         cursor.execute(
             """
-            SELECT id, slug, name, description, list_kind
+            SELECT id, slug, name, description, list_kind, ai_input_role
             FROM app.user_lists
             WHERE id = %s
             """,
@@ -2121,6 +2373,7 @@ def fetch_user_list(list_id: str) -> dict[str, Any] | None:
         "name": row[2],
         "description": row[3],
         "list_kind": row[4],
+        "ai_input_role": row[5],
     }
 
 
@@ -2156,7 +2409,7 @@ def fetch_user_list_page_rows(
     with _connect() as conn, conn.cursor() as cursor:
         cursor.execute(
             """
-            SELECT id, slug, name, description, list_kind
+            SELECT id, slug, name, description, list_kind, ai_input_role
             FROM app.user_lists
             WHERE id = %s
             """,
@@ -2253,6 +2506,7 @@ def fetch_user_list_page_rows(
             "name": list_row[2],
             "description": list_row[3],
             "list_kind": list_row[4],
+            "ai_input_role": list_row[5],
         },
         total,
         rows,
@@ -2265,7 +2519,7 @@ def fetch_user_lists() -> list[dict[str, Any]]:
     with _connect() as conn, conn.cursor() as cursor:
         cursor.execute(
             """
-            SELECT id, slug, name, description, list_kind
+            SELECT id, slug, name, description, list_kind, ai_input_role
             FROM app.user_lists
             ORDER BY list_kind, name
             """
@@ -2278,6 +2532,7 @@ def fetch_user_lists() -> list[dict[str, Any]]:
             "name": row[2],
             "description": row[3],
             "list_kind": row[4],
+            "ai_input_role": row[5],
         }
         for row in rows
     ]
@@ -2290,10 +2545,10 @@ def create_user_list(*, list_id: str, slug: str, name: str, description: str | N
         cursor.execute(
             """
             INSERT INTO app.user_lists (
-                id, slug, name, description, list_kind, source_origin, source_ref, created_at, updated_at
+                id, slug, name, description, list_kind, ai_input_role, source_origin, source_ref, created_at, updated_at
             )
-            VALUES (%s, %s, %s, %s, 'custom', 'local_app', NULL, %s::timestamp, %s::timestamp)
-            RETURNING id, slug, name, description, list_kind
+            VALUES (%s, %s, %s, %s, 'custom', 'ignore', 'local_app', NULL, %s::timestamp, %s::timestamp)
+            RETURNING id, slug, name, description, list_kind, ai_input_role
             """,
             (list_id, slug, name, description, now, now),
         )
@@ -2307,21 +2562,30 @@ def create_user_list(*, list_id: str, slug: str, name: str, description: str | N
         "name": row[2],
         "description": row[3],
         "list_kind": row[4],
+        "ai_input_role": row[5],
     }
 
 
-def update_user_list_description(list_id: str, description: str | None, now: str) -> dict[str, Any] | None:
-    """Update description for one PostgreSQL user list."""
+def update_user_list_description(
+    list_id: str,
+    description: str | None,
+    ai_input_role: str | None,
+    now: str,
+) -> dict[str, Any] | None:
+    """Update editable metadata for one PostgreSQL user list."""
 
     with _connect() as conn, conn.cursor() as cursor:
         cursor.execute(
             """
             UPDATE app.user_lists
-            SET description = %s, updated_at = %s::timestamp
+            SET
+                description = %s,
+                ai_input_role = COALESCE(%s, ai_input_role),
+                updated_at = %s::timestamp
             WHERE id = %s
-            RETURNING id, slug, name, description, list_kind
+            RETURNING id, slug, name, description, list_kind, ai_input_role
             """,
-            (description, now, list_id),
+            (description, ai_input_role, now, list_id),
         )
         row = cursor.fetchone()
         conn.commit()
@@ -2333,6 +2597,7 @@ def update_user_list_description(list_id: str, description: str | None, now: str
         "name": row[2],
         "description": row[3],
         "list_kind": row[4],
+        "ai_input_role": row[5],
     }
 
 
@@ -2342,7 +2607,7 @@ def delete_user_list(list_id: str) -> dict[str, Any] | None:
     with _connect() as conn, conn.cursor() as cursor:
         cursor.execute(
             """
-            SELECT id, slug, name, description, list_kind
+            SELECT id, slug, name, description, list_kind, ai_input_role
             FROM app.user_lists
             WHERE id = %s
             """,
@@ -2360,6 +2625,7 @@ def delete_user_list(list_id: str) -> dict[str, Any] | None:
                 "name": row[2],
                 "description": row[3],
                 "list_kind": row[4],
+                "ai_input_role": row[5],
             }
 
         cursor.execute("DELETE FROM app.user_list_items WHERE list_id = %s", (list_id,))
@@ -2371,6 +2637,7 @@ def delete_user_list(list_id: str) -> dict[str, Any] | None:
         "name": row[2],
         "description": row[3],
         "list_kind": row[4],
+        "ai_input_role": row[5],
     }
 
 
@@ -2627,6 +2894,122 @@ def upsert_person_affinity(
             ),
         )
         conn.commit()
+
+
+def upsert_title_role_signal(
+    *,
+    signal_key: str,
+    tconst: str,
+    nconst: str | None,
+    character_name: str | None,
+    signal_type: str,
+    polarity: str,
+    strength: int,
+    notes: str | None,
+    source_ref: str | None,
+    now: str,
+) -> dict[str, Any]:
+    """Upsert one title-specific role/character signal in PostgreSQL."""
+
+    with _connect() as conn, conn.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO app.user_title_role_signals (
+                signal_key, tconst, nconst, character_name, signal_type, polarity,
+                strength, notes, source_origin, source_ref, created_at, updated_at
+            )
+            VALUES (
+                %s, %s, %s, %s, %s, %s,
+                %s, %s, 'local_app', %s, %s::timestamp, %s::timestamp
+            )
+            ON CONFLICT (signal_key) DO UPDATE SET
+                tconst = excluded.tconst,
+                nconst = excluded.nconst,
+                character_name = excluded.character_name,
+                signal_type = excluded.signal_type,
+                polarity = excluded.polarity,
+                strength = excluded.strength,
+                notes = excluded.notes,
+                source_ref = excluded.source_ref,
+                updated_at = excluded.updated_at
+            RETURNING
+                signal_key, tconst, nconst, character_name, signal_type, polarity,
+                strength, notes, source_origin, source_ref, created_at, updated_at
+            """,
+            (
+                signal_key,
+                tconst,
+                nconst,
+                character_name,
+                signal_type,
+                polarity,
+                strength,
+                notes,
+                source_ref,
+                now,
+                now,
+            ),
+        )
+        row = cursor.fetchone()
+        conn.commit()
+    if row is None:
+        raise RuntimeError("PostgreSQL role signal upsert nevrátil žádný řádek.")
+    return _row_to_title_role_signal(row)
+
+
+def fetch_title_role_signals(tconst: str) -> list[dict[str, Any]]:
+    """Read role/character signals for one title from PostgreSQL."""
+
+    with _connect() as conn, conn.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT
+                signal_key, tconst, nconst, character_name, signal_type, polarity,
+                strength, notes, source_origin, source_ref, created_at, updated_at
+            FROM app.user_title_role_signals
+            WHERE tconst = %s
+            ORDER BY strength DESC, updated_at DESC, character_name NULLS LAST, signal_type
+            """,
+            (tconst,),
+        )
+        rows = cursor.fetchall()
+    return [_row_to_title_role_signal(row) for row in rows]
+
+
+def delete_title_role_signals(
+    *,
+    tconst: str,
+    nconst: str | None,
+    character_name: str | None,
+    signal_types: list[str] | None = None,
+) -> int:
+    """Delete title-specific role/character signals for one role identity."""
+
+    type_filter = ""
+    params: list[Any] = [tconst]
+    if nconst:
+        identity_filter = "nconst = %s"
+        params.append(nconst)
+    else:
+        identity_filter = "nconst IS NULL AND character_name = %s"
+        params.append(character_name)
+    if signal_types is not None:
+        type_filter = "AND signal_type = ANY(%s)"
+        params.append(signal_types)
+
+    with _connect() as conn, conn.cursor() as cursor:
+        cursor.execute(
+            f"""
+            DELETE FROM app.user_title_role_signals
+            WHERE tconst = %s
+              AND {identity_filter}
+              {type_filter}
+            """,
+            params,
+        )
+        deleted = cursor.rowcount
+        conn.commit()
+    return int(deleted or 0)
 
 
 def fetch_favorite_genres(*, active_only: bool) -> list[dict[str, Any]]:
@@ -3898,6 +4281,23 @@ def _row_to_content_state(row: tuple[Any, ...] | list[Any]) -> dict[str, Any]:
         "last_previewed_at": _parse_optional_timestamp(row[2]),
         "last_watched_at": _parse_optional_timestamp(row[3]),
         "updated_at": _parse_optional_timestamp(row[4]),
+    }
+
+
+def _row_to_title_role_signal(row: tuple[Any, ...] | list[Any]) -> dict[str, Any]:
+    return {
+        "signal_key": row[0],
+        "tconst": row[1],
+        "nconst": row[2],
+        "character_name": row[3],
+        "signal_type": row[4],
+        "polarity": row[5],
+        "strength": row[6],
+        "notes": row[7],
+        "source_origin": row[8],
+        "source_ref": row[9],
+        "created_at": _parse_optional_timestamp(row[10]),
+        "updated_at": _parse_optional_timestamp(row[11]),
     }
 
 

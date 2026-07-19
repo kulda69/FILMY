@@ -43,6 +43,7 @@ from filmy.runtime_postgres import (
     fetch_catalog_stats_row as fetch_catalog_stats_row_postgres,
     fetch_favorite_genres as fetch_favorite_genres_postgres,
     fetch_favorite_traits as fetch_favorite_traits_postgres,
+    fetch_ai_rated_title_rows,
     fetch_ai_taste_seed_rows,
     fetch_genre_score_source_rows as fetch_genre_score_source_rows_postgres,
     fetch_home_suggestion_candidate_rows as fetch_home_suggestion_candidate_rows_postgres,
@@ -2411,6 +2412,92 @@ def get_ai_taste_seed(source_list: str = "kouknout-znovu", limit: int = 50) -> d
     return fetch_ai_taste_seed_rows(source_list=source_list, limit=safe_limit)
 
 
+def get_ai_taste_inputs(limit_per_list: int = 25) -> dict[str, Any]:
+    """Return AI taste inputs grouped by user-list AI role."""
+
+    safe_limit = max(1, min(int(limit_per_list), 100))
+    included_roles = (
+        "strong_positive",
+        "interested_owned",
+        "interested_planned",
+        "in_progress",
+        "negative",
+    )
+    excluded_roles = ("external_suggestion", "ignore")
+    role_labels = {
+        "strong_positive": "Silne pozitivni priklady.",
+        "interested_owned": "Tituly, ktere Jiri ma nebo s nimi udelal rucni praci.",
+        "interested_planned": "Tituly, ktere chce videt nebo stoji za pozornost.",
+        "in_progress": "Rozkoukane tituly; opatrny signal zajmu.",
+        "negative": "Negativni priklady nebo veci, ktere nemaji podporovat podobne pozitivni tipy.",
+        "external_suggestion": "Vystup z AI; nepouzivat jako vstup.",
+        "ignore": "Neutralni nebo technicke seznamy; nepouzivat jako vstup.",
+    }
+    visible_lists = get_local_library_status().get("visible_lists") or []
+    grouped: dict[str, list[dict[str, Any]]] = {role: [] for role in included_roles}
+    excluded_sources: list[dict[str, Any]] = []
+
+    for source_list in visible_lists:
+        role = str(source_list.get("ai_input_role") or "ignore")
+        source_summary = {
+            "id": source_list.get("id"),
+            "slug": source_list.get("slug"),
+            "name": source_list.get("name"),
+            "description": source_list.get("description"),
+            "list_kind": source_list.get("list_kind"),
+            "ai_input_role": role,
+            "item_count": source_list.get("item_count"),
+        }
+        if role in excluded_roles:
+            excluded_sources.append(source_summary)
+            continue
+        if role not in grouped:
+            excluded_sources.append(source_summary)
+            continue
+        seed = get_ai_taste_seed(source_list=str(source_list["id"]), limit=safe_limit)
+        grouped[role].append(
+            {
+                "source_list": seed.get("source_list") or source_summary,
+                "role_description": role_labels[role],
+                "limit": seed.get("limit"),
+                "items": seed.get("items") or [],
+            }
+        )
+
+    return {
+        "contract_version": 1,
+        "limit_per_list": safe_limit,
+        "included_roles": list(included_roles),
+        "excluded_roles": list(excluded_roles),
+        "role_descriptions": role_labels,
+        "groups": grouped,
+        "excluded_sources": excluded_sources,
+        "usage_notes": [
+            "`external_suggestion` a `ignore` se nikdy neposilaji jako vstup pro AI tipy.",
+            "`negative` je vstup pro varovani a vymezovani vkusu, ne pozitivni seed.",
+            "Polozky ve skupinach maji stejny tvar jako `/api/ai/taste-seed` vcetne people affinity a title role signals.",
+        ],
+    }
+
+
+def get_ai_rated_titles(
+    *,
+    min_user_rating: int = 8,
+    limit: int = 50,
+    title_type: str | None = None,
+) -> dict[str, Any]:
+    """Return locally rated titles for an external AI recommendation layer."""
+
+    safe_rating = max(1, min(int(min_user_rating), 10))
+    safe_limit = max(1, min(int(limit), 200))
+    cleaned_title_type = (title_type or "").strip() or None
+    return fetch_ai_rated_title_rows(
+        min_user_rating=safe_rating,
+        limit=safe_limit,
+        title_type=cleaned_title_type,
+    )
+
+
 def get_ai_context() -> dict[str, Any]:
     """Return stable local taste context for an external AI recommendation layer."""
 
@@ -2428,6 +2515,12 @@ def get_ai_context() -> dict[str, Any]:
                 "max": 10,
                 "type": "integer",
                 "description": "Jiriho oblibenost osoby; 0 znamena bez pozitivni affinity.",
+            },
+            "title_role_signal_strength": {
+                "min": 0,
+                "max": 10,
+                "type": "integer",
+                "description": "Sila konkretniho signalu role/postavy v jednom titulu; neni to celkovy rating titulu ani affinity k herci.",
             },
             "imdb_rating": {
                 "min": 0,
@@ -2448,11 +2541,105 @@ def get_ai_context() -> dict[str, Any]:
             "genre_score_signals": "Lokalni preference zanru podle historie, ratingu a dalsich signalu.",
             "actor_affinity_rating": "Souhrnny signal oblibenosti hodnocenych hercu navazanych na titul.",
             "people_affinity": "Konkretni osoby z titulu, ktere maji rucni affinity rating; kontrakt pro navazujici rozsireni taste-seed.",
+            "title_role_signals": "Konkretni role/postavy v titulu, ktere Jiri oznacil jako pozitivni, negativni nebo smisene signaly. Tento signal je oddeleny od ratingu titulu i affinity k herci.",
+        },
+        "title_role_signal_definitions": {
+            "signal_types": {
+                "character": "Postava jako celek.",
+                "dialogue": "Dialogy, hlas, slovni projev nebo zpusob komunikace postavy.",
+                "behavior": "Chovani, rozhodovani a reakce postavy.",
+                "relationship_dynamic": "Vztahova dynamika postavy s ostatnimi.",
+                "performance": "Herecke provedeni v konkretni roli.",
+                "visual_appeal": "Vzhled, styl nebo vizualni pusobeni role v danem titulu.",
+                "attraction": "Pritazlivost nebo charisma role v danem titulu a dobe.",
+                "other": "Jiny titulove vazany signal role/postavy.",
+            },
+            "polarities": {
+                "positive": "Signal, ktery muze podporit podobna doporuceni.",
+                "negative": "Signal, ktery muze podobna doporuceni oslabit nebo vyloucit.",
+                "mixed": "Signal je dulezity, ale neni jednoznacne pozitivni ani negativni.",
+            },
+            "notes": "Poznamka je textovy kontext pro cloveka a pozdeji AI interpretaci; nema se sama prevadet na ciselne skore bez opatrnosti.",
         },
         "usage_notes": [
             "Endpoint je read-only a nevola externi AI ani online katalogy.",
             "Navazujici AI projekt ho ma volat jako obecny kontext pred praci s konkretnimi tituly.",
             "Favorite genres a favorite traits se vraci cele, vcetne neaktivnich polozek.",
+            "Title role signals mohou byt silne i u titulu s nizkym celkovym hodnocenim; napr. nebrat cely serial jako oblibeny, ale brat konkretni postavu/dialogy/chovani jako vzor.",
+        ],
+    }
+
+
+def get_ai_scoring_explainer() -> dict[str, Any]:
+    """Explain local scoring semantics for an external AI recommendation layer."""
+
+    return {
+        "contract_version": 1,
+        "score_scope": "default",
+        "status": {
+            "implemented_scoring": "Aktualni lokalni scoring pocita hlavne zanrove a titulove signaly z historie, lokalnich ratingu, watch signalu, people affinity a rucnich favorite genres.",
+            "role_signals_status": "Title role signals jsou nova samostatna vrstva. Zatim se nepositaji do genre_score_signals ani final_score.",
+            "future_role_signal_task": "Pozdeji navrhnout samostatnou scoring vetev pro role/postava signaly, napr. role_signal_score nebo character_preference_signals. Nezvedat tim automaticky celkove hodnoceni titulu.",
+        },
+        "principles": [
+            "Lokalni score je pomocny signal pro razeni a vysvetleni, ne definitivni pravda.",
+            "Jiriho lokalni rating ma vyssi vyznam nez externi IMDb rating.",
+            "IMDb rating je verejny externi signal kvality/popularity, ne osobni preference.",
+            "People affinity je osobni signal k osobe, ne obecna popularita herce.",
+            "Title role signals mohou byt silne i u titulu s nizkym celkovym ratingem; cist je samostatne.",
+            "Negativni seznamy a negativni signaly maji pomahat vymezit vkus, ne mechanicky mazat vsechny podobne tituly.",
+        ],
+        "signals": {
+            "final_score": {
+                "meaning": "Normalizovane lokalni skore kandidata nebo zanru v danem score scope.",
+                "ai_usage": "Pouzit jako podpurny signal razeni, ne jako jediny duvod doporuceni.",
+            },
+            "watch_signal_score": {
+                "meaning": "Signal odvozeny z historie sledovani a opakovanych lokalnich interakci.",
+                "ai_usage": "Ukazuje, ze Jiri s podobnym obsahem realne travil cas.",
+            },
+            "rating_signal_score": {
+                "meaning": "Signal odvozeny z Jiriho lokalnich ratingu.",
+                "ai_usage": "Silnejsi osobni signal nez IMDb rating; stale ho cist spolecne se slovnimi poznamkami.",
+            },
+            "actor_affinity_score": {
+                "meaning": "Signal odvozeny z oblibenosti osob navazanych na titul.",
+                "ai_usage": "Pouzit opatrne: osoba neni totéz jako role v konkretnim titulu.",
+            },
+            "genre_score_signals": {
+                "meaning": "Zanrove signaly, ktere ukazuji, proc se nejaky zanr nebo titul muze potkavat s lokalnim vkusem.",
+                "ai_usage": "Pouzit jako kontext k zanrum, ne jako samostatne vysvetleni celeho vkusu.",
+            },
+            "favorite_genres": {
+                "meaning": "Rucni zanrove preference; nizsi preference_rank znamena silnejsi preferenci.",
+                "ai_usage": "Cist jako explicitni korekci automatickych signalu.",
+            },
+            "favorite_traits": {
+                "meaning": "Rucni jemne preference typu slow-burn, dialogue-driven nebo atmospheric.",
+                "ai_usage": "Zatim hlavne interpretacni kontext; nemusi byt plne zapocitany ve vsech scoring vypoctech.",
+            },
+            "people_affinity": {
+                "meaning": "Konkretni osoby v titulu, ktere maji rucni affinity rating.",
+                "ai_usage": "Cist jako osobni vztah k osobe, oddelene od role/postavy.",
+            },
+            "title_role_signals": {
+                "meaning": "Konkretni signaly role/postavy v jednom titulu: postava, dialogy, chovani, vztahova dynamika, provedeni, vzhled nebo pritazlivost.",
+                "ai_usage": "Cist samostatne mimo final_score. Priklad: nizky rating celeho serialu muze koexistovat se silnym pozitivnim signalem jedne postavy.",
+                "current_scoring_inclusion": False,
+            },
+        },
+        "known_limitations": [
+            "Title role signals zatim nejsou zapocitane do final_score ani genre_score_signals.",
+            "Favorite traits jsou sbirane jako jemny kontext; jejich vliv na scoring se muze dal menit.",
+            "Bez slovnich poznamek muze byt duvod ratingu nejasny.",
+            "Seznamove role ai_input_role rikaji vyznam zdroje, ale samy o sobe nejsou detailni vysvetleni vkusu.",
+        ],
+        "recommended_ai_reading_order": [
+            "Nejdrive nacist /api/ai/context kvuli skalam a definicim.",
+            "Potom nacist /api/ai/scoring-explainer kvuli vyznamu score poli.",
+            "Potom nacist /api/ai/taste-inputs pro sirsi vstupy podle ai_input_role.",
+            "Podle potreby doplnit /api/ai/rated-titles pro silne lokalne hodnocene tituly.",
+            "Pri interpretaci kazde polozky kombinovat user_rating, liked/disliked notes, people_affinity, title_role_signals a genre_score_signals.",
         ],
     }
 
@@ -3582,16 +3769,83 @@ def create_user_list(name: str, description: str | None = None) -> dict[str, Any
     return _impl(name, description)
 
 
-def update_user_list_description(list_id: str, description: str | None = None) -> dict[str, Any]:
+def update_user_list_description(
+    list_id: str,
+    description: str | None = None,
+    ai_input_role: str | None = None,
+) -> dict[str, Any]:
     from filmy.db_library import update_user_list_description as _impl
 
-    return _impl(list_id, description)
+    return _impl(list_id, description, ai_input_role=ai_input_role)
 
 
 def delete_user_list(list_id: str) -> dict[str, Any]:
     from filmy.db_library import delete_user_list as _impl
 
     return _impl(list_id)
+
+
+def set_title_role_signal(
+    tconst: str,
+    *,
+    nconst: str | None = None,
+    character_name: str | None = None,
+    signal_type: str = "character",
+    polarity: str = "positive",
+    strength: int = 8,
+    notes: str | None = None,
+) -> dict[str, Any]:
+    from filmy.db_library import set_title_role_signal as _impl
+
+    return _impl(
+        tconst,
+        nconst=nconst,
+        character_name=character_name,
+        signal_type=signal_type,
+        polarity=polarity,
+        strength=strength,
+        notes=notes,
+    )
+
+
+def replace_title_role_signals(
+    tconst: str,
+    *,
+    nconst: str | None = None,
+    character_name: str | None = None,
+    signal_types: list[str] | tuple[str, ...] | None = None,
+    polarity: str = "positive",
+    strength: int = 8,
+    notes: str | None = None,
+) -> dict[str, Any]:
+    from filmy.db_library import replace_title_role_signals as _impl
+
+    return _impl(
+        tconst,
+        nconst=nconst,
+        character_name=character_name,
+        signal_types=signal_types,
+        polarity=polarity,
+        strength=strength,
+        notes=notes,
+    )
+
+
+def delete_title_role_signals(
+    tconst: str,
+    *,
+    nconst: str | None = None,
+    character_name: str | None = None,
+) -> dict[str, Any]:
+    from filmy.db_library import delete_title_role_signals as _impl
+
+    return _impl(tconst, nconst=nconst, character_name=character_name)
+
+
+def get_title_role_signals(tconst: str) -> list[dict[str, Any]]:
+    from filmy.db_library import get_title_role_signals as _impl
+
+    return _impl(tconst)
 
 
 def _pick_best_title_match(query: str, candidates: list[dict[str, Any]]) -> dict[str, Any]:

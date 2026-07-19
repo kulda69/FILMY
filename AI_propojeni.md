@@ -34,6 +34,14 @@
   - a určite genre
   - mozna affinuty vuci herci
   - a nejaky zpusobem jak bylo do skore zapocitano Favorite Genres a Favorite Traits
-  - 
- 
 
+# Jemne signaly uvnitr titulu
+- samostatne od celkoveho ratingu titulu a od globalni obliby herce potrebujeme evidovat i konkretni signal role/postavy
+- priklad: Everwood muze mit nizke celkove hodnoceni, ale postava Ephram je silny pozitivni signal kvuli chovani a dialogum
+- tohle se nema ukladat jako „mam rad herce“, protoze jde o roli/postavu v konkretnim titulu
+- databazovy zaklad: `app.user_title_role_signals`
+- typy signalu: `character`, `dialogue`, `behavior`, `relationship_dynamic`, `performance`, `visual_appeal`, `attraction`, `other`
+- polarita: `positive`, `negative`, `mixed`
+- sila: 0-10
+- poznamka se nema sama ciselne hodnotit; je ulozena jako vysvetlujici kontext pro cloveka a pozdeji pro AI
+- AI kontrakt ma pozdeji umet rict: neber dany titul jako celkove oblibeny, ale ber konkretni postavu/dialogy/vztahovou dynamiku jako pozitivni nebo negativni vzor

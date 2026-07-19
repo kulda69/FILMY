@@ -17,9 +17,11 @@ from filmy.db import (
     create_user_list,
     delete_user_list,
     delete_group_from_user_list,
+    delete_title_role_signals,
     move_group_between_user_lists,
     record_watch_event,
     record_watch_events_through_episode,
+    replace_title_role_signals,
     set_person_affinity_rating,
     set_user_rating,
     update_user_list_description,
@@ -168,6 +170,52 @@ async def ui_person_affinity_rating(
     return redirect_back(return_to)
 
 
+@router.post("/ui/title-role-signals/set")
+async def ui_title_role_signal_set(
+    tconst: str = Form(),
+    nconst: str | None = Form(default=None),
+    character_name: str | None = Form(default=None),
+    signal_types: list[str] = Form(default=[]),
+    polarity: str = Form(default="positive"),
+    strength: int = Form(default=8),
+    notes: str | None = Form(default=None),
+    return_to: str | None = Form(default=None),
+):
+    try:
+        replace_title_role_signals(
+            tconst,
+            nconst=nconst,
+            character_name=character_name,
+            signal_types=signal_types,
+            polarity=polarity,
+            strength=strength,
+            notes=notes,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    signal_metadata_pipeline("ui_title_role_signal_set", target_tconst=tconst)
+    return redirect_back(return_to)
+
+
+@router.post("/ui/title-role-signals/delete")
+async def ui_title_role_signal_delete(
+    tconst: str = Form(),
+    nconst: str | None = Form(default=None),
+    character_name: str | None = Form(default=None),
+    return_to: str | None = Form(default=None),
+):
+    try:
+        delete_title_role_signals(
+            tconst,
+            nconst=nconst,
+            character_name=character_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    signal_metadata_pipeline("ui_title_role_signal_delete", target_tconst=tconst)
+    return redirect_back(return_to)
+
+
 @router.post("/ui/title-episodes/watched-through")
 async def ui_title_episode_watched_through(
     episode_tconst: str = Form(),
@@ -198,10 +246,11 @@ async def ui_create_list(name: str = Form(), description: str | None = Form(defa
 async def ui_update_list_description(
     list_id: str = Form(),
     description: str | None = Form(default=None),
+    ai_input_role: str | None = Form(default=None),
     return_to: str | None = Form(default=None),
 ):
     try:
-        update_user_list_description(list_id, description)
+        update_user_list_description(list_id, description, ai_input_role=ai_input_role)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     signal_metadata_pipeline("ui_list_update_description")

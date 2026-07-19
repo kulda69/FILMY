@@ -4,24 +4,130 @@
     <div class="row row-cols-1 row-cols-md-2 g-2">
         {% for person in title_main_cast %}
         <div class="col">
-            <a
-                href="/people/{{ person.nconst }}?return_to={{ title_return_to | urlencode }}"
-                class="rounded-3 border border-secondary-subtle px-3 py-2 bg-body h-100 d-flex align-items-center gap-3 cast-person-chip text-decoration-none text-light"
-            >
-                {% if person.portrait_url %}
-                <img src="{{ person.portrait_url }}" alt="{{ person.name }}" class="rounded-3 border border-secondary-subtle flex-shrink-0 cast-person-thumb">
-                {% else %}
-                <div class="rounded-3 border border-secondary-subtle bg-dark-subtle text-secondary d-flex align-items-center justify-content-center flex-shrink-0 cast-person-thumb">
-                    <span class="small">?</span>
-                </div>
-                {% endif %}
-                <div class="min-w-0">
-                    <div class="fw-semibold text-truncate">{{ person.name }}</div>
-                    {% if person.character %}
-                    <div class="small text-secondary text-truncate">{{ person.character }}</div>
+            <div class="rounded-3 border border-secondary-subtle px-3 py-2 bg-body h-100 d-flex align-items-center gap-3 cast-person-chip">
+                <a
+                    href="/people/{{ person.nconst }}?return_to={{ title_return_to | urlencode }}"
+                    class="d-flex align-items-center gap-3 min-w-0 flex-grow-1 text-decoration-none text-light"
+                >
+                    {% if person.portrait_url %}
+                    <img src="{{ person.portrait_url }}" alt="{{ person.name }}" class="rounded-3 border border-secondary-subtle flex-shrink-0 cast-person-thumb">
+                    {% else %}
+                    <div class="rounded-3 border border-secondary-subtle bg-dark-subtle text-secondary d-flex align-items-center justify-content-center flex-shrink-0 cast-person-thumb">
+                        <span class="small">?</span>
+                    </div>
                     {% endif %}
+                    <div class="min-w-0">
+                        <div class="fw-semibold text-truncate">{{ person.name }}</div>
+                        {% if person.character %}
+                        <div class="small text-secondary text-truncate">{{ person.character }}</div>
+                        {% endif %}
+                        {% if person.top_role_signal %}
+                        <div class="small text-warning-emphasis text-truncate">Role {{ person.top_role_signal.strength }}/10 · {{ person.top_role_signal.polarity }}</div>
+                        {% endif %}
+                    </div>
+                </a>
+                {% set cast_menu_id = "cast-role-menu-" ~ title_item.tconst ~ "-" ~ person.nconst ~ "-" ~ loop.index %}
+                <div class="flex-shrink-0">
+                    <button
+                        type="button"
+                        class="card-menu-trigger text-secondary border-0 bg-transparent p-0"
+                        popovertarget="{{ cast_menu_id }}"
+                        aria-label="Cast actions for {{ person.name }}"
+                        data-person-menu-anchor="{{ cast_menu_id }}"
+                    >...</button>
+                    <div id="{{ cast_menu_id }}" popover class="card-menu-panel" data-centered-menu-panel style="width: min(92vw, 28rem);">
+                        <div class="card-menu-view" data-menu-view="root">
+                            <a
+                                class="card-menu-item text-decoration-none"
+                                href="/people/{{ person.nconst }}?return_to={{ title_return_to | urlencode }}"
+                            >Otevřít herce</a>
+                            <button
+                                type="button"
+                                class="card-menu-item d-flex justify-content-between align-items-center"
+                                data-menu-open="role-signal"
+                            >
+                                <span>Role/postava</span>
+                                {% if person.top_role_signal %}
+                                <span class="small text-secondary">{{ person.top_role_signal.strength }}/10</span>
+                                {% else %}
+                                <span class="text-secondary">›</span>
+                                {% endif %}
+                            </button>
+                        </div>
+
+                        <div class="card-menu-view d-none" data-menu-view="role-signal">
+                            <button type="button" class="card-menu-item d-flex align-items-center gap-2" data-menu-back>
+                                <span class="text-secondary">‹</span>
+                                <span>Back</span>
+                            </button>
+                            <div class="card-menu-label">Role/postava</div>
+                            <form action="/ui/title-role-signals/set" method="post" class="m-0 px-2 pb-2">
+                                <input type="hidden" name="tconst" value="{{ title_item.tconst }}">
+                                <input type="hidden" name="nconst" value="{{ person.nconst }}">
+                                <input type="hidden" name="return_to" value="{{ title_return_to }}">
+
+                                <label class="form-label small text-secondary mb-1" for="role-character-{{ cast_menu_id }}">Postava</label>
+                                <input
+                                    id="role-character-{{ cast_menu_id }}"
+                                    type="text"
+                                    name="character_name"
+                                    value="{{ person.character or '' }}"
+                                    class="form-control form-control-sm bg-body text-light border-secondary-subtle mb-2"
+                                >
+
+                                <div class="form-label small text-secondary mb-1">Typ signálu</div>
+                                <div class="row row-cols-1 row-cols-sm-2 g-1 mb-2">
+                                    {% for option in title_role_signal_type_options %}
+                                    <div class="col">
+                                        <div class="form-check small">
+                                            <input
+                                                id="role-type-{{ cast_menu_id }}-{{ option.value }}"
+                                                class="form-check-input"
+                                                type="checkbox"
+                                                name="signal_types"
+                                                value="{{ option.value }}"
+                                                {% if option.value in person.role_signal_type_values or (not person.top_role_signal and option.value == "character") %}checked{% endif %}
+                                            >
+                                            <label class="form-check-label" for="role-type-{{ cast_menu_id }}-{{ option.value }}">{{ option.label }}</label>
+                                        </div>
+                                    </div>
+                                    {% endfor %}
+                                </div>
+
+                                <label class="form-label small text-secondary mb-1" for="role-polarity-{{ cast_menu_id }}">Polarita</label>
+                                <select id="role-polarity-{{ cast_menu_id }}" name="polarity" class="form-select form-select-sm bg-body text-light border-secondary-subtle mb-2">
+                                    {% for option in title_role_signal_polarity_options %}
+                                    <option value="{{ option.value }}" {% if person.top_role_signal and person.top_role_signal.polarity == option.value %}selected{% endif %}>{{ option.label }}</option>
+                                    {% endfor %}
+                                </select>
+
+                                <label class="form-label small text-secondary mb-1" for="role-strength-{{ cast_menu_id }}">Síla</label>
+                                <select id="role-strength-{{ cast_menu_id }}" name="strength" class="form-select form-select-sm bg-body text-light border-secondary-subtle mb-2">
+                                    {% for strength_value in range(10, -1, -1) %}
+                                    <option value="{{ strength_value }}" {% if person.top_role_signal and person.top_role_signal.strength == strength_value %}selected{% elif not person.top_role_signal and strength_value == 8 %}selected{% endif %}>{{ strength_value }}/10</option>
+                                    {% endfor %}
+                                </select>
+
+                                <label class="form-label small text-secondary mb-1" for="role-notes-{{ cast_menu_id }}">Poznámka</label>
+                                <textarea id="role-notes-{{ cast_menu_id }}" name="notes" class="form-control form-control-sm bg-body text-light border-secondary-subtle mb-3" rows="3">{{ person.top_role_signal.notes if person.top_role_signal else "" }}</textarea>
+                                <div class="small text-secondary mb-3">Poznámka se nepočítá číselně; je uložená jako kontext pro tebe a později pro AI vysvětlení.</div>
+
+                                <button type="submit" class="btn btn-sm btn-outline-light w-100">Save</button>
+                            </form>
+                            {% if person.top_role_signal %}
+                            <div class="border-top border-secondary-subtle my-2"></div>
+                            <form action="/ui/title-role-signals/delete" method="post" class="m-0 px-2 pb-2">
+                                <input type="hidden" name="tconst" value="{{ title_item.tconst }}">
+                                <input type="hidden" name="nconst" value="{{ person.nconst }}">
+                                <input type="hidden" name="character_name" value="{{ person.character or '' }}">
+                                <input type="hidden" name="return_to" value="{{ title_return_to }}">
+                                <button type="submit" class="btn btn-sm btn-outline-secondary w-100">Smazat hodnocení role</button>
+                            </form>
+                            {% endif %}
+                        </div>
+                    </div>
                 </div>
-            </a>
+            </div>
         </div>
         {% endfor %}
     </div>

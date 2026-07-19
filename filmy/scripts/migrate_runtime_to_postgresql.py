@@ -8,6 +8,7 @@ nahradi cilovy obsah. Opakovany beh tedy nevytvari duplicity ani mezistav.
 from __future__ import annotations
 
 import argparse
+import csv
 from dataclasses import dataclass
 from datetime import date, datetime
 import os
@@ -55,6 +56,7 @@ OPTIONAL_RUNTIME_TRIGGERS = (
     "user_list_items.trg_user_list_items_touch_updated_at",
     "user_ratings.trg_user_ratings_touch_updated_at",
     "user_people.trg_user_people_touch_updated_at",
+    "user_title_role_signals.trg_user_title_role_signals_touch_updated_at",
     "favorite_genres.trg_favorite_genres_touch_updated_at",
     "favorite_traits.trg_favorite_traits_touch_updated_at",
 )
@@ -144,7 +146,7 @@ TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
     ),
     "user_lists": (
         "id", "slug", "name", "list_kind", "source_origin", "source_ref",
-        "created_at", "updated_at", "description",
+        "created_at", "updated_at", "description", "ai_input_role",
     ),
     "user_list_items": (
         "id", "list_id", "canonical_key", "tconst", "media_type", "imdb_id",
@@ -159,8 +161,8 @@ TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
     "user_ratings": (
         "canonical_key", "tconst", "media_type", "imdb_id", "tmdb_id",
         "trakt_id", "parent_tconst", "parent_title", "title", "season_number",
-        "episode_number", "rating", "liked_notes", "disliked_notes", "rated_at",
-        "source_origin", "source_ref", "created_at", "updated_at",
+        "episode_number", "rating", "rated_at", "source_origin", "source_ref",
+        "created_at", "updated_at", "liked_notes", "disliked_notes",
     ),
     "content_state": (
         "tconst", "interest_state", "last_previewed_at", "last_watched_at", "updated_at",
@@ -168,6 +170,10 @@ TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
     "user_people": (
         "person_key", "nconst", "name", "known_for", "birth_date", "source_origin",
         "source_ref", "is_favorite", "created_at", "updated_at", "affinity_rating",
+    ),
+    "user_title_role_signals": (
+        "signal_key", "tconst", "nconst", "character_name", "signal_type", "polarity",
+        "strength", "notes", "source_origin", "source_ref", "created_at", "updated_at",
     ),
     "favorite_genres": (
         "genre", "weight", "preference_rank", "source_origin", "source_ref", "notes",
@@ -256,6 +262,7 @@ EXPECTED_COLUMNS: dict[str, tuple[tuple[str, str, bool, str], ...]] = {
         ("created_at", "timestamp without time zone", True, ""),
         ("updated_at", "timestamp without time zone", True, ""),
         ("description", "text", False, ""),
+        ("ai_input_role", "text", True, "'ignore'::text"),
     ),
     "user_list_items": (
         ("id", "text", True, ""), ("list_id", "text", True, ""),
@@ -286,11 +293,11 @@ EXPECTED_COLUMNS: dict[str, tuple[tuple[str, str, bool, str], ...]] = {
         ("parent_tconst", "text", False, ""), ("parent_title", "text", False, ""),
         ("title", "text", False, ""), ("season_number", "integer", False, ""),
         ("episode_number", "integer", False, ""), ("rating", "smallint", True, ""),
-        ("liked_notes", "text", False, ""), ("disliked_notes", "text", False, ""),
         ("rated_at", "timestamp without time zone", False, ""),
         ("source_origin", "text", True, ""), ("source_ref", "text", False, ""),
         ("created_at", "timestamp without time zone", True, ""),
         ("updated_at", "timestamp without time zone", True, ""),
+        ("liked_notes", "text", False, ""), ("disliked_notes", "text", False, ""),
     ),
     "content_state": (
         ("tconst", "text", True, ""), ("interest_state", "text", True, ""),
@@ -306,6 +313,15 @@ EXPECTED_COLUMNS: dict[str, tuple[tuple[str, str, bool, str], ...]] = {
         ("created_at", "timestamp without time zone", True, ""),
         ("updated_at", "timestamp without time zone", True, ""),
         ("affinity_rating", "integer", False, ""),
+    ),
+    "user_title_role_signals": (
+        ("signal_key", "text", True, ""), ("tconst", "text", True, ""),
+        ("nconst", "text", False, ""), ("character_name", "text", False, ""),
+        ("signal_type", "text", True, ""), ("polarity", "text", True, "'positive'::text"),
+        ("strength", "integer", True, ""), ("notes", "text", False, ""),
+        ("source_origin", "text", True, ""), ("source_ref", "text", False, ""),
+        ("created_at", "timestamp without time zone", True, ""),
+        ("updated_at", "timestamp without time zone", True, ""),
     ),
     "favorite_genres": (
         ("genre", "text", True, ""), ("weight", "double precision", True, "1.0"),
@@ -364,6 +380,7 @@ EXPECTED_CONSTRAINTS = (
     ("local_seed_meta", "local_seed_meta_pkey", "p", "seed_name", False, False, True),
     ("user_lists", "user_lists_pkey", "p", "id", False, False, True),
     ("user_lists", "user_lists_slug_key", "u", "slug", False, False, True),
+    ("user_lists", "user_lists_ai_input_role_check", "c", "CHECK (ai_input_role = ANY (ARRAY['strong_positive'::text, 'interested_owned'::text, 'interested_planned'::text, 'in_progress'::text, 'negative'::text, 'external_suggestion'::text, 'ignore'::text]))", False, False, True),
     ("user_list_items", "user_list_items_pkey", "p", "id", False, False, True),
     ("user_list_items", "user_list_items_list_id_canonical_key_key", "u", "list_id,canonical_key", False, False, True),
     ("watch_events", "watch_events_pkey", "p", "id", False, False, True),
@@ -376,6 +393,10 @@ EXPECTED_CONSTRAINTS = (
     ("content_state", "content_state_interest_state_check", "c", "CHECK (interest_state = ANY (ARRAY['previewed'::text, 'in_progress'::text, 'watched'::text]))", False, False, True),
     ("user_people", "user_people_pkey", "p", "person_key", False, False, True),
     ("user_people", "user_people_affinity_rating_check", "c", "CHECK (affinity_rating IS NULL OR affinity_rating >= 0 AND affinity_rating <= 10)", False, False, True),
+    ("user_title_role_signals", "user_title_role_signals_pkey", "p", "signal_key", False, False, True),
+    ("user_title_role_signals", "user_title_role_signals_strength_check", "c", "CHECK (strength >= 0 AND strength <= 10)", False, False, True),
+    ("user_title_role_signals", "user_title_role_signals_polarity_check", "c", "CHECK (polarity = ANY (ARRAY['positive'::text, 'negative'::text, 'mixed'::text]))", False, False, True),
+    ("user_title_role_signals", "user_title_role_signals_signal_type_check", "c", "CHECK (signal_type = ANY (ARRAY['character'::text, 'dialogue'::text, 'behavior'::text, 'relationship_dynamic'::text, 'performance'::text, 'visual_appeal'::text, 'attraction'::text, 'other'::text]))", False, False, True),
     ("favorite_genres", "favorite_genres_pkey", "p", "genre", False, False, True),
     ("favorite_traits", "favorite_traits_pkey", "p", "trait", False, False, True),
     ("genre_scores", "genre_scores_pkey", "p", "id", False, False, True),
@@ -408,6 +429,10 @@ EXPECTED_INDEXES = (
     ("user_people", "user_people_pkey", True, True, True, True, "btree", "person_key", "text_ops", "default", "0"),
     ("user_people", "idx_user_people_nconst", False, False, True, True, "btree", "nconst", "text_ops", "default", "0"),
     ("user_people", "idx_user_people_favorite", False, False, True, True, "btree", "is_favorite", "bool_ops", "", "0"),
+    ("user_title_role_signals", "user_title_role_signals_pkey", True, True, True, True, "btree", "signal_key", "text_ops", "default", "0"),
+    ("user_title_role_signals", "idx_user_title_role_signals_tconst", False, False, True, True, "btree", "tconst", "text_ops", "default", "0"),
+    ("user_title_role_signals", "idx_user_title_role_signals_nconst", False, False, True, True, "btree", "nconst", "text_ops", "default", "0"),
+    ("user_title_role_signals", "idx_user_title_role_signals_polarity_strength", False, False, True, True, "btree", "polarity,strength", "text_ops,int4_ops", "default,", "0,3"),
     ("favorite_genres", "favorite_genres_pkey", True, True, True, True, "btree", "genre", "text_ops", "default", "0"),
     ("favorite_genres", "idx_favorite_genres_active_rank", False, False, True, True, "btree", "is_active,preference_rank", "bool_ops,int4_ops", ",", "0,0"),
     ("favorite_traits", "favorite_traits_pkey", True, True, True, True, "btree", "trait", "text_ops", "default", "0"),
@@ -862,11 +887,44 @@ def _duckdb_csv_literal(path: Path) -> str:
 
 
 DUCKDB_OPTIONAL_SOURCE_COLUMNS: dict[str, dict[str, str]] = {
+    "user_lists": {
+        "ai_input_role": (
+            "CASE "
+            "WHEN slug = 'kouknout-znou' THEN 'strong_positive' "
+            "WHEN slug = 'mam' THEN 'interested_owned' "
+            "WHEN slug IN ('watchlist', 'koukni-rychle', 'stahnout') THEN 'interested_planned' "
+            "WHEN slug = 'rozkoukano' THEN 'in_progress' "
+            "WHEN slug = 'nedokoukano' THEN 'negative' "
+            "WHEN slug = 'ai-navrhy' THEN 'external_suggestion' "
+            "ELSE 'ignore' END"
+        ),
+    },
     "user_ratings": {
         "liked_notes": "CAST(NULL AS VARCHAR)",
         "disliked_notes": "CAST(NULL AS VARCHAR)",
     }
 }
+DUCKDB_OPTIONAL_EMPTY_SOURCE_TABLES = frozenset({"user_title_role_signals"})
+
+
+def _duckdb_table_exists(connection: duckdb.DuckDBPyConnection, table: str) -> bool:
+    row = connection.execute(
+        """
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = 'app'
+          AND table_name = ?
+        LIMIT 1
+        """,
+        [table],
+    ).fetchone()
+    return row is not None
+
+
+def _write_empty_csv(path: Path, columns: tuple[str, ...]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(columns)
 
 
 def _duckdb_table_columns(connection: duckdb.DuckDBPyConnection, table: str) -> set[str]:
@@ -901,6 +959,12 @@ def export_source(directory: Path) -> SourceSnapshot:
         connection.execute("BEGIN TRANSACTION")
         try:
             for table, columns in TABLE_COLUMNS.items():
+                if not _duckdb_table_exists(connection, table):
+                    if table not in DUCKDB_OPTIONAL_EMPTY_SOURCE_TABLES:
+                        raise RuntimeError(f"DuckDB zdrojova tabulka app.{table} neexistuje.")
+                    counts[table] = 0
+                    _write_empty_csv(directory / f"{table}.csv", columns)
+                    continue
                 counts[table] = connection.execute(
                     f"SELECT count(*) FROM app.{table}"
                 ).fetchone()[0]
@@ -1267,9 +1331,9 @@ SELECT detail FROM violations ORDER BY detail
     dml_sql = f"""
 BEGIN;
 INSERT INTO app.user_lists
-    (id, slug, name, list_kind, source_origin, created_at, updated_at)
+    (id, slug, name, list_kind, ai_input_role, source_origin, created_at, updated_at)
 VALUES ({_sql_literal(smoke_id)}, {_sql_literal(smoke_id)}, 'smoke', 'custom',
-        'migration-smoke', clock_timestamp(), clock_timestamp());
+        'ignore', 'migration-smoke', clock_timestamp(), clock_timestamp());
 UPDATE app.user_lists SET description='updated' WHERE id={_sql_literal(smoke_id)};
 DELETE FROM app.user_lists WHERE id={_sql_literal(smoke_id)};
 ROLLBACK;

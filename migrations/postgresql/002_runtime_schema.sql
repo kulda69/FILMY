@@ -122,8 +122,60 @@ CREATE TABLE IF NOT EXISTS app.user_lists (
     source_ref text,
     created_at timestamp without time zone NOT NULL,
     updated_at timestamp without time zone NOT NULL,
-    description text
+    description text,
+    ai_input_role text NOT NULL DEFAULT 'ignore'
 );
+
+ALTER TABLE app.user_lists
+    ADD COLUMN IF NOT EXISTS ai_input_role text NOT NULL DEFAULT 'ignore';
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'user_lists_ai_input_role_check'
+          AND conrelid = 'app.user_lists'::regclass
+    ) THEN
+        ALTER TABLE app.user_lists
+            ADD CONSTRAINT user_lists_ai_input_role_check
+            CHECK (
+                ai_input_role = ANY (ARRAY[
+                    'strong_positive'::text,
+                    'interested_owned'::text,
+                    'interested_planned'::text,
+                    'in_progress'::text,
+                    'negative'::text,
+                    'external_suggestion'::text,
+                    'ignore'::text
+                ])
+            );
+    END IF;
+END;
+$$;
+
+UPDATE app.user_lists
+SET ai_input_role = CASE
+    WHEN slug = 'kouknout-znou' THEN 'strong_positive'
+    WHEN slug = 'mam' THEN 'interested_owned'
+    WHEN slug IN ('watchlist', 'koukni-rychle', 'stahnout') THEN 'interested_planned'
+    WHEN slug = 'rozkoukano' THEN 'in_progress'
+    WHEN slug = 'nedokoukano' THEN 'negative'
+    WHEN slug = 'ai-navrhy' THEN 'external_suggestion'
+    ELSE 'ignore'
+END,
+updated_at = CURRENT_TIMESTAMP
+WHERE ai_input_role = 'ignore'
+  AND slug IN (
+      'kouknout-znou',
+      'mam',
+      'watchlist',
+      'koukni-rychle',
+      'stahnout',
+      'rozkoukano',
+      'nedokoukano',
+      'ai-navrhy'
+  );
 
 CREATE TABLE IF NOT EXISTS app.user_list_items (
     id text PRIMARY KEY,
@@ -176,13 +228,13 @@ CREATE TABLE IF NOT EXISTS app.user_ratings (
     season_number integer,
     episode_number integer,
     rating smallint NOT NULL,
-    liked_notes text,
-    disliked_notes text,
     rated_at timestamp without time zone,
     source_origin text NOT NULL,
     source_ref text,
     created_at timestamp without time zone NOT NULL,
-    updated_at timestamp without time zone NOT NULL
+    updated_at timestamp without time zone NOT NULL,
+    liked_notes text,
+    disliked_notes text
 );
 
 ALTER TABLE app.user_ratings
@@ -211,6 +263,21 @@ CREATE TABLE IF NOT EXISTS app.user_people (
     created_at timestamp without time zone NOT NULL,
     updated_at timestamp without time zone NOT NULL,
     affinity_rating integer
+);
+
+CREATE TABLE IF NOT EXISTS app.user_title_role_signals (
+    signal_key text PRIMARY KEY,
+    tconst text NOT NULL,
+    nconst text,
+    character_name text,
+    signal_type text NOT NULL,
+    polarity text NOT NULL DEFAULT 'positive',
+    strength integer NOT NULL,
+    notes text,
+    source_origin text NOT NULL,
+    source_ref text,
+    created_at timestamp without time zone NOT NULL,
+    updated_at timestamp without time zone NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS app.favorite_genres (
@@ -358,6 +425,46 @@ BEGIN
             ADD CONSTRAINT user_people_affinity_rating_check
             CHECK (affinity_rating IS NULL OR affinity_rating BETWEEN 0 AND 10);
     END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'user_title_role_signals_strength_check'
+          AND conrelid = 'app.user_title_role_signals'::regclass
+    ) THEN
+        ALTER TABLE app.user_title_role_signals
+            ADD CONSTRAINT user_title_role_signals_strength_check
+            CHECK (strength BETWEEN 0 AND 10);
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'user_title_role_signals_polarity_check'
+          AND conrelid = 'app.user_title_role_signals'::regclass
+    ) THEN
+        ALTER TABLE app.user_title_role_signals
+            ADD CONSTRAINT user_title_role_signals_polarity_check
+            CHECK (polarity = ANY (ARRAY['positive'::text, 'negative'::text, 'mixed'::text]));
+    END IF;
+
+    ALTER TABLE app.user_title_role_signals
+        DROP CONSTRAINT IF EXISTS user_title_role_signals_signal_type_check;
+
+    ALTER TABLE app.user_title_role_signals
+        ADD CONSTRAINT user_title_role_signals_signal_type_check
+        CHECK (
+            signal_type = ANY (ARRAY[
+                'character'::text,
+                'dialogue'::text,
+                'behavior'::text,
+                'relationship_dynamic'::text,
+                'performance'::text,
+                'visual_appeal'::text,
+                'attraction'::text,
+                'other'::text
+            ])
+        );
 END
 $$;
 
@@ -804,6 +911,17 @@ BEGIN
 
     IF NOT EXISTS (
         SELECT 1 FROM pg_trigger
+        WHERE tgname = 'trg_user_title_role_signals_touch_updated_at'
+          AND tgrelid = 'app.user_title_role_signals'::regclass
+    ) THEN
+        CREATE TRIGGER trg_user_title_role_signals_touch_updated_at
+        BEFORE UPDATE ON app.user_title_role_signals
+        FOR EACH ROW
+        EXECUTE FUNCTION app.touch_updated_at();
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
         WHERE tgname = 'trg_favorite_genres_touch_updated_at'
           AND tgrelid = 'app.favorite_genres'::regclass
     ) THEN
@@ -1085,6 +1203,12 @@ CREATE INDEX IF NOT EXISTS idx_user_people_nconst
     ON app.user_people (nconst);
 CREATE INDEX IF NOT EXISTS idx_user_people_favorite
     ON app.user_people (is_favorite);
+CREATE INDEX IF NOT EXISTS idx_user_title_role_signals_tconst
+    ON app.user_title_role_signals (tconst);
+CREATE INDEX IF NOT EXISTS idx_user_title_role_signals_nconst
+    ON app.user_title_role_signals (nconst);
+CREATE INDEX IF NOT EXISTS idx_user_title_role_signals_polarity_strength
+    ON app.user_title_role_signals (polarity, strength DESC);
 CREATE INDEX IF NOT EXISTS idx_favorite_genres_active_rank
     ON app.favorite_genres (is_active, preference_rank);
 CREATE INDEX IF NOT EXISTS idx_favorite_traits_active_rank

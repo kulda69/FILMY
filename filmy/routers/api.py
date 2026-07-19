@@ -19,6 +19,9 @@ from filmy.db import (
     describe_person_by_query,
     describe_title_by_query,
     get_ai_context,
+    get_ai_rated_titles,
+    get_ai_scoring_explainer,
+    get_ai_taste_inputs,
     get_ai_taste_seed,
     get_catalog_stats,
     get_content_detail,
@@ -297,11 +300,42 @@ async def ai_taste_seed(
     return get_ai_taste_seed(source_list=source_list, limit=limit)
 
 
+@router.get("/api/ai/taste-inputs")
+async def ai_taste_inputs(
+    limit_per_list: int = Query(default=25, ge=1, le=100),
+):
+    """Read local taste inputs grouped by AI list role."""
+
+    return get_ai_taste_inputs(limit_per_list=limit_per_list)
+
+
+@router.get("/api/ai/rated-titles")
+async def ai_rated_titles(
+    min_user_rating: int = Query(default=8, ge=1, le=10),
+    limit: int = Query(default=50, ge=1, le=200),
+    title_type: str | None = Query(default=None, pattern="^(movie|tvMovie|tvSeries|tvMiniSeries)$"),
+):
+    """Read locally rated titles above a threshold for a separate AI workflow."""
+
+    return get_ai_rated_titles(
+        min_user_rating=min_user_rating,
+        limit=limit,
+        title_type=title_type,
+    )
+
+
 @router.get("/api/ai/context")
 async def ai_context():
     """Read stable preference context for a separate AI recommendation workflow."""
 
     return get_ai_context()
+
+
+@router.get("/api/ai/scoring-explainer")
+async def ai_scoring_explainer():
+    """Read local scoring semantics for a separate AI recommendation workflow."""
+
+    return get_ai_scoring_explainer()
 
 
 @router.delete("/api/library/content/{tconst}/rating")
