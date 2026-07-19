@@ -19,6 +19,7 @@ from filmy.db import (
     describe_person_by_query,
     describe_title_by_query,
     get_ai_context,
+    get_ai_noted_titles,
     get_ai_rated_titles,
     get_ai_scoring_explainer,
     get_ai_taste_inputs,
@@ -322,6 +323,17 @@ async def ai_rated_titles(
         limit=limit,
         title_type=title_type,
     )
+
+
+@router.get("/api/ai/noted-titles")
+async def ai_noted_titles(
+    notes: str = Query(default="any", pattern="^(any|liked|disliked)$"),
+    min_user_rating: int | None = Query(default=None, ge=1, le=10),
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    """Read titles with local liked/disliked notes for a separate AI workflow."""
+
+    return get_ai_noted_titles(notes=notes, min_user_rating=min_user_rating, limit=limit)
 
 
 @router.get("/api/ai/context")

@@ -43,6 +43,7 @@ from filmy.runtime_postgres import (
     fetch_catalog_stats_row as fetch_catalog_stats_row_postgres,
     fetch_favorite_genres as fetch_favorite_genres_postgres,
     fetch_favorite_traits as fetch_favorite_traits_postgres,
+    fetch_ai_noted_title_rows,
     fetch_ai_rated_title_rows,
     fetch_ai_taste_seed_rows,
     fetch_genre_score_source_rows as fetch_genre_score_source_rows_postgres,
@@ -2495,6 +2496,28 @@ def get_ai_rated_titles(
         min_user_rating=safe_rating,
         limit=safe_limit,
         title_type=cleaned_title_type,
+    )
+
+
+def get_ai_noted_titles(
+    *,
+    notes: str = "any",
+    min_user_rating: int | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Return titles with written local notes for an external AI layer."""
+
+    cleaned_notes = (notes or "any").strip().lower()
+    if cleaned_notes not in {"any", "liked", "disliked"}:
+        cleaned_notes = "any"
+    safe_min_rating = None
+    if min_user_rating is not None:
+        safe_min_rating = max(1, min(int(min_user_rating), 10))
+    safe_limit = max(1, min(int(limit), 200))
+    return fetch_ai_noted_title_rows(
+        notes=cleaned_notes,
+        min_user_rating=safe_min_rating,
+        limit=safe_limit,
     )
 
 

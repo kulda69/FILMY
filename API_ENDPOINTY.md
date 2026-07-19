@@ -27,9 +27,11 @@ Doporucene poradi volani:
 3. `GET /api/ai/taste-inputs`
    - sirsi vstupy podle `ai_input_role`,
    - `external_suggestion` a `ignore` jsou vyloucene z AI vstupu.
-4. Volitelne `GET /api/ai/rated-titles`
+4. Volitelne `GET /api/ai/noted-titles`
+   - tituly s textovymi klady/zapory, tedy nejhustsi osobni vysvetleni vkusu.
+5. Volitelne `GET /api/ai/rated-titles`
    - silne lokalne hodnocene tituly od zadaneho prahu.
-5. Volitelne `GET /api/ai/taste-seed`
+6. Volitelne `GET /api/ai/taste-seed`
    - jeden konkretni seznam, kdyz je potreba cilenejsi sada prikladu.
 
 Bez prvnich dvou kroku nema externi AI projekt delat zavery typu „tento titul je
@@ -532,19 +534,61 @@ nedoporucit bez dobreho vysvetleni.
 
 ## GET `/api/ai/noted-titles`
 
-Stav: planovano.
+Stav: implementovano.
 
 Read-only endpoint pro tituly, ktere maji vyplnene slovni hodnoceni
 `liked_notes` nebo `disliked_notes`. Ma byt prakticky dulezity pro ChatGPT,
 protoze slovni hodnoceni obsahuje nejvetsi hustotu osobniho vkusu.
 
-### Navrzene query parametry
+### Query parametry
 
 - `notes`: `any`, `liked`, nebo `disliked`; vychozi `any`.
-- `min_user_rating`: volitelny filtr podle lokalniho ratingu.
-- `limit`: pocet vracenych titulu, minimum `1`, maximum `200`.
+- `min_user_rating`: volitelny filtr podle lokalniho ratingu, minimum `1`, maximum `10`.
+- `limit`: pocet vracenych titulu, minimum `1`, maximum `200`; vychozi `50`.
+
+### Priklad
+
+```bash
+curl "http://127.0.0.1:8019/api/ai/noted-titles?notes=any&limit=50"
+```
+
+### Tvar odpovedi
+
+```json
+{
+  "filters": {
+    "notes": "any",
+    "min_user_rating": null
+  },
+  "limit": 50,
+  "items": [
+    {
+      "imdb_id": "tt0242795",
+      "tconst": "tt0242795",
+      "tmdb_id": 1953,
+      "title": "Everwood",
+      "original_title": "Everwood",
+      "title_type": "tvSeries",
+      "year": 2002,
+      "genres": ["Drama"],
+      "imdb_rating": 7.5,
+      "imdb_votes": 15000,
+      "user_rating": 7,
+      "liked_notes": "Textove klady zapsane v lokalni appce.",
+      "disliked_notes": "Textove zapory zapsane v lokalni appce.",
+      "rated_at": "2026-07-19T10:30:00+00:00",
+      "actor_affinity_rating": 4.5,
+      "people_affinity": [],
+      "title_role_signals": [],
+      "genre_score_signals": []
+    }
+  ]
+}
+```
 
 ### Poznamka ke kontraktu
 
-Payload polozky ma byt kompatibilni s `taste-seed`, ale endpoint ma radit
-prednostne podle existence a cerstvosti slovnich poznamek, ne podle seznamu.
+Payload polozky je kompatibilni s `taste-seed`, ale endpoint radi prednostne
+podle existence a cerstvosti slovnich poznamek, ne podle seznamu. Pokud jsou
+vyplnene klady i zapory, ma titul vyssi prioritu nez titul s jednostrannou
+poznamkou.

@@ -130,6 +130,40 @@ def test_ai_rated_titles_endpoint_routes_filters() -> None:
     assert payload["items"][0]["user_rating"] == 9
 
 
+def test_ai_noted_titles_endpoint_routes_filters() -> None:
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    with patch(
+        "filmy.routers.api.get_ai_noted_titles",
+        return_value={
+            "filters": {"notes": "liked", "min_user_rating": 7},
+            "limit": 5,
+            "items": [
+                {
+                    "imdb_id": "tt0242795",
+                    "tconst": "tt0242795",
+                    "title": "Everwood",
+                    "user_rating": 7,
+                    "liked_notes": "Ephram jako postava a dialogy.",
+                    "disliked_notes": None,
+                    "title_role_signals": [],
+                    "people_affinity": [],
+                    "genre_score_signals": [],
+                }
+            ],
+        },
+    ) as noted_titles_mock:
+        response = client.get("/api/ai/noted-titles?notes=liked&min_user_rating=7&limit=5")
+
+    assert response.status_code == 200
+    noted_titles_mock.assert_called_once_with(notes="liked", min_user_rating=7, limit=5)
+    payload = response.json()
+    assert payload["filters"]["notes"] == "liked"
+    assert payload["items"][0]["liked_notes"] == "Ephram jako postava a dialogy."
+
+
 def test_ai_taste_inputs_endpoint_routes_limit() -> None:
     app = FastAPI()
     app.include_router(router)

@@ -2034,6 +2034,215 @@ def fetch_ai_rated_title_rows(
     }
 
 
+def fetch_ai_noted_title_rows(
+    *,
+    notes: str,
+    min_user_rating: int | None,
+    limit: int,
+) -> dict[str, Any]:
+    """Return locally noted titles for an external AI recommender."""
+
+    note_mode = notes if notes in {"any", "liked", "disliked"} else "any"
+    note_filters = {
+        "any": "(NULLIF(BTRIM(COALESCE(lr.liked_notes, '')), '') IS NOT NULL OR NULLIF(BTRIM(COALESCE(lr.disliked_notes, '')), '') IS NOT NULL)",
+        "liked": "NULLIF(BTRIM(COALESCE(lr.liked_notes, '')), '') IS NOT NULL",
+        "disliked": "NULLIF(BTRIM(COALESCE(lr.disliked_notes, '')), '') IS NOT NULL",
+    }
+    rating_filter = ""
+    params: list[Any] = []
+    if min_user_rating is not None:
+        rating_filter = "AND lr.rating >= %s"
+        params.append(min_user_rating)
+    params.append(limit)
+
+    with _connect() as conn, conn.cursor() as cursor:
+        cursor.execute(
+            f"""
+            WITH latest_ratings AS (
+                SELECT DISTINCT ON (tconst)
+                    tconst,
+                    rating,
+                    liked_notes,
+                    disliked_notes,
+                    rated_at,
+                    updated_at
+                FROM app.user_ratings
+                WHERE tconst IS NOT NULL
+                ORDER BY tconst, rated_at DESC NULLS LAST, updated_at DESC, created_at DESC
+            ),
+            latest_scores AS (
+                SELECT DISTINCT ON (genre)
+                    genre,
+                    final_score,
+                    rating_signal_score,
+                    watch_signal_score,
+                    actor_affinity_score,
+                    generated_at
+                FROM app.genre_scores
+                WHERE score_scope = 'default'
+                ORDER BY genre, generated_at DESC, rank_in_run ASC
+            ),
+            title_people_affinity AS (
+                SELECT
+                    c.tconst,
+                    ROUND(
+                        AVG(p.affinity_rating) FILTER (
+                            WHERE c.credit_group = 'cast'
+                              AND (c.ordering IS NULL OR c.ordering <= 8)
+                        )::numeric,
+                        3
+                    )::double precision AS actor_affinity_rating,
+                    jsonb_agg(
+                        jsonb_build_object(
+                            'nconst', c.nconst,
+                            'name', person.primary_name,
+                            'credit_group', c.credit_group,
+                            'ordering', c.ordering,
+                            'affinity_rating', p.affinity_rating,
+                            'is_favorite', p.is_favorite
+                        )
+                        ORDER BY
+                            CASE c.credit_group
+                                WHEN 'director' THEN 0
+                                WHEN 'creator' THEN 1
+                                WHEN 'writer' THEN 2
+                                WHEN 'cast' THEN 3
+                                ELSE 4
+                            END,
+                            c.ordering NULLS LAST,
+                            person.primary_name
+                    ) AS people_affinity
+                FROM app.title_credits AS c
+                JOIN app.user_people AS p ON p.nconst = c.nconst
+                JOIN app.catalog_people AS person ON person.nconst = c.nconst
+                WHERE p.affinity_rating > 0
+                GROUP BY c.tconst
+            ),
+            title_role_signals AS (
+                SELECT
+                    s.tconst,
+                    jsonb_agg(
+                        jsonb_build_object(
+                            'signal_key', s.signal_key,
+                            'nconst', s.nconst,
+                            'person_name', person.primary_name,
+                            'character_name', s.character_name,
+                            'signal_type', s.signal_type,
+                            'polarity', s.polarity,
+                            'strength', s.strength,
+                            'notes', s.notes,
+                            'source_origin', s.source_origin,
+                            'source_ref', s.source_ref,
+                            'updated_at', s.updated_at
+                        )
+                        ORDER BY s.strength DESC, s.updated_at DESC, s.character_name NULLS LAST, s.signal_type
+                    ) AS title_role_signals
+                FROM app.user_title_role_signals AS s
+                LEFT JOIN app.catalog_people AS person ON person.nconst = s.nconst
+                GROUP BY s.tconst
+            )
+            SELECT
+                t.tconst,
+                t.primary_title,
+                t.original_title,
+                t.title_type,
+                t.start_year,
+                t.genres,
+                t.average_rating,
+                t.num_votes,
+                map.tmdb_id,
+                lr.rating,
+                lr.liked_notes,
+                lr.disliked_notes,
+                lr.rated_at,
+                pa.actor_affinity_rating,
+                COALESCE(pa.people_affinity, '[]'::jsonb) AS people_affinity,
+                COALESCE(trs.title_role_signals, '[]'::jsonb) AS title_role_signals,
+                COALESCE(
+                    jsonb_agg(
+                        DISTINCT jsonb_build_object(
+                            'genre', score.genre,
+                            'final_score', score.final_score,
+                            'rating_signal_score', score.rating_signal_score,
+                            'watch_signal_score', score.watch_signal_score,
+                            'actor_affinity_score', score.actor_affinity_score
+                        )
+                    ) FILTER (WHERE score.genre IS NOT NULL),
+                    '[]'::jsonb
+                ) AS genre_score_signals
+            FROM latest_ratings AS lr
+            JOIN app.catalog_titles AS t ON t.tconst = lr.tconst
+            LEFT JOIN app.tmdb_title_map AS map ON map.tconst = t.tconst
+            LEFT JOIN title_people_affinity AS pa ON pa.tconst = t.tconst
+            LEFT JOIN title_role_signals AS trs ON trs.tconst = t.tconst
+            LEFT JOIN latest_scores AS score ON score.genre = ANY(string_to_array(COALESCE(t.genres, ''), ','))
+            WHERE {note_filters[note_mode]}
+              {rating_filter}
+            GROUP BY
+                t.tconst,
+                t.primary_title,
+                t.original_title,
+                t.title_type,
+                t.start_year,
+                t.genres,
+                t.average_rating,
+                t.num_votes,
+                map.tmdb_id,
+                lr.rating,
+                lr.liked_notes,
+                lr.disliked_notes,
+                lr.rated_at,
+                lr.updated_at,
+                pa.actor_affinity_rating,
+                pa.people_affinity,
+                trs.title_role_signals
+            ORDER BY
+                (
+                    NULLIF(BTRIM(COALESCE(lr.liked_notes, '')), '') IS NOT NULL
+                    AND NULLIF(BTRIM(COALESCE(lr.disliked_notes, '')), '') IS NOT NULL
+                ) DESC,
+                lr.rated_at DESC NULLS LAST,
+                lr.updated_at DESC NULLS LAST,
+                lr.rating DESC,
+                t.primary_title
+            LIMIT %s
+            """,
+            params,
+        )
+        rows = cursor.fetchall()
+
+    return {
+        "filters": {
+            "notes": note_mode,
+            "min_user_rating": min_user_rating,
+        },
+        "limit": limit,
+        "items": [
+            {
+                "imdb_id": row[0],
+                "tconst": row[0],
+                "tmdb_id": row[8],
+                "title": row[1],
+                "original_title": row[2],
+                "title_type": row[3],
+                "year": row[4],
+                "genres": [genre for genre in str(row[5] or "").split(",") if genre],
+                "imdb_rating": row[6],
+                "imdb_votes": row[7],
+                "user_rating": row[9],
+                "liked_notes": row[10],
+                "disliked_notes": row[11],
+                "rated_at": _parse_optional_timestamp(row[12]),
+                "actor_affinity_rating": row[13],
+                "people_affinity": row[14] or [],
+                "title_role_signals": row[15] or [],
+                "genre_score_signals": row[16] or [],
+            }
+            for row in rows
+        ],
+    }
+
+
 def insert_watch_event(
     *,
     event_id: str,
