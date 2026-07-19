@@ -154,6 +154,17 @@ TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
         "season_number", "episode_number", "rank", "added_at", "notes",
         "source_origin", "source_ref", "is_archived", "created_at", "updated_at",
     ),
+    "ai_recommendation_runs": (
+        "id", "source_path", "source_filename", "source_checksum", "contract_version",
+        "intent", "status", "payload_created_at", "imported_at", "source_inputs_json",
+        "method_notes_json", "deprioritized_candidates_json", "notes", "raw_json",
+    ),
+    "ai_recommendation_candidates": (
+        "id", "run_id", "row_number", "title", "year", "imdb_id", "tmdb_id",
+        "media_type", "confidence", "recommendation_status", "priority", "fit_reasons_json",
+        "risk_reasons_json", "source_signal_refs_json", "notes", "raw_json",
+        "resolved_tconst", "resolution_status", "ai_list_item_id", "created_at", "updated_at",
+    ),
     "watch_events": (
         "id", "tconst", "event_scope", "watched_on", "source", "batch_id",
         "import_row_id", "rating", "notes", "created_at",
@@ -199,6 +210,16 @@ TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
         "first_searched_at", "last_searched_at", "hit_count",
     ),
 }
+
+PRE_AI_RECOMMENDATION_TABLES = tuple(
+    table
+    for table in TABLE_COLUMNS
+    if table not in {"ai_recommendation_runs", "ai_recommendation_candidates"}
+)
+POSTGRES_ONLY_RUNTIME_TABLES = frozenset({
+    "ai_recommendation_runs",
+    "ai_recommendation_candidates",
+})
 
 EXPECTED_COLUMNS: dict[str, tuple[tuple[str, str, bool, str], ...]] = {
     "imdb_file_manifest": (
@@ -276,6 +297,28 @@ EXPECTED_COLUMNS: dict[str, tuple[tuple[str, str, bool, str], ...]] = {
         ("notes", "text", False, ""), ("source_origin", "text", True, ""),
         ("source_ref", "text", False, ""), ("is_archived", "boolean", True, "false"),
         ("created_at", "timestamp without time zone", True, ""),
+        ("updated_at", "timestamp without time zone", True, ""),
+    ),
+    "ai_recommendation_runs": (
+        ("id", "text", True, ""), ("source_path", "text", True, ""),
+        ("source_filename", "text", True, ""), ("source_checksum", "text", True, ""),
+        ("contract_version", "integer", True, ""), ("intent", "text", True, ""),
+        ("status", "text", True, ""), ("payload_created_at", "timestamp without time zone", False, ""),
+        ("imported_at", "timestamp without time zone", True, ""), ("source_inputs_json", "text", True, ""),
+        ("method_notes_json", "text", True, ""), ("deprioritized_candidates_json", "text", True, ""),
+        ("notes", "text", False, ""), ("raw_json", "text", True, ""),
+    ),
+    "ai_recommendation_candidates": (
+        ("id", "text", True, ""), ("run_id", "text", True, ""),
+        ("row_number", "integer", True, ""), ("title", "text", True, ""),
+        ("year", "integer", False, ""), ("imdb_id", "text", False, ""),
+        ("tmdb_id", "bigint", False, ""), ("media_type", "text", False, ""),
+        ("confidence", "text", False, ""), ("recommendation_status", "text", False, ""),
+        ("priority", "integer", False, ""), ("fit_reasons_json", "text", True, ""),
+        ("risk_reasons_json", "text", True, ""), ("source_signal_refs_json", "text", True, ""),
+        ("notes", "text", False, ""), ("raw_json", "text", True, ""),
+        ("resolved_tconst", "text", False, ""), ("resolution_status", "text", True, ""),
+        ("ai_list_item_id", "text", False, ""), ("created_at", "timestamp without time zone", True, ""),
         ("updated_at", "timestamp without time zone", True, ""),
     ),
     "watch_events": (
@@ -383,6 +426,10 @@ EXPECTED_CONSTRAINTS = (
     ("user_lists", "user_lists_ai_input_role_check", "c", "CHECK (ai_input_role = ANY (ARRAY['strong_positive'::text, 'interested_owned'::text, 'interested_planned'::text, 'in_progress'::text, 'negative'::text, 'external_suggestion'::text, 'ignore'::text]))", False, False, True),
     ("user_list_items", "user_list_items_pkey", "p", "id", False, False, True),
     ("user_list_items", "user_list_items_list_id_canonical_key_key", "u", "list_id,canonical_key", False, False, True),
+    ("ai_recommendation_runs", "ai_recommendation_runs_pkey", "p", "id", False, False, True),
+    ("ai_recommendation_runs", "ai_recommendation_runs_source_checksum_key", "u", "source_checksum", False, False, True),
+    ("ai_recommendation_candidates", "ai_recommendation_candidates_pkey", "p", "id", False, False, True),
+    ("ai_recommendation_candidates", "ai_recommendation_candidates_run_id_row_number_key", "u", "run_id,row_number", False, False, True),
     ("watch_events", "watch_events_pkey", "p", "id", False, False, True),
     ("watch_events", "watch_events_batch_import_row_key", "u", "batch_id,import_row_id", False, False, True),
     ("watch_events", "watch_events_event_scope_check", "c", "CHECK (event_scope = ANY (ARRAY['title'::text, 'episode'::text]))", False, False, True),
@@ -419,6 +466,13 @@ EXPECTED_INDEXES = (
     ("user_list_items", "user_list_items_list_id_canonical_key_key", True, False, True, True, "btree", "list_id,canonical_key", "text_ops,text_ops", "default,default", "0,0"),
     ("user_list_items", "idx_user_list_items_list_active", False, False, True, True, "btree", "list_id,is_archived,rank", "text_ops,bool_ops,int4_ops", "default,,", "0,0,0"),
     ("user_list_items", "idx_user_list_items_tconst", False, False, True, True, "btree", "tconst", "text_ops", "default", "0"),
+    ("ai_recommendation_runs", "ai_recommendation_runs_pkey", True, True, True, True, "btree", "id", "text_ops", "default", "0"),
+    ("ai_recommendation_runs", "ai_recommendation_runs_source_checksum_key", True, False, True, True, "btree", "source_checksum", "text_ops", "default", "0"),
+    ("ai_recommendation_runs", "idx_ai_recommendation_runs_imported_at", False, False, True, True, "btree", "imported_at", "timestamp_ops", "", "0"),
+    ("ai_recommendation_candidates", "ai_recommendation_candidates_pkey", True, True, True, True, "btree", "id", "text_ops", "default", "0"),
+    ("ai_recommendation_candidates", "ai_recommendation_candidates_run_id_row_number_key", True, False, True, True, "btree", "run_id,row_number", "text_ops,int4_ops", "default,", "0,0"),
+    ("ai_recommendation_candidates", "idx_ai_recommendation_candidates_imdb_id", False, False, True, True, "btree", "imdb_id", "text_ops", "default", "0"),
+    ("ai_recommendation_candidates", "idx_ai_recommendation_candidates_resolved_tconst", False, False, True, True, "btree", "resolved_tconst", "text_ops", "default", "0"),
     ("watch_events", "watch_events_pkey", True, True, True, True, "btree", "id", "text_ops", "default", "0"),
     ("watch_events", "watch_events_batch_import_row_key", True, False, True, True, "btree", "batch_id,import_row_id", "text_ops,text_ops", "default,default", "0,0"),
     ("watch_events", "idx_watch_events_tconst_watched", False, False, True, True, "btree", "tconst,watched_on", "text_ops,date_ops", "default,", "0,3"),
@@ -658,8 +712,18 @@ COPY (
             f"neočekávané views={extras}, relace={relations[:20]}"
         )
     if not (expected - tables) and not (tables - expected - allowed_catalog_tables):
-        verify_schema_fingerprint(config)
+        try:
+            verify_schema_fingerprint(config)
+        except RuntimeError as exc:
+            if not _schema_drift_is_only_pending_ai_checksum_unique(exc):
+                raise
         return "existing"
+    pre_ai_recommendations_expected = set(PRE_AI_RECOMMENDATION_TABLES)
+    if not (pre_ai_recommendations_expected - tables) and not (
+        tables - pre_ai_recommendations_expected - allowed_catalog_tables
+    ):
+        verify_schema_fingerprint(config, tables_override=PRE_AI_RECOMMENDATION_TABLES)
+        return "pre-ai-recommendations"
     if not (legacy_expected - tables) and not (tables - legacy_expected - allowed_catalog_tables):
         verify_schema_fingerprint(config, tables_override=LEGACY_RUNTIME_TABLES)
         return "legacy-runtime"
@@ -882,6 +946,14 @@ def verify_schema_fingerprint(
         raise RuntimeError("Cílové runtime schéma nesedí: " + "; ".join(violations[:20]))
 
 
+def _schema_drift_is_only_pending_ai_checksum_unique(error: RuntimeError) -> bool:
+    """Allow applying the one additive checksum uniqueness migration."""
+
+    text = str(error)
+    lines = [line.strip() for line in text.split(";") if line.strip()]
+    return bool(lines) and all("ai_recommendation_runs_source_checksum_key" in line for line in lines)
+
+
 def _duckdb_csv_literal(path: Path) -> str:
     return "'" + path.as_posix().replace("'", "''") + "'"
 
@@ -904,7 +976,11 @@ DUCKDB_OPTIONAL_SOURCE_COLUMNS: dict[str, dict[str, str]] = {
         "disliked_notes": "CAST(NULL AS VARCHAR)",
     }
 }
-DUCKDB_OPTIONAL_EMPTY_SOURCE_TABLES = frozenset({"user_title_role_signals"})
+DUCKDB_OPTIONAL_EMPTY_SOURCE_TABLES = frozenset({
+    "user_title_role_signals",
+    "ai_recommendation_runs",
+    "ai_recommendation_candidates",
+})
 
 
 def _duckdb_table_exists(connection: duckdb.DuckDBPyConnection, table: str) -> bool:
@@ -1015,8 +1091,12 @@ def import_snapshot(admin: ConnectionConfig, directory: Path) -> None:
             )
         )
     for table in reversed(tuple(TABLE_COLUMNS)):
+        if table in POSTGRES_ONLY_RUNTIME_TABLES:
+            continue
         pieces.append(f"DELETE FROM app.{table};")
     for table, columns in TABLE_COLUMNS.items():
+        if table in POSTGRES_ONLY_RUNTIME_TABLES:
+            continue
         column_sql = ", ".join(columns)
         pieces.append(
             f"INSERT INTO app.{table} ({column_sql}) SELECT {column_sql} FROM stage_{table};"
@@ -1098,8 +1178,17 @@ def verify_data(admin: ConnectionConfig, source: SourceSnapshot) -> None:
         admin.psql, admin.host, admin.port, TARGET_DATABASE, admin.user, admin.password
     )
     target_counts = _target_counts(target_admin)
-    if target_counts != source.counts:
-        raise RuntimeError(f"Nesedi pocty radku: DuckDB={source.counts}, PostgreSQL={target_counts}")
+    comparable_tables = set(TABLE_COLUMNS) - POSTGRES_ONLY_RUNTIME_TABLES
+    source_comparable = {
+        table: count for table, count in source.counts.items() if table in comparable_tables
+    }
+    target_comparable = {
+        table: count for table, count in target_counts.items() if table in comparable_tables
+    }
+    if target_comparable != source_comparable:
+        raise RuntimeError(
+            f"Nesedi pocty radku: DuckDB={source_comparable}, PostgreSQL={target_comparable}"
+        )
     orphan_check = _psql(
         target_admin,
         sql=(

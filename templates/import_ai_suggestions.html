@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+
+{% block title %}Filmy | Import AI suggestions{% endblock %}
+
+{% block content %}
+{% set current_label = "Import AI suggestions" %}
+{% include "_top_breadcrumbs.html" %}
+
+<section class="mb-4">
+    <div class="card bg-black border-secondary-subtle">
+        <div class="card-body p-4 p-lg-5">
+            <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4">
+                <div>
+                    <h1 class="h2 mb-2" style="color: #b56a33;">Import AI suggestions</h1>
+                    <p class="text-secondary mb-0">Načtení stabilních JSON doporučení z <code>filmy_output/</code> do seznamu <code>AI návrhy</code>.</p>
+                </div>
+                <a class="btn btn-outline-light" href="/lists/ai-suggestions">Open AI návrhy</a>
+            </div>
+
+            {% if imported %}
+            <div class="alert alert-success border-0 mb-4" role="alert">
+                Import hotový: {{ source_filename }}. Kandidáti {{ recommendations }}, resolved {{ resolved }}, nové položky {{ list_inserted }}, aktualizované {{ list_updated }}{% if unresolved %}, unresolved {{ unresolved }}{% endif %}.
+            </div>
+            {% endif %}
+
+            {% if already_imported %}
+            <div class="alert alert-secondary border-0 mb-4" role="alert">
+                Soubor {{ source_filename }} už byl importovaný. Nový běh jsem nezaložil.
+            </div>
+            {% endif %}
+
+            {% if error_message %}
+            <div class="alert alert-danger border-0 mb-4" role="alert">
+                {{ error_message }}
+            </div>
+            {% endif %}
+
+            {% if deleted %}
+            <div class="alert alert-warning border-0 mb-4" role="alert">
+                Soubor {{ deleted_filename }} byl smazaný z <code>filmy_output/</code>.
+            </div>
+            {% endif %}
+
+            <div class="row g-4">
+                <div class="col-12 col-xl-5">
+                    <div class="rounded-4 border border-secondary-subtle bg-body p-4 h-100">
+                        <div class="text-uppercase small mb-3" style="color: #b56a33;">Run Import</div>
+                        {% set importable_files = files | selectattr("error", "none") | list %}
+                        {% if importable_files %}
+                        <form method="post" action="/system/import-ai-suggestions">
+                            <input type="hidden" name="return_to" value="{{ return_to }}">
+                            <label class="form-label small text-secondary" for="ai-import-file">JSON file</label>
+                            <select id="ai-import-file" name="filename" class="form-select bg-body text-light border-secondary-subtle mb-3">
+                                {% for file in importable_files %}
+                                <option value="{{ file.filename }}">
+                                    {{ file.filename }}{% if file.imported %} · imported{% endif %}
+                                </option>
+                                {% endfor %}
+                            </select>
+                            <button type="submit" class="btn btn-light text-dark">Import selected file</button>
+                        </form>
+                        {% else %}
+                        <div class="rounded-4 border border-secondary-subtle bg-black p-4 text-secondary">
+                            V <code>filmy_output/</code> není žádný validní JSON pro import.
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+
+                <div class="col-12 col-xl-7">
+                    <div class="rounded-4 border border-secondary-subtle bg-body p-4 h-100">
+                        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+                            <div class="text-uppercase small" style="color: #b56a33;">Available files</div>
+                            <span class="badge text-bg-dark border border-secondary-subtle">{{ files | length }} files</span>
+                        </div>
+                        {% if files %}
+                        <div class="list-group list-group-flush">
+                            {% for file in files %}
+                            <div class="list-group-item bg-transparent text-light border-secondary-subtle px-0">
+                                <div class="d-flex flex-wrap justify-content-between align-items-start gap-2">
+                                    <div>
+                                        <div class="fw-semibold">{{ file.filename }}</div>
+                                        {% if file.error %}
+                                        <div class="small text-danger">{{ file.error }}</div>
+                                        {% else %}
+                                        <div class="small text-secondary">
+                                            {{ file.intent }} · {{ file.recommendation_count }} recommendations
+                                            {% if file.created_at %} · {{ file.created_at }}{% endif %}
+                                        </div>
+                                        {% endif %}
+                                    </div>
+                                    <div class="d-flex flex-wrap align-items-center gap-2">
+                                        {% if file.imported %}
+                                        <span class="badge text-bg-success">Imported</span>
+                                        {% elif file.error %}
+                                        <span class="badge text-bg-danger">Invalid</span>
+                                        {% else %}
+                                        <span class="badge text-bg-dark border border-secondary-subtle">Ready</span>
+                                        {% endif %}
+                                        <form method="post" action="/system/import-ai-suggestions/delete" class="m-0">
+                                            <input type="hidden" name="return_to" value="{{ return_to }}">
+                                            <input type="hidden" name="filename" value="{{ file.filename }}">
+                                            <button type="submit" class="btn btn-sm btn-outline-danger">Smazat</button>
+                                        </form>
+                                    </div>
+                                </div>
+                                {% if file.imported_at %}
+                                <div class="small text-secondary mt-2">Imported {{ format_czech_datetime(file.imported_at) }}</div>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <div class="rounded-4 border border-secondary-subtle bg-black p-4 text-secondary">
+                            Adresář <code>filmy_output/</code> zatím neobsahuje žádné JSON soubory.
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+
+            <div class="small text-secondary mt-4">
+                Deduplikace probíhá jen v cílovém seznamu <code>AI návrhy</code>. Stejný titul může dál existovat ve Watchlistu, <code>Mam</code> nebo jiném seznamu.
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock %}

@@ -46,6 +46,7 @@ from filmy.runtime_postgres import (
     fetch_ai_noted_title_rows,
     fetch_ai_rated_title_rows,
     fetch_ai_taste_seed_rows,
+    fetch_latest_ai_recommendation_for_title as fetch_latest_ai_recommendation_for_title_postgres,
     fetch_genre_score_source_rows as fetch_genre_score_source_rows_postgres,
     fetch_home_suggestion_candidate_rows as fetch_home_suggestion_candidate_rows_postgres,
     fetch_import_batch_record,
@@ -2519,6 +2520,28 @@ def get_ai_noted_titles(
         min_user_rating=safe_min_rating,
         limit=safe_limit,
     )
+
+
+def import_ai_recommendations_file(path: str | Path) -> dict[str, Any]:
+    from filmy.ai_recommendations import import_ai_recommendations_file as _impl
+
+    return _impl(path)
+
+
+def list_ai_recommendation_files() -> list[dict[str, Any]]:
+    from filmy.ai_recommendations import list_ai_recommendation_files as _impl
+
+    return _impl()
+
+
+def delete_ai_recommendation_file(filename: str) -> dict[str, Any]:
+    from filmy.ai_recommendations import delete_ai_recommendation_file as _impl
+
+    return _impl(filename)
+
+
+def get_latest_ai_recommendation_for_title(tconst: str) -> dict[str, Any] | None:
+    return fetch_latest_ai_recommendation_for_title_postgres(tconst)
 
 
 def get_ai_context() -> dict[str, Any]:

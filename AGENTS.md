@@ -16,6 +16,7 @@ Technické prostředí
 - Appka se spouští jako desktopová přes Brave/Chrome app mód, případně později pywebview.
 - DuckDB větve už neaktualizovat o nové funkce ani nové schéma. Cílový směr je PostgreSQL-only; zbylý DuckDB kód pouze inventarizovat, držet bez dalšího rozvoje nebo plánovaně odstranit.
 - `API_ENDPOINTY.md` je živý kontrakt pro navazující projekty. Při přidání, změně nebo upřesnění veřejného/navazujícího endpointu ho průběžně aktualizovat.
+- `filmy_output/` je stabilní lokální zdroj AI doporučení pro import zpět do FILMY. Importer má číst jeho standardní JSON schéma; prázdná/nepoužitá pole zůstávají jako `null` nebo prázdné seznamy, ne jako chybějící pole.
 
 Pracovní styl
 

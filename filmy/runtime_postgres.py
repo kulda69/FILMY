@@ -5,6 +5,7 @@ from datetime import datetime
 from functools import lru_cache
 import json
 from typing import Any
+import uuid
 
 from dotenv import dotenv_values
 import psycopg
@@ -3016,6 +3017,365 @@ def fetch_active_user_list_items() -> list[dict[str, Any]]:
         }
         for row in rows
     ]
+
+
+def import_ai_recommendation_batch(
+    *,
+    run_id: str,
+    source_path: str,
+    source_filename: str,
+    source_checksum: str,
+    contract_version: int,
+    intent: str,
+    status: str,
+    payload_created_at: str | None,
+    imported_at: str,
+    source_inputs_json: str,
+    method_notes_json: str,
+    deprioritized_candidates_json: str,
+    notes: str | None,
+    raw_json: str,
+    recommendations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Import one stable AI recommendation JSON into audit tables and AI suggestions list."""
+
+    target_list_slug = "ai-navrhy"
+    target_list_id = "ai-suggestions"
+    imported_count = 0
+    resolved_count = 0
+    list_inserted = 0
+    list_updated = 0
+    unresolved: list[dict[str, Any]] = []
+
+    with _connect() as conn, conn.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO app.user_lists (
+                id, slug, name, description, list_kind, ai_input_role,
+                source_origin, source_ref, created_at, updated_at
+            )
+            VALUES (
+                %s, %s, 'AI návrhy', 'Doporučení importovaná z externí AI vrstvy.',
+                'custom', 'external_suggestion', 'ai_import', 'ensure_ai_suggestions',
+                %s::timestamp, %s::timestamp
+            )
+            ON CONFLICT (slug) DO UPDATE SET
+                ai_input_role = 'external_suggestion',
+                updated_at = excluded.updated_at
+            RETURNING id
+            """,
+            (target_list_id, target_list_slug, imported_at, imported_at),
+        )
+        target_list_id = cursor.fetchone()[0]
+        cursor.execute(
+            """
+            SELECT id
+            FROM app.ai_recommendation_runs
+            WHERE source_checksum = %s
+            """,
+            (source_checksum,),
+        )
+        existing_run = cursor.fetchone()
+        if existing_run is not None:
+            conn.rollback()
+            return {
+                "run_id": existing_run[0],
+                "source_filename": source_filename,
+                "target_list_id": target_list_id,
+                "recommendations": 0,
+                "resolved": 0,
+                "unresolved": 0,
+                "list_inserted": 0,
+                "list_updated": 0,
+                "unresolved_items": [],
+                "already_imported": True,
+            }
+        cursor.execute(
+            """
+            INSERT INTO app.ai_recommendation_runs (
+                id, source_path, source_filename, source_checksum, contract_version,
+                intent, status, payload_created_at, imported_at, source_inputs_json,
+                method_notes_json, deprioritized_candidates_json, notes, raw_json
+            )
+            VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s::timestamp, %s::timestamp,
+                %s, %s, %s, %s, %s
+            )
+            """,
+            (
+                run_id,
+                source_path,
+                source_filename,
+                source_checksum,
+                contract_version,
+                intent,
+                status,
+                payload_created_at,
+                imported_at,
+                source_inputs_json,
+                method_notes_json,
+                deprioritized_candidates_json,
+                notes,
+                raw_json,
+            ),
+        )
+
+        for row_number, recommendation in enumerate(recommendations, start=1):
+            candidate_id = f"ai-rec-candidate-{uuid.uuid4()}"
+            imdb_id = recommendation.get("imdb_id")
+            tmdb_id = recommendation.get("tmdb_id")
+            title = str(recommendation["title"])
+            year = recommendation.get("year")
+            media_type = recommendation.get("media_type")
+            resolved_tconst = None
+            resolution_status = "unresolved_missing_imdb"
+            title_type = None
+            catalog_title = None
+            catalog_tmdb_id = None
+            ai_list_item_id = None
+
+            if isinstance(imdb_id, str) and imdb_id.startswith("tt"):
+                cursor.execute(
+                    """
+                    SELECT t.tconst, t.title_type, t.primary_title, map.tmdb_id
+                    FROM app.catalog_titles AS t
+                    LEFT JOIN app.tmdb_title_map AS map ON map.tconst = t.tconst
+                    WHERE t.tconst = %s
+                    """,
+                    (imdb_id,),
+                )
+                catalog_row = cursor.fetchone()
+                if catalog_row is not None:
+                    resolved_tconst = catalog_row[0]
+                    title_type = catalog_row[1]
+                    catalog_title = catalog_row[2]
+                    catalog_tmdb_id = catalog_row[3]
+                    resolution_status = "resolved"
+                else:
+                    resolution_status = "unresolved_catalog_miss"
+
+            if resolved_tconst is not None:
+                resolved_count += 1
+                canonical_key = f"title:tconst:{resolved_tconst}"
+                list_title = catalog_title or title
+                list_tmdb_id = tmdb_id if tmdb_id is not None else catalog_tmdb_id
+                list_notes = _ai_recommendation_list_notes(recommendation)
+                cursor.execute(
+                    """
+                    SELECT id
+                    FROM app.user_list_items
+                    WHERE list_id = %s AND canonical_key = %s
+                    """,
+                    (target_list_id, canonical_key),
+                )
+                existing_item = cursor.fetchone()
+                was_existing = existing_item is not None
+                item_id = existing_item[0] if existing_item is not None else f"ai-suggestion-{uuid.uuid4()}"
+                cursor.execute(
+                    """
+                    INSERT INTO app.user_list_items (
+                        id, list_id, canonical_key, tconst, media_type, imdb_id, tmdb_id,
+                        trakt_id, parent_tconst, parent_title, title, season_number,
+                        episode_number, rank, added_at, notes, source_origin, source_ref,
+                        is_archived, created_at, updated_at
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, 'title', %s, %s, NULL, NULL, NULL, %s,
+                        NULL, NULL, %s, %s::timestamp, %s, 'ai_import', %s,
+                        FALSE, %s::timestamp, %s::timestamp
+                    )
+                    ON CONFLICT (list_id, canonical_key) DO UPDATE SET
+                        tconst = excluded.tconst,
+                        imdb_id = excluded.imdb_id,
+                        tmdb_id = COALESCE(excluded.tmdb_id, app.user_list_items.tmdb_id),
+                        title = COALESCE(excluded.title, app.user_list_items.title),
+                        rank = excluded.rank,
+                        notes = excluded.notes,
+                        source_origin = excluded.source_origin,
+                        source_ref = excluded.source_ref,
+                        is_archived = FALSE,
+                        updated_at = excluded.updated_at
+                    RETURNING id
+                    """,
+                    (
+                        item_id,
+                        target_list_id,
+                        canonical_key,
+                        resolved_tconst,
+                        imdb_id,
+                        list_tmdb_id,
+                        list_title,
+                        recommendation.get("priority"),
+                        imported_at,
+                        list_notes,
+                        f"ai_recommendation:{run_id}:{row_number}",
+                        imported_at,
+                        imported_at,
+                    ),
+                )
+                ai_list_item_id = cursor.fetchone()[0]
+                if was_existing:
+                    list_updated += 1
+                else:
+                    list_inserted += 1
+            else:
+                unresolved.append(
+                    {
+                        "row_number": row_number,
+                        "title": title,
+                        "year": year,
+                        "imdb_id": imdb_id,
+                        "resolution_status": resolution_status,
+                    }
+                )
+
+            cursor.execute(
+                """
+                INSERT INTO app.ai_recommendation_candidates (
+                    id, run_id, row_number, title, year, imdb_id, tmdb_id, media_type,
+                    confidence, recommendation_status, priority, fit_reasons_json,
+                    risk_reasons_json, source_signal_refs_json, notes, raw_json,
+                    resolved_tconst, resolution_status, ai_list_item_id, created_at, updated_at
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s::timestamp, %s::timestamp
+                )
+                """,
+                (
+                    candidate_id,
+                    run_id,
+                    row_number,
+                    title,
+                    year,
+                    imdb_id,
+                    tmdb_id,
+                    media_type,
+                    recommendation.get("confidence"),
+                    recommendation.get("status"),
+                    recommendation.get("priority"),
+                    json.dumps(recommendation.get("fit_reasons") or [], ensure_ascii=False),
+                    json.dumps(recommendation.get("risk_reasons") or [], ensure_ascii=False),
+                    json.dumps(recommendation.get("source_signal_refs") or [], ensure_ascii=False),
+                    recommendation.get("notes"),
+                    json.dumps(recommendation, ensure_ascii=False, sort_keys=True),
+                    resolved_tconst,
+                    resolution_status,
+                    ai_list_item_id,
+                    imported_at,
+                    imported_at,
+                ),
+            )
+            imported_count += 1
+
+        conn.commit()
+
+    return {
+        "run_id": run_id,
+        "source_filename": source_filename,
+        "target_list_id": target_list_id,
+        "recommendations": imported_count,
+        "resolved": resolved_count,
+        "unresolved": len(unresolved),
+        "list_inserted": list_inserted,
+        "list_updated": list_updated,
+        "unresolved_items": unresolved,
+    }
+
+
+def fetch_ai_recommendation_run_checksums() -> dict[str, dict[str, Any]]:
+    """Return imported AI recommendation runs keyed by source checksum."""
+
+    with _connect() as conn, conn.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT source_checksum, id, source_filename, imported_at
+            FROM app.ai_recommendation_runs
+            ORDER BY imported_at DESC
+            """
+        )
+        rows = cursor.fetchall()
+    return {
+        row[0]: {
+            "run_id": row[1],
+            "source_filename": row[2],
+            "imported_at": _parse_optional_timestamp(row[3]),
+        }
+        for row in rows
+    }
+
+
+def fetch_latest_ai_recommendation_for_title(tconst: str) -> dict[str, Any] | None:
+    """Return the latest imported AI recommendation explanation for one title."""
+
+    with _connect() as conn, conn.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT
+                c.id,
+                c.run_id,
+                r.source_filename,
+                r.intent,
+                r.imported_at,
+                c.title,
+                c.year,
+                c.imdb_id,
+                c.tmdb_id,
+                c.media_type,
+                c.confidence,
+                c.recommendation_status,
+                c.priority,
+                c.fit_reasons_json,
+                c.risk_reasons_json,
+                c.source_signal_refs_json,
+                c.notes
+            FROM app.ai_recommendation_candidates AS c
+            JOIN app.ai_recommendation_runs AS r ON r.id = c.run_id
+            WHERE c.resolved_tconst = %s
+            ORDER BY r.imported_at DESC, c.priority NULLS LAST, c.row_number
+            LIMIT 1
+            """,
+            (tconst,),
+        )
+        row = cursor.fetchone()
+    if row is None:
+        return None
+    return {
+        "candidate_id": row[0],
+        "run_id": row[1],
+        "source_filename": row[2],
+        "intent": row[3],
+        "imported_at": _parse_optional_timestamp(row[4]),
+        "title": row[5],
+        "year": row[6],
+        "imdb_id": row[7],
+        "tmdb_id": row[8],
+        "media_type": row[9],
+        "confidence": row[10],
+        "status": row[11],
+        "priority": row[12],
+        "fit_reasons": json.loads(row[13] or "[]"),
+        "risk_reasons": json.loads(row[14] or "[]"),
+        "source_signal_refs": json.loads(row[15] or "[]"),
+        "notes": row[16],
+    }
+
+
+def _ai_recommendation_list_notes(recommendation: dict[str, Any]) -> str:
+    lines = [
+        f"AI import: confidence={recommendation.get('confidence') or 'unknown'}, status={recommendation.get('status') or 'unknown'}"
+    ]
+    fit_reasons = [str(item) for item in recommendation.get("fit_reasons") or [] if str(item).strip()]
+    risk_reasons = [str(item) for item in recommendation.get("risk_reasons") or [] if str(item).strip()]
+    if fit_reasons:
+        lines.append("Klady:")
+        lines.extend(f"- {item}" for item in fit_reasons[:4])
+    if risk_reasons:
+        lines.append("Rizika:")
+        lines.extend(f"- {item}" for item in risk_reasons[:4])
+    if recommendation.get("notes"):
+        lines.append(f"Poznamka: {recommendation['notes']}")
+    return "\n".join(lines)
 
 
 def fetch_person_affinity_rating(nconst: str) -> int:

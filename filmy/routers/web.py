@@ -36,6 +36,7 @@ from filmy.app_shared import (
 from filmy.config import get_ui_config
 from filmy.db import (
     compute_and_record_genre_scores,
+    delete_ai_recommendation_file,
     get_catalog_genres,
     get_continue_watching_items,
     get_favorite_genres,
@@ -43,7 +44,10 @@ from filmy.db import (
     get_genre_suggestion_candidates,
     get_home_suggestion_sections,
     get_hot_watchlist_page,
+    import_ai_recommendations_file,
     get_latest_genre_scores,
+    get_latest_ai_recommendation_for_title,
+    list_ai_recommendation_files,
     get_local_library_status,
     get_title_role_signals,
     fetch_watch_stats_for_tconsts,
@@ -919,6 +923,126 @@ async def suggestion_scoring_page(
     return apply_html_cache_headers(response)
 
 
+@router.get("/system/import-ai-suggestions", response_class=HTMLResponse)
+async def import_ai_suggestions_page(
+    request: Request,
+    return_to: str | None = Query(default=None),
+    imported: int = Query(default=0),
+    already_imported: int = Query(default=0),
+    source_filename: str | None = Query(default=None),
+    recommendations: int = Query(default=0),
+    resolved: int = Query(default=0),
+    unresolved: int = Query(default=0),
+    list_inserted: int = Query(default=0),
+    list_updated: int = Query(default=0),
+    deleted: int = Query(default=0),
+    deleted_filename: str | None = Query(default=None),
+    error: str | None = Query(default=None),
+):
+    breadcrumb_context = build_breadcrumb_context(
+        request,
+        "Import AI suggestions",
+        return_to=return_to,
+        default_trail=[{"url": "/", "label": "Home"}],
+    )
+    response = templates.TemplateResponse(
+        request,
+        "import_ai_suggestions.html",
+        {
+            **breadcrumb_context,
+            "return_to": breadcrumb_context["page_return_to"],
+            "files": list_ai_recommendation_files(),
+            "imported": bool(imported),
+            "already_imported": bool(already_imported),
+            "source_filename": str(source_filename or "").strip() or None,
+            "recommendations": recommendations,
+            "resolved": resolved,
+            "unresolved": unresolved,
+            "list_inserted": list_inserted,
+            "list_updated": list_updated,
+            "deleted": bool(deleted),
+            "deleted_filename": str(deleted_filename or "").strip() or None,
+            "error_message": str(error or "").strip() or None,
+            "format_czech_datetime": format_czech_datetime,
+        },
+    )
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    return response
+
+
+@router.post("/system/import-ai-suggestions/delete")
+async def import_ai_suggestions_delete(request: Request):
+    form = await request.form()
+    return_to = safe_back_target(str(form.get("return_to") or "")) or "/system/import-ai-suggestions"
+    filename = str(form.get("filename") or "").strip()
+    try:
+        result = delete_ai_recommendation_file(filename)
+    except (OSError, ValueError) as exc:
+        response = RedirectResponse(
+            url=f"/system/import-ai-suggestions?{urlencode({'return_to': return_to, 'source_filename': filename, 'error': str(exc)})}",
+            status_code=303,
+        )
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        return response
+
+    response = RedirectResponse(
+        url=f"/system/import-ai-suggestions?{urlencode({'return_to': return_to, 'deleted': 1, 'deleted_filename': result['filename']})}",
+        status_code=303,
+    )
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    return response
+
+
+@router.post("/system/import-ai-suggestions")
+async def import_ai_suggestions_run(request: Request):
+    form = await request.form()
+    return_to = safe_back_target(str(form.get("return_to") or "")) or "/system/import-ai-suggestions"
+    filename = str(form.get("filename") or "").strip()
+    available_files = {item["filename"]: item for item in list_ai_recommendation_files() if not item.get("error")}
+    selected = available_files.get(filename)
+    if selected is None:
+        response = RedirectResponse(
+            url=f"/system/import-ai-suggestions?{urlencode({'return_to': return_to, 'error': 'Soubor nebyl nalezen nebo neni validni.'})}",
+            status_code=303,
+        )
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        return response
+
+    try:
+        result = import_ai_recommendations_file(str(selected["path"]))
+    except (OSError, ValueError) as exc:
+        response = RedirectResponse(
+            url=f"/system/import-ai-suggestions?{urlencode({'return_to': return_to, 'source_filename': filename, 'error': str(exc)})}",
+            status_code=303,
+        )
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        return response
+
+    query = {
+        "return_to": return_to,
+        "source_filename": result.get("source_filename") or filename,
+        "imported": 0 if result.get("already_imported") else 1,
+        "already_imported": 1 if result.get("already_imported") else 0,
+        "recommendations": result.get("recommendations") or 0,
+        "resolved": result.get("resolved") or 0,
+        "unresolved": result.get("unresolved") or 0,
+        "list_inserted": result.get("list_inserted") or 0,
+        "list_updated": result.get("list_updated") or 0,
+    }
+    response = RedirectResponse(
+        url=f"/system/import-ai-suggestions?{urlencode(query)}",
+        status_code=303,
+    )
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    return response
+
+
 @router.post("/system/suggestion-scoring/recompute")
 async def suggestion_scoring_recompute(request: Request):
     form = await request.form()
@@ -1168,6 +1292,7 @@ async def title_detail_page(request: Request, tconst: str, return_to: str | None
     breadcrumb_context = build_breadcrumb_context(request, str(presentation["title"]), return_to=return_to)
     parent_return_to = str(breadcrumb_context["page_return_to"])
     role_signals = get_title_role_signals(tconst)
+    ai_recommendation = get_latest_ai_recommendation_for_title(tconst)
     main_cast = attach_title_role_signals(present_main_cast(presentation.get("main_cast") or []), role_signals)
     launch_person_presentation_warmup(main_cast)
     launch_person_portrait_warmup(main_cast)
@@ -1183,6 +1308,7 @@ async def title_detail_page(request: Request, tconst: str, return_to: str | None
             "title_episode_seasons": present_episode_seasons(presentation.get("episodes") or []),
             "title_main_cast": main_cast,
             "title_role_signals": role_signals,
+            "ai_recommendation": ai_recommendation,
             "title_role_signal_type_options": TITLE_ROLE_SIGNAL_TYPE_OPTIONS,
             "title_role_signal_polarity_options": TITLE_ROLE_SIGNAL_POLARITY_OPTIONS,
             "title_main_cast_pending_count": main_cast_pending_count,

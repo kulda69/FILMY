@@ -12,6 +12,8 @@
 {% set liked_notes = library_state.rating.liked_notes if library_state and library_state.rating else none %}
 {% set disliked_notes = library_state.rating.disliked_notes if library_state and library_state.rating else none %}
 {% set has_rating_notes = liked_notes or disliked_notes %}
+{% set ai_fit_reasons = ai_recommendation.fit_reasons if ai_recommendation else [] %}
+{% set ai_risk_reasons = ai_recommendation.risk_reasons if ai_recommendation else [] %}
 
 <section class="mb-4">
     <div class="card bg-black border-secondary-subtle overflow-hidden">
@@ -301,6 +303,16 @@
                         {% else %}
                         <div class="text-secondary">Zatím bez poznámky.</div>
                         {% endif %}
+                        {% if ai_fit_reasons %}
+                        <div class="border-top border-secondary-subtle mt-3 pt-3">
+                            <div class="small text-secondary mb-2">Hodnocení AI</div>
+                            <ul class="small mb-0 ps-3">
+                                {% for reason in ai_fit_reasons %}
+                                <li class="mb-2">{{ reason }}</li>
+                                {% endfor %}
+                            </ul>
+                        </div>
+                        {% endif %}
                     </div>
                 </div>
                 <div class="col-12 col-lg-6">
@@ -311,9 +323,26 @@
                         {% else %}
                         <div class="text-secondary">Zatím bez poznámky.</div>
                         {% endif %}
+                        {% if ai_risk_reasons %}
+                        <div class="border-top border-secondary-subtle mt-3 pt-3">
+                            <div class="small text-secondary mb-2">Hodnocení AI</div>
+                            <ul class="small mb-0 ps-3">
+                                {% for reason in ai_risk_reasons %}
+                                <li class="mb-2">{{ reason }}</li>
+                                {% endfor %}
+                            </ul>
+                        </div>
+                        {% endif %}
                     </div>
                 </div>
             </div>
+            {% if ai_recommendation %}
+            <div class="small text-secondary mt-3">
+                Hodnocení AI: {{ ai_recommendation.source_filename }}
+                {% if ai_recommendation.confidence %} · jistota {{ ai_recommendation.confidence }}{% endif %}
+                {% if ai_recommendation.imported_at %} · importováno {{ format_czech_datetime(ai_recommendation.imported_at) }}{% endif %}
+            </div>
+            {% endif %}
         </div>
     </div>
 </section>

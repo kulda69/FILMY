@@ -177,6 +177,27 @@ WHERE ai_input_role = 'ignore'
       'ai-navrhy'
   );
 
+INSERT INTO app.user_lists (
+    id, slug, name, description, list_kind, ai_input_role, source_origin, source_ref, created_at, updated_at
+)
+VALUES (
+    'ai-suggestions',
+    'ai-navrhy',
+    'AI návrhy',
+    'Doporučení importovaná z externí AI vrstvy.',
+    'custom',
+    'external_suggestion',
+    'runtime_seed',
+    'ai_suggestions_list',
+    CURRENT_TIMESTAMP,
+    CURRENT_TIMESTAMP
+)
+ON CONFLICT (slug) DO UPDATE SET
+    name = COALESCE(NULLIF(app.user_lists.name, ''), excluded.name),
+    description = COALESCE(app.user_lists.description, excluded.description),
+    ai_input_role = 'external_suggestion',
+    updated_at = CURRENT_TIMESTAMP;
+
 CREATE TABLE IF NOT EXISTS app.user_list_items (
     id text PRIMARY KEY,
     list_id text NOT NULL,
@@ -201,6 +222,63 @@ CREATE TABLE IF NOT EXISTS app.user_list_items (
     updated_at timestamp without time zone NOT NULL,
     UNIQUE (list_id, canonical_key)
 );
+
+CREATE TABLE IF NOT EXISTS app.ai_recommendation_runs (
+    id text PRIMARY KEY,
+    source_path text NOT NULL,
+    source_filename text NOT NULL,
+    source_checksum text NOT NULL,
+    contract_version integer NOT NULL,
+    intent text NOT NULL,
+    status text NOT NULL,
+    payload_created_at timestamp without time zone,
+    imported_at timestamp without time zone NOT NULL,
+    source_inputs_json text NOT NULL,
+    method_notes_json text NOT NULL,
+    deprioritized_candidates_json text NOT NULL,
+    notes text,
+    raw_json text NOT NULL,
+    UNIQUE (source_checksum)
+);
+
+CREATE TABLE IF NOT EXISTS app.ai_recommendation_candidates (
+    id text PRIMARY KEY,
+    run_id text NOT NULL,
+    row_number integer NOT NULL,
+    title text NOT NULL,
+    year integer,
+    imdb_id text,
+    tmdb_id bigint,
+    media_type text,
+    confidence text,
+    recommendation_status text,
+    priority integer,
+    fit_reasons_json text NOT NULL,
+    risk_reasons_json text NOT NULL,
+    source_signal_refs_json text NOT NULL,
+    notes text,
+    raw_json text NOT NULL,
+    resolved_tconst text,
+    resolution_status text NOT NULL,
+    ai_list_item_id text,
+    created_at timestamp without time zone NOT NULL,
+    updated_at timestamp without time zone NOT NULL,
+    UNIQUE (run_id, row_number)
+);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'ai_recommendation_runs_source_checksum_key'
+          AND conrelid = 'app.ai_recommendation_runs'::regclass
+    ) THEN
+        ALTER TABLE app.ai_recommendation_runs
+            ADD CONSTRAINT ai_recommendation_runs_source_checksum_key UNIQUE (source_checksum);
+    END IF;
+END;
+$$;
 
 CREATE TABLE IF NOT EXISTS app.watch_events (
     id text PRIMARY KEY,
@@ -1193,6 +1271,12 @@ CREATE INDEX IF NOT EXISTS idx_user_list_items_list_active
     ON app.user_list_items (list_id, is_archived, rank);
 CREATE INDEX IF NOT EXISTS idx_user_list_items_tconst
     ON app.user_list_items (tconst);
+CREATE INDEX IF NOT EXISTS idx_ai_recommendation_runs_imported_at
+    ON app.ai_recommendation_runs (imported_at);
+CREATE INDEX IF NOT EXISTS idx_ai_recommendation_candidates_imdb_id
+    ON app.ai_recommendation_candidates (imdb_id);
+CREATE INDEX IF NOT EXISTS idx_ai_recommendation_candidates_resolved_tconst
+    ON app.ai_recommendation_candidates (resolved_tconst);
 CREATE INDEX IF NOT EXISTS idx_watch_events_tconst_watched
     ON app.watch_events (tconst, watched_on DESC);
 CREATE INDEX IF NOT EXISTS idx_user_ratings_tconst
