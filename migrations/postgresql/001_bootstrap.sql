@@ -38,7 +38,7 @@ BEGIN
         END IF;
     END LOOP;
 
-    FOREACH extension_name IN ARRAY ARRAY['pg_trgm', 'unaccent'] LOOP
+    FOREACH extension_name IN ARRAY ARRAY['pg_trgm', 'unaccent', 'fuzzystrmatch'] LOOP
         SELECT pg_get_userbyid(extowner), namespace.nspname
         INTO object_owner, extension_schema
         FROM pg_extension AS extension_entry
@@ -117,6 +117,7 @@ CREATE SCHEMA IF NOT EXISTS old;
 
 CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public;
 CREATE EXTENSION IF NOT EXISTS unaccent WITH SCHEMA public;
+CREATE EXTENSION IF NOT EXISTS fuzzystrmatch WITH SCHEMA public;
 
 -- Vychozi PUBLIC opravneni jsou pro izolovanou aplikacni databazi prilis siroka.
 -- Vlastnik databaze a PostgreSQL superuser si svuj administratorsky pristup drzi.
@@ -132,7 +133,7 @@ BEGIN
     WITH protected_schemas(name) AS (
         VALUES ('public'), ('app'), ('old')
     ), protected_extensions(name) AS (
-        VALUES ('pg_trgm'), ('unaccent')
+        VALUES ('pg_trgm'), ('unaccent'), ('fuzzystrmatch')
     ), violations AS (
         SELECT format('database owner is %s', pg_get_userbyid(datdba)) AS detail
         FROM pg_database

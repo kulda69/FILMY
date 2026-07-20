@@ -75,3 +75,27 @@ def test_title_detail_renders_ai_fit_and_risk_reasons_inside_rating_notes() -> N
     assert "recommendations.json" in response.text
     assert "Hodnocení AI" in response.text
     assert "jistota high" in response.text
+
+
+def test_title_detail_actions_stay_on_detail_with_source_list_breadcrumb() -> None:
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    with (
+        patch("filmy.routers.web.get_title_presentation", return_value=_presentation()),
+        patch("filmy.routers.web.signal_metadata_pipeline"),
+        patch("filmy.routers.web.get_tmdb_status", return_value={"assets": {}, "has_mapping": True}),
+        patch("filmy.routers.web.get_title_role_signals", return_value=[]),
+        patch("filmy.routers.web.get_latest_ai_recommendation_for_title", return_value=None),
+        patch("filmy.routers.web.launch_person_presentation_warmup"),
+        patch("filmy.routers.web.launch_person_portrait_warmup"),
+        patch("filmy.routers.web.get_local_library_status", return_value={"visible_lists": []}),
+    ):
+        response = client.get("/titles/tt2316411?return_to=/lists/watchlist%3Fpage%3D2")
+
+    assert response.status_code == 200
+    assert (
+        'name="return_to" value="/titles/tt2316411?return_to=%2Flists%2Fwatchlist%3Fpage%3D2"'
+        in response.text
+    )

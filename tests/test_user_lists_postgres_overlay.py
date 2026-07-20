@@ -17,7 +17,6 @@ class UserListsPostgresOverlayTests(unittest.TestCase):
         )
         with (
             patch("filmy.db_library._db", return_value=fake_db),
-            patch("filmy.db_library.user_lists_uses_postgres", return_value=True),
             patch("filmy.db_library.slug_exists", side_effect=[True, False]),
             patch("filmy.db_library.create_user_list_postgres") as create_mock,
         ):
@@ -192,8 +191,6 @@ class UserListsPostgresOverlayTests(unittest.TestCase):
         )
         with (
             patch("filmy.db_library._db", return_value=fake_db),
-            patch("filmy.db_library.watch_events_uses_postgres", return_value=True),
-            patch("filmy.db_library.user_lists_uses_postgres", return_value=True),
             patch(
                 "filmy.db_library.record_watched_postgres",
                 return_value={"event_id": "event-1", "content_state_changed": True, "archived_items": 1},
@@ -222,7 +219,6 @@ class UserListsPostgresOverlayTests(unittest.TestCase):
         )
         with (
             patch("filmy.db_library._db", return_value=fake_db),
-            patch("filmy.db_library.user_lists_uses_postgres", return_value=True),
             patch(
                 "filmy.db_library._get_postgres_group_items_for_list",
                 return_value=(
@@ -263,7 +259,6 @@ class UserListsPostgresOverlayTests(unittest.TestCase):
         }
         with (
             patch("filmy.db_library._db", return_value=fake_db),
-            patch("filmy.db_library.user_lists_uses_postgres", return_value=True),
             patch(
                 "filmy.db_library._get_postgres_group_items_for_list",
                 return_value=({"id": "list-a", "name": "List A", "list_kind": "custom"}, [item]),
@@ -304,7 +299,6 @@ class UserListsPostgresOverlayTests(unittest.TestCase):
         }
         with (
             patch("filmy.db_library._db", return_value=fake_db),
-            patch("filmy.db_library.user_lists_uses_postgres", return_value=True),
             patch(
                 "filmy.db_library._get_postgres_group_items_for_list",
                 return_value=({"id": "list-a", "name": "List A", "list_kind": "custom"}, [item]),

@@ -1,6 +1,6 @@
 # FILMY
 
-Osobni webova appka pro filmy a serialy postavena na `FastAPI + Jinja2 + DuckDB`.
+Osobni webova appka pro filmy a serialy postavena na `FastAPI + Jinja2 + PostgreSQL`.
 
 ## Spusteni lokalne
 
@@ -39,5 +39,5 @@ TMDB_API_READ_ACCESS_TOKEN=...
 ## PostgreSQL runtime zrcadlo
 
 Malá zapisovaná runtime vrstva je připravená také v PostgreSQL, ale aplikace
-zatím zůstává na DuckDB. Postup opakované migrace, kontroly a rollbacku je v
+běží nad PostgreSQL. Postup správy schématu je v
 [`POSTGRESQL_RUNTIME_MIGRATION.md`](POSTGRESQL_RUNTIME_MIGRATION.md).

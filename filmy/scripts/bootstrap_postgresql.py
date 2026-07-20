@@ -196,7 +196,7 @@ def check(config: PostgreSQLConfig) -> None:
         WITH protected_schemas(name) AS (
             VALUES ('public'), ('app'), ('old')
         ), protected_extensions(name) AS (
-            VALUES ('pg_trgm'), ('unaccent')
+            VALUES ('pg_trgm'), ('unaccent'), ('fuzzystrmatch')
         ), violations AS (
             SELECT format('database=%s (expected filmy)', current_database()) AS detail
             WHERE current_database() <> 'filmy'
@@ -287,7 +287,7 @@ def check(config: PostgreSQLConfig) -> None:
 
     print(
         "PostgreSQL kontrola OK: vlastníci filmy/app/old/public, "
-        "pg_trgm/unaccent v public a přesné ACL včetně filmy_app."
+        "pg_trgm/unaccent/fuzzystrmatch v public a přesné ACL včetně filmy_app."
     )
 
 

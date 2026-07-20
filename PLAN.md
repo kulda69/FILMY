@@ -126,9 +126,10 @@ Jak to používat:
   - 2026-07-19: detail titulu zobrazuje poslední importované AI doporučení. V existujícím bloku `Slovní hodnocení` se `fit_reasons` zobrazují pod `Klady` a `risk_reasons` pod `Zápory`, obojí označené `AI doporučení`. Metadata zdroje ukazují soubor, confidence a čas importu. Data se čtou z `app.ai_recommendation_candidates` podle `resolved_tconst`.
   - Další krok: doladit, jak se mají `AI návrhy` zobrazovat v UI po importu, hlavně rozdíl mezi databázovým počtem 18 položek a současným list view/helperem, který některé položky schovává pravděpodobně kvůli existujícímu watched filtru.
 
-- [ ] Připravit plán úplného odstranění DuckDB z běžného projektu.
-  Důvod: dosavadní časová měření a PG-first cleanup ukazují, že DuckDB cesta už je pro praktický interaktivní provoz slepá. Nejde ji mazat impulzivně, protože ještě existují legacy import/export/rebuild testy a historické fallbacky, ale cílový stav má být PostgreSQL-only runtime i maintenance vrstva.
-  Další krok: udělat inventuru zbývajících DuckDB závislostí po kategoriích (`dependency`, `db_bootstrap`, migrátor z historického snapshotu, testy, dokumentace), rozhodnout co nahradit PostgreSQL cestou a co odstranit bez náhrady.
+- [x] Odstranit starý souborový databázový backend z běžného projektu.
+  Důvod: runtime, katalog, importy i maintenance už mají běžet PostgreSQL-only; staré fallbacky a migrační lešení zbytečně zvyšovaly riziko návratu na slepou větev.
+  Checkpoint:
+  - 2026-07-19: odstraněna aplikační dependency na starý souborový databázový backend, odstraněny backend přepínače z `config.toml`/`UiConfig`, smazány historické moduly `filmy/database.py`, `filmy/db_bootstrap.py` a jednorázový migrátor do PostgreSQL. `filmy/db.py`, `db_library.py`, `db_people.py` a `runtime_postgres.py` jsou zjednosměrněné na PostgreSQL. Testy přepsané na PostgreSQL-only kontrakt; ověření: `compileall` prošel a celý `uv run pytest` skončil `59 passed`.
 
 - [x] Rozdělit akce v lokální nabídce na `Move to` a `Copy to`.
   Důvod: jeden titul může současně patřit do více uživatelských seznamů (`Watchlist`, `Koukni rychle`, `Mam`) a přesun by ho neměl automaticky mazat z původního seznamu tam, kde dává smysl kopie.

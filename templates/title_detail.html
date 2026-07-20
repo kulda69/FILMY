@@ -73,7 +73,7 @@
                                 <div class="card-menu-view" data-menu-view="root">
                                     <form action="/ui/list-actions/watched" method="post" class="m-0">
                                         <input type="hidden" name="tconst" value="{{ title_item.tconst }}">
-                                        <input type="hidden" name="return_to" value="{{ title_return_to }}">
+                                        <input type="hidden" name="return_to" value="{{ title_action_return_to }}">
                                         <button type="submit" class="card-menu-item">Watched</button>
                                     </form>
                                     <button
@@ -117,7 +117,7 @@
                                     <div class="card-menu-label">Slovní hodnocení</div>
                                     <form action="/ui/list-actions/rating-notes" method="post" class="m-0 px-2 pb-2">
                                         <input type="hidden" name="tconst" value="{{ title_item.tconst }}">
-                                        <input type="hidden" name="return_to" value="{{ title_return_to }}">
+                                        <input type="hidden" name="return_to" value="{{ title_action_return_to }}">
                                         {% if user_rating_value > 0 %}
                                         <input type="hidden" name="rating" value="{{ user_rating_value }}">
                                         <div class="small text-secondary mb-2">Číselný rating zůstane {{ user_rating_value }}/10.</div>
@@ -148,7 +148,7 @@
                                     <form action="/ui/list-actions/add" method="post" class="m-0">
                                         <input type="hidden" name="tconst" value="{{ title_item.tconst }}">
                                         <input type="hidden" name="target_list_id" value="{{ target.id }}">
-                                        <input type="hidden" name="return_to" value="{{ title_return_to }}">
+                                        <input type="hidden" name="return_to" value="{{ title_action_return_to }}">
                                         <button type="submit" class="card-menu-item">{{ target.name }}</button>
                                     </form>
                                     {% endfor %}
@@ -172,7 +172,7 @@
                                     <form action="/ui/list-actions/rating" method="post" class="m-0">
                                         <input type="hidden" name="tconst" value="{{ title_item.tconst }}">
                                         <input type="hidden" name="rating" value="{{ rating_value }}">
-                                        <input type="hidden" name="return_to" value="{{ title_return_to }}">
+                                        <input type="hidden" name="return_to" value="{{ title_action_return_to }}">
                                         <button type="submit" class="card-menu-item d-flex justify-content-between align-items-center">
                                             <span class="card-rating-stars">
                                                 {{ "★" * full_stars }}{% if has_half_star %}½{% endif %}{{ "☆" * empty_stars }}
@@ -185,7 +185,7 @@
                                     <div class="border-top border-secondary-subtle my-1"></div>
                                     <form action="/ui/list-actions/rating/clear" method="post" class="m-0">
                                         <input type="hidden" name="tconst" value="{{ title_item.tconst }}">
-                                        <input type="hidden" name="return_to" value="{{ title_return_to }}">
+                                        <input type="hidden" name="return_to" value="{{ title_action_return_to }}">
                                         <button type="submit" class="card-menu-item text-secondary">Clear rating</button>
                                     </form>
                                     {% endif %}

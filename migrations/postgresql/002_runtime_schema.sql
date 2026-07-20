@@ -1,4 +1,4 @@
--- Mala zapisovana runtime vrstva FILMY. Katalog zustava v DuckDB.
+-- Runtime schema FILMY. Aplikace je PostgreSQL-only.
 -- Skript je idempotentni a vytvari pouze objekty vlastnene administratorem.
 -- Opravneni filmy_app se udeluji az v 003 po exact fingerprint kontrole.
 
@@ -679,6 +679,7 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     v_content_state_changed boolean := false;
+    v_content_state_rows integer := 0;
     v_archived_items integer := 0;
 BEGIN
     INSERT INTO app.watch_events (
@@ -730,8 +731,8 @@ BEGIN
             COALESCE(app.content_state.updated_at, '-infinity'::timestamp),
             EXCLUDED.updated_at
         );
-    GET DIAGNOSTICS v_content_state_changed = ROW_COUNT;
-    v_content_state_changed := v_content_state_changed > 0;
+    GET DIAGNOSTICS v_content_state_rows = ROW_COUNT;
+    v_content_state_changed := v_content_state_rows > 0;
 
     IF p_archive_from_list_id IS NOT NULL
        AND (p_archive_canonical_key IS NOT NULL OR p_archive_display_tconst IS NOT NULL) THEN

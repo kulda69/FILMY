@@ -11,10 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import duckdb
-
 from filmy.db import get_tmdb_target_counts
-from filmy.paths import ASSETS_DIR, DATA_DIR, DB_PATH, METADATA_PIPELINE_SIGNAL_PATH, PROJECT_ROOT
+from filmy.paths import ASSETS_DIR, DATA_DIR, METADATA_PIPELINE_SIGNAL_PATH, PROJECT_ROOT
 
 
 def signal_background_activity(reason: str, *, target_tconst: str | None = None) -> None:
@@ -123,7 +121,7 @@ class BackgroundJobSupervisor:
             self._thread.start()
 
     def cleanup_orphan_processes(self) -> None:
-        """Stop previously supervised worker processes before app startup touches DuckDB."""
+        """Stop previously supervised worker processes before app startup checks PostgreSQL."""
         with self._lock:
             for job in self._jobs.values():
                 self._stop_existing_pid(job.spec)
@@ -212,7 +210,7 @@ class BackgroundJobSupervisor:
         tmdb_complete: int | None = None
         try:
             tmdb_total, tmdb_complete = self._tmdb_target_counts()
-        except duckdb.Error:
+        except Exception:
             tmdb_total = None
             tmdb_complete = None
         detail_files = sum(1 for _ in ASSETS_DIR.rglob("detail.json")) if ASSETS_DIR.exists() else 0

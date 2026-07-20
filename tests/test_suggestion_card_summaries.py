@@ -9,7 +9,6 @@ from filmy import db
 class SuggestionCardSummaryTests(unittest.TestCase):
     def test_get_title_card_summaries_for_tconsts_builds_pg_preview(self) -> None:
         with (
-            patch("filmy.db.catalog_backend_uses_postgres", return_value=True),
             patch(
                 "filmy.db.fetch_title_card_detail_rows",
                 return_value=[

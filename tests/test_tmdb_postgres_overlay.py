@@ -7,9 +7,8 @@ from filmy import db
 
 
 class TmdbPostgresOverlayTests(unittest.TestCase):
-    def test_get_tmdb_mapping_reads_postgres_when_enabled(self) -> None:
+    def test_get_tmdb_mapping_reads_postgres(self) -> None:
         with (
-            patch("filmy.db.tmdb_backend_uses_postgres", return_value=True),
             patch(
                 "filmy.db.fetch_tmdb_mapping_record",
                 return_value={"tconst": "tt1", "tmdb_media_type": "movie", "tmdb_id": 10, "matched_by": "imdb_id", "matched_at": None, "sync_status": "synced", "last_error": None},
@@ -18,9 +17,8 @@ class TmdbPostgresOverlayTests(unittest.TestCase):
             row = db.get_tmdb_mapping("tt1")
         self.assertEqual(row["tmdb_id"], 10)
 
-    def test_store_tmdb_payloads_writes_postgres_when_enabled(self) -> None:
+    def test_store_tmdb_payloads_writes_postgres(self) -> None:
         with (
-            patch("filmy.db.tmdb_backend_uses_postgres", return_value=True),
             patch("filmy.db.store_tmdb_payload_bundle") as store_mock,
             patch("filmy.db.clear_title_presentation_cache"),
         ):
@@ -32,7 +30,7 @@ class TmdbPostgresOverlayTests(unittest.TestCase):
             )
         store_mock.assert_called_once()
 
-    def test_fetch_tmdb_reads_postgres_when_enabled(self) -> None:
+    def test_fetch_tmdb_reads_postgres(self) -> None:
         fake_snapshot = {
             "mapping": {"tmdb_media_type": "movie", "tmdb_id": 10, "matched_by": "imdb_id", "matched_at": None, "sync_status": "synced", "last_error": None},
             "details": {"locale": "en-US", "display_title": "Alpha"},
@@ -41,14 +39,13 @@ class TmdbPostgresOverlayTests(unittest.TestCase):
             "assets": [{"asset_kind": "poster"}],
         }
         with (
-            patch("filmy.db.tmdb_backend_uses_postgres", return_value=True),
             patch("filmy.db.fetch_tmdb_payload_snapshot", return_value=fake_snapshot),
         ):
             row = db._fetch_tmdb(None, "tt1")
         self.assertEqual(row["tmdb_id"], 10)
         self.assertEqual(row["detail_locales"][0], "en-US")
 
-    def test_tmdb_targets_filter_postgres_completion_when_enabled(self) -> None:
+    def test_tmdb_targets_filter_postgres_completion(self) -> None:
         candidate = {"tconst": "tt1", "title_type": "movie", "primary_title": "Alpha", "start_year": 2024, "priority": 1, "reasons": ["watchlist"]}
         with (
             patch("filmy.db._get_runtime_postgres_candidate_items", return_value=[candidate]),

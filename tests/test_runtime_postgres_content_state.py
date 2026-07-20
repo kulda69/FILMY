@@ -11,33 +11,17 @@ from filmy import runtime_postgres
 
 
 class UiConfigTests(unittest.TestCase):
-    def test_runtime_content_state_backend_defaults_to_duckdb(self) -> None:
+    def test_runtime_backend_switches_are_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "config.toml"
-            config_path.write_text("", encoding="utf-8")
+            config_path.write_text('legacy_backend = "old"\n', encoding="utf-8")
             config = load_ui_config(config_path)
-        self.assertEqual(config.runtime_content_state_backend, "duckdb")
+        self.assertFalse(hasattr(config, "legacy_backend"))
 
-    def test_runtime_content_state_backend_accepts_postgres(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = Path(tmpdir) / "config.toml"
-            config_path.write_text('runtime_content_state_backend = "postgres"\n', encoding="utf-8")
-            config = load_ui_config(config_path)
-        self.assertEqual(config.runtime_content_state_backend, "postgres")
-
-    def test_runtime_user_ratings_backend_accepts_postgres(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = Path(tmpdir) / "config.toml"
-            config_path.write_text('runtime_user_ratings_backend = "postgres"\n', encoding="utf-8")
-            config = load_ui_config(config_path)
-        self.assertEqual(config.runtime_user_ratings_backend, "postgres")
-
-    def test_runtime_watch_events_backend_accepts_postgres(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = Path(tmpdir) / "config.toml"
-            config_path.write_text('runtime_watch_events_backend = "postgres"\n', encoding="utf-8")
-            config = load_ui_config(config_path)
-        self.assertEqual(config.runtime_watch_events_backend, "postgres")
+    def test_runtime_helpers_are_postgres_only(self) -> None:
+        self.assertTrue(runtime_postgres.content_state_uses_postgres())
+        self.assertTrue(runtime_postgres.user_ratings_uses_postgres())
+        self.assertTrue(runtime_postgres.watch_events_uses_postgres())
 
 
 class RuntimePostgresTests(unittest.TestCase):

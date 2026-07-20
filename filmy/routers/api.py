@@ -12,7 +12,6 @@ from filmy.app_shared import (
 )
 from filmy.db import (
     ASSETS_DIR,
-    DB_PATH,
     clear_user_rating,
     commit_import_batch,
     create_import_preview,
@@ -67,7 +66,7 @@ async def api_root():
     stats = get_catalog_stats()
     return {
         "message": "Filmy API běží",
-        "database_path": DB_PATH.as_posix(),
+        "database": "postgresql://filmy",
         "assets_path": ASSETS_DIR.as_posix(),
         "catalog_titles": stats["titles"],
         "catalog_episodes": stats["episodes"],

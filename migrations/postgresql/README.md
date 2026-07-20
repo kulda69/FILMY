@@ -1,13 +1,13 @@
 # PostgreSQL bootstrap
 
 Tyto skripty vytvori izolovanou databazi `filmy`, schemata `app` a `old`,
-zapnou rozsireni `pg_trgm` a `unaccent` ve schematu `public` a odeberou vychozi opravneni `PUBLIC`
+zapnou rozsireni `pg_trgm`, `unaccent` a `fuzzystrmatch` ve schematu `public` a odeberou vychozi opravneni `PUBLIC`
 pro pripojeni i docasne tabulky v databazi, zapis do schematu `public` a vsechna prava ke
 schematum `app` a `old`. Vlastnik databaze a PostgreSQL superuser zustavaji
 administratory. `000` a `001` nevytvareji aplikacni role ani tabulky.
 Navazujici runtime runner vytvori omezenou roli, `002_runtime_schema.sql`
 vytvori sest explicitnich tabulek a az po exact fingerprint kontrole
-`003_runtime_grants.sql` udeli aplikacni prava. Ani jeden postup neprepina aplikaci z DuckDB.
+`003_runtime_grants.sql` udeli aplikacni prava. Aplikace je PostgreSQL-only.
 
 Bootstrap je fail-closed: prihlaseny administrator musi vlastnit databazi,
 schemata `app`, `old` a `public` i obe rozsireni. Explicitni ACL smi mirit jen

@@ -1314,6 +1314,7 @@ async def title_detail_page(request: Request, tconst: str, return_to: str | None
             "title_main_cast_pending_count": main_cast_pending_count,
             **breadcrumb_context,
             "title_return_to": detail_return_target(f"/titles/{tconst}", parent_return_to),
+            "title_action_return_to": f"/titles/{tconst}?{urlencode({'return_to': str(breadcrumb_context['back_url'])})}",
             "poster_url": presentation.get("poster_url"),
             "backdrop_url": presentation.get("backdrop_url"),
             "provider_groups": group_tmdb_providers({"tmdb": {"providers": presentation.get("tmdb_providers") or []}}),
