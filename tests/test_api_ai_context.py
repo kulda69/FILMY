@@ -164,6 +164,39 @@ def test_ai_noted_titles_endpoint_routes_filters() -> None:
     assert payload["items"][0]["liked_notes"] == "Ephram jako postava a dialogy."
 
 
+def test_ai_watched_titles_endpoint_routes_blacklist_filters() -> None:
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    with patch(
+        "filmy.routers.api.get_ai_watched_titles",
+        return_value={
+            "contract_version": 1,
+            "filters": {"include_rated": False, "include_negative": True},
+            "item_count": 1,
+            "source_counts": {"watch_event": 1},
+            "items": [
+                {
+                    "imdb_id": "tt0242795",
+                    "tconst": "tt0242795",
+                    "tmdb_id": 1953,
+                    "title": "Everwood",
+                    "sources": ["watch_event"],
+                }
+            ],
+        },
+    ) as watched_titles_mock:
+        response = client.get("/api/ai/watched-titles?include_rated=false&include_negative=true")
+
+    assert response.status_code == 200
+    watched_titles_mock.assert_called_once_with(include_rated=False, include_negative=True)
+    payload = response.json()
+    assert payload["item_count"] == 1
+    assert payload["items"][0]["tconst"] == "tt0242795"
+    assert payload["source_counts"]["watch_event"] == 1
+
+
 def test_ai_taste_inputs_endpoint_routes_limit() -> None:
     app = FastAPI()
     app.include_router(router)

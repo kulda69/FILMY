@@ -1,6 +1,9 @@
+# Secrets and local environment
 .env
 .env.*
 !.env.example
+
+# Python environment
 .venv/
 
 # Python cache
@@ -19,8 +22,16 @@ __pycache__/
 .playwright-local/
 node_modules/
 
-# local databases and exports
+# Keep portable project docs/config/deploy recipes in git.
+!config.toml
+!INSTALACE.md
+!API_ENDPOINTY.md
+!deploy/
+!deploy/**
+
+# Local databases, backups, exports and downloaded assets
 data/filmy.duckdb
+backups/
 data/trakt_exports/
 trakt-export/
 data/assets/
@@ -41,8 +52,4 @@ tmp/
 output/playwright/
 Screenshot *.png
 data/*.duckdb*
-.agents/
-Historie projektu.md
-Rozhodnuti projektu.md
-.env.*
-!.env.example
+logs/

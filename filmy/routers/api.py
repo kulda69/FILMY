@@ -23,6 +23,7 @@ from filmy.db import (
     get_ai_scoring_explainer,
     get_ai_taste_inputs,
     get_ai_taste_seed,
+    get_ai_watched_titles,
     get_catalog_stats,
     get_content_detail,
     get_imdb_favorite_people,
@@ -333,6 +334,16 @@ async def ai_noted_titles(
     """Read titles with local liked/disliked notes for a separate AI workflow."""
 
     return get_ai_noted_titles(notes=notes, min_user_rating=min_user_rating, limit=limit)
+
+
+@router.get("/api/ai/watched-titles")
+async def ai_watched_titles(
+    include_rated: bool = Query(default=True),
+    include_negative: bool = Query(default=True),
+):
+    """Read the complete title exclusion set for a separate AI workflow."""
+
+    return get_ai_watched_titles(include_rated=include_rated, include_negative=include_negative)
 
 
 @router.get("/api/ai/context")

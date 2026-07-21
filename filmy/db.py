@@ -16,7 +16,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Sequence
 from filmy.config import get_ui_config
-from filmy.runtime_postgres import _connect as _pg_connect, create_import_batch_record, commit_import_batch as commit_import_batch_postgres, fetch_catalog_brief_rows, fetch_catalog_genres as fetch_catalog_genres_postgres, fetch_catalog_search_rows, fetch_active_user_list_items, fetch_all_watch_events, fetch_catalog_episode_row, fetch_content_state as fetch_content_state_postgres, fetch_episode_series_map, fetch_catalog_primary_title, fetch_catalog_stats_row as fetch_catalog_stats_row_postgres, fetch_favorite_genres as fetch_favorite_genres_postgres, fetch_favorite_traits as fetch_favorite_traits_postgres, fetch_ai_noted_title_rows, fetch_ai_rated_title_rows, fetch_ai_taste_seed_rows, fetch_latest_ai_recommendation_for_title as fetch_latest_ai_recommendation_for_title_postgres, fetch_genre_score_source_rows as fetch_genre_score_source_rows_postgres, fetch_home_suggestion_candidate_rows as fetch_home_suggestion_candidate_rows_postgres, fetch_import_batch_record, fetch_import_batch_rows, fetch_known_for_title_rows, fetch_latest_rating_for_tconst as fetch_latest_rating_for_tconst_postgres, fetch_latest_ratings_for_tconsts, fetch_latest_genre_scores as fetch_latest_genre_scores_postgres, fetch_latest_tmdb_assets_for_title, fetch_catalog_refresh_fingerprint, fetch_catalog_refresh_rows, fetch_catalog_title_row, fetch_imdb_manifest_rows, fetch_library_summary_snapshot, fetch_person_catalog_row, fetch_person_credit_rows, fetch_person_lookup_row, fetch_person_affinity_rating as fetch_person_affinity_rating_postgres, fetch_person_episode_series_credit_rows, fetch_people_for_lookup_fuzzy_rows, fetch_people_for_lookup_levenshtein_rows, fetch_people_for_lookup_rows, fetch_positive_person_affinities, fetch_relevant_people_candidate_rows, fetch_search_recall_match, fetch_series_episode_rows, fetch_title_alias_rows, fetch_title_alias_lookup_matches, fetch_title_by_primary_title_year, fetch_title_lookup_primary_key_matches, fetch_title_overviews, fetch_title_card_detail_rows, fetch_title_people_rows, fetch_title_people_preview_rows, fetch_tconst_for_tmdb_id, fetch_tmdb_completion_flags, fetch_tmdb_mapping_record, fetch_tmdb_payload_snapshot, fetch_user_lists, fetch_watch_view_page_rows, fetch_watch_history as fetch_watch_history_postgres, fetch_watch_stats_for_tconsts, fetch_primary_title_matches, insert_import_rows, insert_tmdb_asset_record, local_seed_exists, list_in_progress_content_states, insert_genre_score_snapshot, record_local_seed_meta, record_search_recall_entry as record_search_recall_entry_postgres, replace_catalog_refresh_meta_rows, replace_favorite_genres as replace_favorite_genres_postgres, replace_favorite_traits as replace_favorite_traits_postgres, replace_imdb_manifest_rows, store_tmdb_payload_bundle, upsert_tmdb_mapping_record
+from filmy.runtime_postgres import _connect as _pg_connect, create_import_batch_record, commit_import_batch as commit_import_batch_postgres, fetch_catalog_brief_rows, fetch_catalog_genres as fetch_catalog_genres_postgres, fetch_catalog_search_rows, fetch_active_user_list_items, fetch_all_watch_events, fetch_catalog_episode_row, fetch_content_state as fetch_content_state_postgres, fetch_episode_series_map, fetch_catalog_primary_title, fetch_catalog_stats_row as fetch_catalog_stats_row_postgres, fetch_favorite_genres as fetch_favorite_genres_postgres, fetch_favorite_traits as fetch_favorite_traits_postgres, fetch_ai_noted_title_rows, fetch_ai_rated_title_rows, fetch_ai_taste_seed_rows, fetch_ai_watched_title_rows, fetch_latest_ai_recommendation_for_title as fetch_latest_ai_recommendation_for_title_postgres, fetch_genre_score_source_rows as fetch_genre_score_source_rows_postgres, fetch_home_suggestion_candidate_rows as fetch_home_suggestion_candidate_rows_postgres, fetch_import_batch_record, fetch_import_batch_rows, fetch_known_for_title_rows, fetch_latest_rating_for_tconst as fetch_latest_rating_for_tconst_postgres, fetch_latest_ratings_for_tconsts, fetch_latest_genre_scores as fetch_latest_genre_scores_postgres, fetch_latest_tmdb_assets_for_title, fetch_catalog_refresh_fingerprint, fetch_catalog_refresh_rows, fetch_catalog_title_row, fetch_imdb_manifest_rows, fetch_library_summary_snapshot, fetch_person_catalog_row, fetch_person_credit_rows, fetch_person_lookup_row, fetch_person_affinity_rating as fetch_person_affinity_rating_postgres, fetch_person_episode_series_credit_rows, fetch_people_for_lookup_fuzzy_rows, fetch_people_for_lookup_levenshtein_rows, fetch_people_for_lookup_rows, fetch_positive_person_affinities, fetch_relevant_people_candidate_rows, fetch_search_recall_match, fetch_series_episode_rows, fetch_title_alias_rows, fetch_title_alias_lookup_matches, fetch_title_by_primary_title_year, fetch_title_lookup_primary_key_matches, fetch_title_overviews, fetch_title_card_detail_rows, fetch_title_people_rows, fetch_title_people_preview_rows, fetch_tconst_for_tmdb_id, fetch_tmdb_completion_flags, fetch_tmdb_mapping_record, fetch_tmdb_payload_snapshot, fetch_user_lists, fetch_watch_view_page_rows, fetch_watch_history as fetch_watch_history_postgres, fetch_watch_stats_for_tconsts, fetch_primary_title_matches, insert_import_rows, insert_tmdb_asset_record, local_seed_exists, list_in_progress_content_states, insert_genre_score_snapshot, record_local_seed_meta, record_search_recall_entry as record_search_recall_entry_postgres, replace_catalog_refresh_meta_rows, replace_favorite_genres as replace_favorite_genres_postgres, replace_favorite_traits as replace_favorite_traits_postgres, replace_imdb_manifest_rows, store_tmdb_payload_bundle, upsert_tmdb_mapping_record
 from filmy.genre_scoring import compute_genre_scores
 from filmy.integrations.plex import get_library_sections, get_metadata_snapshot, get_primary_server, iter_section_items
 from filmy.paths import ASSETS_DIR, IMDB_DIR, PEOPLE_ASSETS_DIR, POSTGRES_DATABASE_NAME, PROJECT_ROOT
@@ -207,6 +207,8 @@ def _lookup_title_from_search_recall(query: str, *, title_type: str | None, cand
     candidate = _catalog_row_to_dict(title_row)
     candidate['fuzzy_score'] = row[1]
     candidate['matched_alias_title'] = None
+    if not _is_safe_recalled_title(query, title_type=title_type, recalled=candidate, candidates_limit=candidates_limit):
+        return None
     result = _build_title_lookup_result(query=query, title_type=title_type, selected=candidate, candidates=[candidate], candidates_limit=candidates_limit)
     if result is not None:
         _record_search_recall_entry(entity_type='title', query=query, target_id=str(candidate['tconst']), target_label=str(candidate.get('primary_title') or ''), target_title_type=str(candidate.get('title_type') or ''), matched_alias_title=candidate.get('matched_alias_title'), fuzzy_score=candidate.get('fuzzy_score'))
@@ -230,6 +232,7 @@ def lookup_title_by_query(query: str, title_type: str | None=None, candidates_li
         alias_candidates = _search_catalog_aliases_for_lookup(query=query, title_type=title_type, limit=max(candidates_limit, 1) * 5)
         candidates = _merge_lookup_candidates(candidates, alias_candidates)
     if candidates:
+        _attach_library_summaries_to_exact_title_candidates(query, candidates)
         direct_selected = _pick_best_title_match(query, candidates)
         if _is_direct_enough_lookup(query, direct_selected):
             result = _build_title_lookup_result(query=query, title_type=title_type, selected=direct_selected, candidates=candidates, candidates_limit=candidates_limit)
@@ -243,6 +246,7 @@ def lookup_title_by_query(query: str, title_type: str | None=None, candidates_li
         candidates = _merge_lookup_candidates(candidates, fuzzy_candidates)
         alias_fuzzy_candidates = _search_catalog_aliases_for_lookup_fuzzy(query=query, title_type=title_type, limit=max(candidates_limit, 1) * 5)
         candidates = _merge_lookup_candidates(candidates, alias_fuzzy_candidates)
+        _attach_library_summaries_to_exact_title_candidates(query, candidates)
     if not candidates:
         logger.info('lookup_title_by_query query=%r mode=miss elapsed_ms=%.1f', query, (time.perf_counter() - started_at) * 1000)
         return None
@@ -796,6 +800,10 @@ def get_ai_noted_titles(*, notes: str='any', min_user_rating: int | None=None, l
     safe_limit = max(1, min(int(limit), 200))
     return fetch_ai_noted_title_rows(notes=cleaned_notes, min_user_rating=safe_min_rating, limit=safe_limit)
 
+def get_ai_watched_titles(*, include_rated: bool=True, include_negative: bool=True) -> dict[str, Any]:
+    """Return a complete hard exclusion list for external AI recommendations."""
+    return fetch_ai_watched_title_rows(include_rated=include_rated, include_negative=include_negative)
+
 def import_ai_recommendations_file(path: str | Path) -> dict[str, Any]:
     from filmy.ai_recommendations import import_ai_recommendations_file as _impl
     return _impl(path)
@@ -1109,6 +1117,10 @@ def delete_user_list(list_id: str) -> dict[str, Any]:
     from filmy.db_library import delete_user_list as _impl
     return _impl(list_id)
 
+def clear_ai_suggestions_list_items() -> dict[str, Any]:
+    from filmy.db_library import clear_ai_suggestions_list_items as _impl
+    return _impl()
+
 def set_title_role_signal(tconst: str, *, nconst: str | None=None, character_name: str | None=None, signal_type: str='character', polarity: str='positive', strength: int=8, notes: str | None=None) -> dict[str, Any]:
     from filmy.db_library import set_title_role_signal as _impl
     return _impl(tconst, nconst=nconst, character_name=character_name, signal_type=signal_type, polarity=polarity, strength=strength, notes=notes)
@@ -1126,17 +1138,6 @@ def get_title_role_signals(tconst: str) -> list[dict[str, Any]]:
     return _impl(tconst)
 
 def _pick_best_title_match(query: str, candidates: list[dict[str, Any]]) -> dict[str, Any]:
-    fuzzy_matches = [candidate for candidate in candidates if candidate.get('fuzzy_score') is not None]
-    if fuzzy_matches:
-        fuzzy_matches.sort(key=lambda item: (item.get('fuzzy_score') or 0.0, -int(item.get('alias_priority') or 99), item.get('num_votes') or 0, item.get('start_year') or 0), reverse=True)
-        strongest = fuzzy_matches[0]
-        if (strongest.get('fuzzy_score') or 0.0) >= 0.72:
-            strongest_score = strongest.get('fuzzy_score') or 0.0
-            near_top = [item for item in fuzzy_matches if (item.get('fuzzy_score') or 0.0) >= strongest_score - 0.08]
-            if len(near_top) > 1:
-                near_top.sort(key=lambda item: (item.get('num_votes') or 0, item.get('start_year') or 0, item.get('fuzzy_score') or 0.0), reverse=True)
-                return near_top[0]
-            return strongest
     query_key = _normalize_match_key(query)
     query_key_articleless = _normalize_match_key(query, strip_leading_articles=True)
     exact_matches: list[dict[str, Any]] = []
@@ -1159,8 +1160,19 @@ def _pick_best_title_match(query: str, candidates: list[dict[str, Any]]) -> dict
         if _normalize_match_key(candidate.get('matched_alias_title'), strip_leading_articles=True) == query_key_articleless:
             exact_matches.append(candidate)
     if exact_matches:
-        exact_matches.sort(key=lambda item: (-int(item.get('alias_priority') or 99), item.get('num_votes') or 0, item.get('start_year') or 0), reverse=True)
+        exact_matches.sort(key=lambda item: (_lookup_local_signal_score(item), -int(item.get('alias_priority') or 99), item.get('num_votes') or 0, item.get('start_year') or 0), reverse=True)
         return exact_matches[0]
+    fuzzy_matches = [candidate for candidate in candidates if candidate.get('fuzzy_score') is not None]
+    if fuzzy_matches:
+        fuzzy_matches.sort(key=lambda item: (item.get('fuzzy_score') or 0.0, -int(item.get('alias_priority') or 99), item.get('num_votes') or 0, item.get('start_year') or 0), reverse=True)
+        strongest = fuzzy_matches[0]
+        if (strongest.get('fuzzy_score') or 0.0) >= 0.72:
+            strongest_score = strongest.get('fuzzy_score') or 0.0
+            near_top = [item for item in fuzzy_matches if (item.get('fuzzy_score') or 0.0) >= strongest_score - 0.08]
+            if len(near_top) > 1:
+                near_top.sort(key=lambda item: (item.get('num_votes') or 0, item.get('start_year') or 0, item.get('fuzzy_score') or 0.0), reverse=True)
+                return near_top[0]
+            return strongest
     return candidates[0]
 
 def _build_title_lookup_result(*, query: str, title_type: str | None, selected: dict[str, Any], candidates: list[dict[str, Any]], candidates_limit: int) -> dict[str, Any]:
@@ -1313,6 +1325,60 @@ def _is_direct_enough_lookup(query: str, candidate: dict[str, Any]) -> bool:
             return True
         if _normalize_match_key(variant, strip_leading_articles=True) == query_key_articleless:
             return True
+    return False
+
+def _is_exact_title_match(query: str, candidate: dict[str, Any]) -> bool:
+    query_key = _normalize_match_key(query)
+    query_key_articleless = _normalize_match_key(query, strip_leading_articles=True)
+    if not query_key:
+        return False
+    for variant in [candidate.get('primary_title'), candidate.get('original_title'), candidate.get('matched_alias_title')]:
+        if _normalize_match_key(variant) == query_key:
+            return True
+        if _normalize_match_key(variant, strip_leading_articles=True) == query_key_articleless:
+            return True
+    return False
+
+def _lookup_local_signal_score(candidate: dict[str, Any]) -> int:
+    """Score exact-title ambiguities by Jiri's local library signals."""
+    library = candidate.get('library') or {}
+    score = 0
+    if int(library.get('watched_count') or 0) > 0:
+        score += 80
+    rating = library.get('rating') or {}
+    if rating.get('value') is not None:
+        score += 60 + int(rating.get('value') or 0)
+    if library.get('in_watchlist'):
+        score += 40
+    if library.get('lists'):
+        score += 20
+    return score
+
+def _attach_library_summaries_to_exact_title_candidates(query: str, candidates: list[dict[str, Any]]) -> None:
+    """Attach local state only where it helps disambiguate identical titles."""
+    exact_candidates = [candidate for candidate in candidates if _is_exact_title_match(query, candidate)]
+    if len(exact_candidates) < 2:
+        return
+    for candidate in exact_candidates:
+        if candidate.get('library'):
+            continue
+        try:
+            candidate['library'] = _fetch_library_summary(None, str(candidate['tconst']), candidate.get('title_type'))
+        except Exception:
+            logger.debug('lookup library summary failed for %s', candidate.get('tconst'), exc_info=True)
+            candidate['library'] = {}
+
+def _is_safe_recalled_title(query: str, *, title_type: str | None, recalled: dict[str, Any], candidates_limit: int) -> bool:
+    """Avoid recall shortcuts for ambiguous exact-title queries."""
+    query_key = _normalize_match_key(query)
+    if len(_match_tokens(query_key)) != 1 or len(query_key) < 5:
+        return True
+    candidates = _search_catalog_for_lookup(query=query, title_type=title_type, limit=max(max(candidates_limit, 1) * 5, 25))
+    alias_candidates = _search_catalog_aliases_for_lookup(query=query, title_type=title_type, limit=max(max(candidates_limit, 1) * 5, 25))
+    candidates = _merge_lookup_candidates(candidates, alias_candidates)
+    exact_candidates = [candidate for candidate in candidates if _is_exact_title_match(query, candidate)]
+    if len(exact_candidates) < 2:
+        return True
     return False
 
 def _should_expand_to_fuzzy(query: str, candidates: list[dict[str, Any]]) -> bool:

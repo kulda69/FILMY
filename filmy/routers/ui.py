@@ -12,6 +12,7 @@ from filmy.app_shared import (
 )
 from filmy.db import (
     add_title_to_user_list,
+    clear_ai_suggestions_list_items,
     clear_user_rating,
     copy_group_to_user_list,
     create_user_list,
@@ -270,6 +271,18 @@ async def ui_delete_list(
     response.headers["Cache-Control"] = "no-store, max-age=0"
     response.headers["Pragma"] = "no-cache"
     return response
+
+
+@router.post("/ui/lists/clear-ai-suggestions")
+async def ui_clear_ai_suggestions(
+    return_to: str | None = Form(default=None),
+):
+    try:
+        clear_ai_suggestions_list_items()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    signal_metadata_pipeline("ui_clear_ai_suggestions")
+    return redirect_back(return_to or "/lists/ai-suggestions")
 
 
 @router.get("/ui/cards/background-activity", response_class=HTMLResponse)

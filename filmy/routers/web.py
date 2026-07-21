@@ -38,7 +38,6 @@ from filmy.db import (
     compute_and_record_genre_scores,
     delete_ai_recommendation_file,
     get_catalog_genres,
-    get_continue_watching_items,
     get_favorite_genres,
     get_favorite_traits,
     get_genre_suggestion_candidates,
@@ -217,9 +216,10 @@ async def root(request: Request, list_id: str | None = Query(default=None)):
         if selected_list is None:
             selected_list = visible_lists[0]
     selected_list_limit = ui_config.my_lists_selected_limit
-    continue_limit = ui_config.continue_watching_limit
+    ai_suggestions_limit = ui_config.continue_watching_limit
     selected_list_page = selected_panel_page(selected_list, limit=selected_list_limit)
-    continue_watching = get_continue_watching_items(limit=continue_limit)
+    ai_suggestions_page = get_user_list_items_page("ai-suggestions", limit=ai_suggestions_limit)
+    ai_suggestions_items = ai_suggestions_page["items"]
     active_traits = get_favorite_traits(active_only=True)
     latest_genre_scores = get_latest_genre_scores(limit=8)
     selected_list_show_all_url = None
@@ -242,14 +242,14 @@ async def root(request: Request, list_id: str | None = Query(default=None)):
         if selected_list
         else build_breadcrumb_target("/#lists-section", trail=[home_crumb], label="Home")
     )
-    continue_watching_return_to = build_breadcrumb_target(
+    ai_suggestions_return_to = build_breadcrumb_target(
         "/",
         trail=[home_crumb],
-        label="Continue Watching",
-        fragment="continue-watching-rail",
+        label="AI návrhy",
+        fragment="ai-suggestions-rail",
     )
     launch_homepage_warmup(
-        [item["tconst"] for item in continue_watching]
+        [item["tconst"] for item in ai_suggestions_items]
         + [item["tconst"] for item in selected_list_page["items"]]
     )
     response = templates.TemplateResponse(
@@ -268,8 +268,11 @@ async def root(request: Request, list_id: str | None = Query(default=None)):
             "selected_list_return_to": selected_list_return_to,
             "selected_list_detail_return_to": selected_list_return_to,
             "ai_input_role_options": AI_INPUT_ROLE_OPTIONS,
-            "continue_watching": continue_watching,
-            "continue_watching_return_to": continue_watching_return_to,
+            "ai_suggestions_items": ai_suggestions_items,
+            "ai_suggestions_total": ai_suggestions_page["total"],
+            "ai_suggestions_limit": ai_suggestions_page["limit"],
+            "ai_suggestions_has_more": ai_suggestions_page["total"] > ai_suggestions_page["limit"],
+            "ai_suggestions_return_to": ai_suggestions_return_to,
             "suggestion_scores_generated_at": latest_genre_scores["generated_at"] if latest_genre_scores else None,
             "favorite_traits_active_count": len(active_traits),
             "background": background_supervisor.homepage_snapshot(),

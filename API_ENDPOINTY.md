@@ -24,14 +24,16 @@ Doporucene poradi volani:
    - co znamena lokalni scoring,
    - rozdil mezi Jiriho ratingem, IMDb ratingem a lokalnim score,
    - proc `title_role_signals` zatim nejsou zapocitane do `final_score`.
-3. `GET /api/ai/taste-inputs`
+3. `GET /api/ai/watched-titles`
+   - kompletni hard blacklist titulu, ktere nema AI znovu doporucovat.
+4. `GET /api/ai/taste-inputs`
    - sirsi vstupy podle `ai_input_role`,
    - `external_suggestion` a `ignore` jsou vyloucene z AI vstupu.
-4. Volitelne `GET /api/ai/noted-titles`
+5. Volitelne `GET /api/ai/noted-titles`
    - tituly s textovymi klady/zapory, tedy nejhustsi osobni vysvetleni vkusu.
-5. Volitelne `GET /api/ai/rated-titles`
+6. Volitelne `GET /api/ai/rated-titles`
    - silne lokalne hodnocene tituly od zadaneho prahu.
-6. Volitelne `GET /api/ai/taste-seed`
+7. Volitelne `GET /api/ai/taste-seed`
    - jeden konkretni seznam, kdyz je potreba cilenejsi sada prikladu.
 
 Bez prvnich dvou kroku nema externi AI projekt delat zavery typu „tento titul je
@@ -531,6 +533,88 @@ curl 'http://127.0.0.1:8019/api/ai/taste-inputs?limit_per_list=10'
 `negative` neni pozitivni doporucovaci seed. Externi AI projekt ho ma brat jako
 vymezeni vkusu: co neopakovat, cemu se vyhnout, pripadne proc podobny titul
 nedoporucit bez dobreho vysvetleni.
+
+## GET `/api/ai/watched-titles`
+
+Stav: implementovano.
+
+Read-only endpoint pro kompletni kontrolni seznam titulu, ktere externi AI vrstva
+nema znovu doporucovat. Na rozdil od seed endpointu neni limitovany a nema
+slouzit k interpretaci vkusu, ale jako tvrdy filtr pred vyberem kandidatu.
+
+### Zdroje blacklistu
+
+Endpoint sklada unikatni `display_tconst` z techto lokalnich zdroju:
+
+- `watch_events` pres `app.watched_display_rollup`,
+- `content_state` s hodnotou `watched`,
+- `user_ratings`, pokud `include_rated=true`,
+- aktivni polozky v seznamech s `ai_input_role = negative`, pokud
+  `include_negative=true`.
+
+Epizodni signaly se pri dostupnem mapovani normalizuji na rodicovsky serial,
+stejne jako ve zbytku listoveho UI.
+
+### Query parametry
+
+- `include_rated`: zda zahrnout vsechny lokalne hodnocene tituly, vychozi
+  `true`.
+- `include_negative`: zda zahrnout negativni seznamy typu `Nedokoukano`,
+  vychozi `true`.
+
+### Priklad volani
+
+```bash
+curl 'http://127.0.0.1:8019/api/ai/watched-titles'
+```
+
+### Struktura odpovedi
+
+```json
+{
+  "contract_version": 1,
+  "filters": {
+    "include_rated": true,
+    "include_negative": true
+  },
+  "item_count": 1490,
+  "source_counts": {
+    "watch_event": 1490,
+    "content_state_watched": 20,
+    "user_rating": 250,
+    "negative_list": 6
+  },
+  "items": [
+    {
+      "imdb_id": "tt0242795",
+      "tconst": "tt0242795",
+      "tmdb_id": 1953,
+      "title": "Everwood",
+      "original_title": "Everwood",
+      "title_type": "tvSeries",
+      "year": 2002,
+      "genres": ["Drama", "Romance"],
+      "imdb_rating": 7.5,
+      "imdb_votes": 16000,
+      "user_rating": 4,
+      "latest_source_date": "2026-07-19",
+      "sources": ["negative_list", "user_rating", "watch_event"]
+    }
+  ],
+  "usage_notes": [
+    "Use this endpoint as a complete hard exclusion list before generating new recommendations.",
+    "The endpoint is not limit-based; it is intended as a blacklist, not a taste seed.",
+    "Episode-level watch/rating/list signals are normalized to their parent series display title when available."
+  ]
+}
+```
+
+### Pouziti ve `filmy-knihy`
+
+`filmy-knihy` ma tento endpoint nacist pred vyberem nebo zapisovanim novych
+doporuceni a pouzit `tconst` / `imdb_id` jako tvrdou exclude mnozinu. Tim se
+predejde chybe, kdy AI navrhne titul jen proto, ze nebyl v omezenem snapshotu
+`taste-inputs`, `rated-titles` nebo `taste-seed`.
 
 ## GET `/api/ai/noted-titles`
 

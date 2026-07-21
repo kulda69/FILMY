@@ -130,6 +130,25 @@ class RuntimePostgresTests(unittest.TestCase):
         self.assertEqual(result["tt1"]["watched_count"], 3)
         self.assertEqual(result["tt1"]["last_watched_at"], datetime(2026, 7, 11, 21, 0, 0))
 
+    @patch("filmy.runtime_postgres._connect")
+    def test_archive_user_list_group_calls_server_function(self, connect_mock) -> None:
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (True, 2)
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cursor
+        connect_mock.return_value.__enter__.return_value = conn
+
+        result = runtime_postgres.archive_user_list_group(
+            list_id="list-a",
+            display_tconst="tt1",
+            now="2026-07-21T10:00:00",
+        )
+
+        self.assertEqual(result, {"list_found": True, "archived_items": 2})
+        executed_sql = cursor.execute.call_args.args[0]
+        self.assertIn("app.archive_user_list_group", executed_sql)
+        conn.commit.assert_called_once_with()
+
 
 if __name__ == "__main__":
     unittest.main()

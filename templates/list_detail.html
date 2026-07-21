@@ -47,6 +47,12 @@
                             </div>
                         </details>
                         {% endif %}
+                        {% if selected_list.id == "ai-suggestions" %}
+                        <form action="/ui/lists/clear-ai-suggestions" method="post" onsubmit="return confirm('Vyčistit všechny položky z AI návrhů?');">
+                            <input type="hidden" name="return_to" value="/lists/{{ selected_list.id }}?page={{ selected_list_page }}">
+                            <button type="submit" class="btn btn-warning btn-sm">Vyčistit</button>
+                        </form>
+                        {% endif %}
                     </div>
                     {% if selected_list.description %}
                     <div class="small text-secondary">{{ selected_list.description }}</div>

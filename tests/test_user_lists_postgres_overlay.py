@@ -220,18 +220,60 @@ class UserListsPostgresOverlayTests(unittest.TestCase):
         with (
             patch("filmy.db_library._db", return_value=fake_db),
             patch(
-                "filmy.db_library._get_postgres_group_items_for_list",
-                return_value=(
-                    {"id": "list-a", "name": "List A", "list_kind": "custom"},
-                    [{"canonical_key": "title:tt1"}, {"canonical_key": "title:tt2"}],
-                ),
-            ),
-            patch("filmy.db_library.archive_user_list_item") as archive_mock,
+                "filmy.db_library.archive_user_list_group",
+                return_value={"list_found": True, "archived_items": 2},
+            ) as archive_group_mock,
         ):
             result = db_library.delete_group_from_user_list("list-a", "tt1")
 
         self.assertEqual(result["affected_rows"], 2)
-        self.assertEqual(archive_mock.call_count, 2)
+        archive_group_mock.assert_called_once_with(
+            list_id="list-a",
+            display_tconst="tt1",
+            now="2026-07-11T10:00:00",
+        )
+
+    def test_clear_ai_suggestions_list_items_hard_deletes_list_items(self) -> None:
+        fake_db = SimpleNamespace(clear_title_presentation_cache=lambda: None)
+        with (
+            patch("filmy.db_library._db", return_value=fake_db),
+            patch(
+                "filmy.db_library.fetch_user_list",
+                return_value={
+                    "id": "ai-suggestions",
+                    "name": "AI návrhy",
+                    "list_kind": "custom",
+                    "ai_input_role": "external_suggestion",
+                },
+            ),
+            patch(
+                "filmy.db_library.clear_ai_suggestions_list_items_postgres",
+                return_value={
+                    "id": "ai-suggestions",
+                    "name": "AI návrhy",
+                    "list_kind": "custom",
+                    "ai_input_role": "external_suggestion",
+                    "deleted_items": 17,
+                },
+            ) as clear_mock,
+        ):
+            result = db_library.clear_ai_suggestions_list_items()
+
+        clear_mock.assert_called_once_with()
+        self.assertEqual(result["deleted_items"], 17)
+
+    def test_clear_ai_suggestions_list_items_rejects_wrong_role(self) -> None:
+        with patch(
+            "filmy.db_library.fetch_user_list",
+            return_value={
+                "id": "ai-suggestions",
+                "name": "AI návrhy",
+                "list_kind": "custom",
+                "ai_input_role": "strong_positive",
+            },
+        ):
+            with self.assertRaisesRegex(ValueError, "Vyčistit lze jen seznam AI návrhy"):
+                db_library.clear_ai_suggestions_list_items()
 
     def test_move_group_between_user_lists_moves_postgres_items(self) -> None:
         fake_db = SimpleNamespace(

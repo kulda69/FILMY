@@ -6,7 +6,7 @@ import time
 from copy import deepcopy
 from datetime import datetime
 from typing import Any
-from filmy.runtime_postgres import archive_user_list_item, create_user_list as create_user_list_postgres, delete_user_list as delete_user_list_postgres, delete_title_role_signals as delete_title_role_signals_postgres, fetch_all_watch_events, fetch_existing_watch_tconsts, fetch_active_user_list_items, fetch_continue_watching_catalog_rows, fetch_episode_series_map, fetch_hot_watchlist_page_rows, fetch_person_catalog_row, fetch_title_role_signals as fetch_title_role_signals_postgres, fetch_library_status_projection, fetch_library_status_snapshot, fetch_person_affinity_rating, fetch_series_episode_rows, fetch_title_card_rows, fetch_user_list, fetch_user_list_page_rows, fetch_user_list_item_counts, fetch_user_lists, delete_user_rating as delete_user_rating_postgres, fetch_latest_ratings_for_tconsts, insert_watch_events as insert_watch_events_postgres, list_in_progress_content_states, record_watched as record_watched_postgres, slug_exists, upsert_user_rating as upsert_user_rating_postgres, upsert_user_list_item, upsert_person_affinity, upsert_title_role_signal, update_content_state as update_content_state_postgres, update_user_list_description as update_user_list_description_postgres
+from filmy.runtime_postgres import archive_user_list_group, archive_user_list_item, clear_ai_suggestions_list_items as clear_ai_suggestions_list_items_postgres, create_user_list as create_user_list_postgres, delete_user_list as delete_user_list_postgres, delete_title_role_signals as delete_title_role_signals_postgres, fetch_all_watch_events, fetch_existing_watch_tconsts, fetch_active_user_list_items, fetch_continue_watching_catalog_rows, fetch_episode_series_map, fetch_hot_watchlist_page_rows, fetch_person_catalog_row, fetch_title_role_signals as fetch_title_role_signals_postgres, fetch_library_status_projection, fetch_library_status_snapshot, fetch_person_affinity_rating, fetch_series_episode_rows, fetch_title_card_rows, fetch_user_list, fetch_user_list_page_rows, fetch_user_list_item_counts, fetch_user_lists, delete_user_rating as delete_user_rating_postgres, fetch_latest_ratings_for_tconsts, insert_watch_events as insert_watch_events_postgres, list_in_progress_content_states, record_watched as record_watched_postgres, slug_exists, upsert_user_rating as upsert_user_rating_postgres, upsert_user_list_item, upsert_person_affinity, upsert_title_role_signal, update_content_state as update_content_state_postgres, update_user_list_description as update_user_list_description_postgres
 
 def _db():
     return importlib.import_module('filmy.db')
@@ -350,15 +350,14 @@ def record_watch_events_through_episode(episode_tconst: str, *, watched_on: str 
 def delete_group_from_user_list(list_id: str, display_tconst: str) -> dict[str, Any]:
     db = _db()
     now = db._now_iso()
-    list_row, items = _get_postgres_group_items_for_list(None, list_id=list_id, display_tconst=display_tconst)
-    if list_row is None:
+    result = archive_user_list_group(list_id=list_id, display_tconst=display_tconst, now=now)
+    if not result['list_found']:
         raise ValueError('Seznam nebyl nalezen.')
-    if not items:
+    affected_rows = int(result['archived_items'])
+    if affected_rows == 0:
         raise ValueError('V seznamu nebyla nalezena žádná položka k odstranění.')
-    for item in items:
-        archive_user_list_item(str(list_id), str(item['canonical_key']), now)
     db.clear_title_presentation_cache()
-    return {'list_id': list_id, 'display_tconst': display_tconst, 'updated_at': now, 'affected_rows': len(items)}
+    return {'list_id': list_id, 'display_tconst': display_tconst, 'updated_at': now, 'affected_rows': affected_rows}
 
 def move_group_between_user_lists(source_list_id: str, target_list_id: str, display_tconst: str) -> dict[str, Any]:
     db = _db()
@@ -443,6 +442,20 @@ def delete_user_list(list_id: str) -> dict[str, Any]:
     if deleted['list_kind'] != 'custom':
         raise ValueError('Smazat lze jen vlastní playlisty.')
     return deleted
+
+def clear_ai_suggestions_list_items() -> dict[str, Any]:
+    row = fetch_user_list('ai-suggestions')
+    if row is None:
+        raise ValueError('Seznam AI návrhy nebyl nalezen.')
+    if row.get('ai_input_role') != 'external_suggestion':
+        raise ValueError('Vyčistit lze jen seznam AI návrhy.')
+    cleared = clear_ai_suggestions_list_items_postgres()
+    if cleared is None:
+        raise ValueError('Seznam AI návrhy nebyl nalezen.')
+    if cleared.get('ai_input_role') != 'external_suggestion':
+        raise ValueError('Vyčistit lze jen seznam AI návrhy.')
+    _db().clear_title_presentation_cache()
+    return cleared
 
 def get_recently_watched_page(limit: int=50, offset: int=0) -> dict[str, Any]:
     db = _db()

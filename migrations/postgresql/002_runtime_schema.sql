@@ -766,6 +766,49 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION app.archive_user_list_group(
+    p_list_id text,
+    p_display_tconst text,
+    p_updated_at timestamp without time zone
+)
+RETURNS TABLE(list_found boolean, archived_items integer)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_archived_items integer := 0;
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM app.user_lists AS list
+        WHERE list.id = p_list_id
+    ) THEN
+        RETURN QUERY SELECT false, 0;
+        RETURN;
+    END IF;
+
+    WITH archive_candidates AS (
+        SELECT item.id
+        FROM app.user_list_items AS item
+        LEFT JOIN app.catalog_episodes AS episode
+            ON episode.episode_tconst = item.tconst
+        WHERE item.list_id = p_list_id
+          AND item.is_archived = FALSE
+          AND COALESCE(episode.series_tconst, item.tconst, item.parent_tconst) = p_display_tconst
+    ), archived AS (
+        UPDATE app.user_list_items AS item
+        SET is_archived = TRUE,
+            updated_at = p_updated_at
+        WHERE item.id IN (SELECT id FROM archive_candidates)
+        RETURNING 1
+    )
+    SELECT COUNT(*)
+    INTO v_archived_items
+    FROM archived;
+
+    RETURN QUERY SELECT true, v_archived_items;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION app.replace_favorite_genres(
     p_items jsonb,
     p_source_origin text,

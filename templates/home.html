@@ -10,19 +10,19 @@
                 <div class="card-body p-4">
                     <div class="d-flex justify-content-between align-items-start gap-3 mb-4">
                         <div>
-                            <span class="badge text-bg-light text-dark align-self-start mb-3">Continue Watching</span>
-                            <h1 class="h3 mb-0">Jump back into what you were watching.</h1>
+                            <span class="badge text-bg-light text-dark align-self-start mb-3">AI návrhy</span>
+                            <h1 class="h3 mb-0">Vybrané tipy z importovaných AI doporučení.</h1>
                         </div>
-                        <a class="link-light small text-decoration-none" href="#">Show all »</a>
+                        <a class="link-light small text-decoration-none" href="/lists/ai-suggestions">Show all »</a>
                     </div>
-                    {% if continue_watching %}
-                    <div id="continue-watching-rail" class="d-flex flex-nowrap gap-3 overflow-x-auto pb-2 hide-scrollbar-x">
-                        {% for item in continue_watching %}
+                    {% if ai_suggestions_items %}
+                    <div id="ai-suggestions-rail" class="d-flex flex-nowrap gap-3 overflow-x-auto pb-2 hide-scrollbar-x">
+                        {% for item in ai_suggestions_items %}
                         <div class="flex-shrink-0 poster-rail-item">
                             <div class="rounded-4 border border-secondary-subtle p-3 h-100 {% if loop.first %}bg-body-tertiary{% endif %}">
                                 <div class="d-flex flex-column gap-3">
                                     <a class="d-flex align-items-center justify-content-center rounded-4 bg-secondary-subtle text-dark text-decoration-none overflow-hidden poster-rail-image"
-                                       href="/titles/{{ item.tconst }}?return_to={{ continue_watching_return_to | urlencode }}"
+                                       href="/titles/{{ item.tconst }}?return_to={{ ai_suggestions_return_to | urlencode }}"
                                        aria-label="Open detail for {{ item.title }}">
                                         {% if item.poster_url %}
                                         <img src="{{ item.poster_url }}" alt="Poster for {{ item.title }}" class="img-fluid w-100 h-100 object-fit-cover">
@@ -31,10 +31,10 @@
                                     <div class="min-w-0">
                                         <div class="d-flex flex-wrap align-items-center gap-2 mb-1">
                                             <h2 class="h6 mb-0 text-truncate">
-                                                <a class="text-decoration-none text-body" href="/titles/{{ item.tconst }}?return_to={{ continue_watching_return_to | urlencode }}">{{ item.title }}</a>
+                                                <a class="text-decoration-none text-body" href="/titles/{{ item.tconst }}?return_to={{ ai_suggestions_return_to | urlencode }}">{{ item.title }}</a>
                                             </h2>
                                             <span class="badge text-bg-secondary">{{ item.title_type }}</span>
-                                            <span class="badge text-bg-dark border border-secondary-subtle">{{ item.interest_state }}</span>
+                                            <span class="badge text-bg-dark border border-secondary-subtle">AI tip</span>
                                         </div>
                                         <div class="text-secondary small mb-2">
                                             {% if item.year %}{{ item.year }}{% endif %}
@@ -42,16 +42,6 @@
                                             · S{{ '%02d'|format(item.season_number) }} E{{ '%02d'|format(item.episode_number) }}
                                             {% elif item.series_title %}
                                             · {{ item.series_title }}
-                                            {% endif %}
-                                        </div>
-                                        <div class="small text-secondary">
-                                            {% set updated_text = format_czech_datetime(item.updated_at) %}
-                                            {% if item.last_watched_at %}
-                                            Poslední sledování {{ format_czech_datetime(item.last_watched_at) }}
-                                            {% elif item.last_previewed_at %}
-                                            Poslední rozkoukání {{ format_czech_datetime(item.last_previewed_at) }}
-                                            {% else %}
-                                            Aktualizováno {{ updated_text }}
                                             {% endif %}
                                         </div>
                                     </div>
@@ -62,7 +52,7 @@
                     </div>
                     {% else %}
                     <div class="rounded-4 border border-secondary-subtle p-4 text-secondary">
-                        Current in-progress titles do not have their own posters yet.
+                        Zatím tu nejsou žádné importované AI návrhy. Nové soubory přidáš přes System → Import AI suggestions.
                     </div>
                     {% endif %}
                 </div>
@@ -169,6 +159,12 @@
                                         {% endif %}
                                         </div>
                                     </details>
+                                    {% endif %}
+                                    {% if selected_list and selected_list.id == "ai-suggestions" %}
+                                    <form action="/ui/lists/clear-ai-suggestions" method="post" onsubmit="return confirm('Vyčistit všechny položky z AI návrhů?');">
+                                        <input type="hidden" name="return_to" value="{{ selected_list_return_to }}">
+                                        <button type="submit" class="btn btn-warning btn-sm">Vyčistit</button>
+                                    </form>
                                     {% endif %}
                                 </div>
                                 {% if selected_list and selected_list.description %}

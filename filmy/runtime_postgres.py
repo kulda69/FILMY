@@ -59,7 +59,7 @@ def meta_backend_uses_postgres(ui_config: UiConfig | None=None) -> bool:
 def fetch_catalog_search_rows(*, query: str | None, title_type: str | None, limit: int) -> list[tuple[Any, ...]]:
     """Return base catalog search rows from PostgreSQL."""
     with _connect() as conn, conn.cursor() as cursor:
-        cursor.execute("\n            SELECT\n                tconst,\n                title_type,\n                primary_title,\n                original_title,\n                start_year,\n                runtime_minutes,\n                genres,\n                average_rating,\n                num_votes\n            FROM app.catalog_titles\n            WHERE (%s::text IS NULL OR primary_title ILIKE '%%' || %s::text || '%%' OR original_title ILIKE '%%' || %s::text || '%%')\n              AND (%s::text IS NULL OR title_type = %s::text)\n            ORDER BY\n                CASE WHEN average_rating IS NULL THEN 1 ELSE 0 END,\n                average_rating DESC,\n                num_votes DESC,\n                start_year DESC NULLS LAST,\n                primary_title\n            LIMIT %s\n            ", (query, query, query, title_type, title_type, limit))
+        cursor.execute("\n            SELECT\n                tconst,\n                title_type,\n                primary_title,\n                original_title,\n                start_year,\n                runtime_minutes,\n                genres,\n                average_rating,\n                num_votes\n            FROM app.catalog_titles\n            WHERE (%s::text IS NULL OR primary_title ILIKE '%%' || %s::text || '%%' OR original_title ILIKE '%%' || %s::text || '%%')\n              AND (%s::text IS NULL OR title_type = %s::text)\n            ORDER BY\n                CASE\n                    WHEN %s::text IS NULL THEN 4\n                    WHEN lower(primary_title) = lower(%s::text) THEN 0\n                    WHEN lower(original_title) = lower(%s::text) THEN 1\n                    WHEN primary_title ILIKE %s::text || '%%' THEN 2\n                    WHEN original_title ILIKE %s::text || '%%' THEN 3\n                    ELSE 4\n                END,\n                CASE WHEN average_rating IS NULL THEN 1 ELSE 0 END,\n                average_rating DESC,\n                num_votes DESC,\n                start_year DESC NULLS LAST,\n                primary_title\n            LIMIT %s\n            ", (query, query, query, title_type, title_type, query, query, query, query, query, limit))
         return cursor.fetchall()
 
 def fetch_catalog_stats_row() -> dict[str, int | None]:
@@ -434,6 +434,129 @@ def fetch_ai_noted_title_rows(*, notes: str, min_user_rating: int | None, limit:
         rows = cursor.fetchall()
     return {'filters': {'notes': note_mode, 'min_user_rating': min_user_rating}, 'limit': limit, 'items': [{'imdb_id': row[0], 'tconst': row[0], 'tmdb_id': row[8], 'title': row[1], 'original_title': row[2], 'title_type': row[3], 'year': row[4], 'genres': [genre for genre in str(row[5] or '').split(',') if genre], 'imdb_rating': row[6], 'imdb_votes': row[7], 'user_rating': row[9], 'liked_notes': row[10], 'disliked_notes': row[11], 'rated_at': _parse_optional_timestamp(row[12]), 'actor_affinity_rating': row[13], 'people_affinity': row[14] or [], 'title_role_signals': row[15] or [], 'genre_score_signals': row[16] or []} for row in rows]}
 
+def fetch_ai_watched_title_rows(*, include_rated: bool=True, include_negative: bool=True) -> dict[str, Any]:
+    """Return a complete do-not-recommend title set for external AI workflows."""
+    rated_filter = (
+        'WHERE COALESCE(e.series_tconst, r.tconst) IS NOT NULL'
+        if include_rated
+        else 'WHERE FALSE'
+    )
+    negative_filter = (
+        "WHERE l.ai_input_role = 'negative' AND i.display_tconst IS NOT NULL"
+        if include_negative
+        else 'WHERE FALSE'
+    )
+    with _connect() as conn, conn.cursor() as cursor:
+        cursor.execute(f"""
+            WITH source_rows AS (
+                SELECT
+                    w.display_tconst AS tconst,
+                    'watch_event' AS source,
+                    w.latest_watched_on AS source_date,
+                    NULL::integer AS user_rating
+                FROM app.watched_display_rollup AS w
+                WHERE w.display_tconst IS NOT NULL
+
+                UNION ALL
+
+                SELECT
+                    COALESCE(e.series_tconst, s.tconst) AS tconst,
+                    'content_state_watched' AS source,
+                    s.last_watched_at::date AS source_date,
+                    NULL::integer AS user_rating
+                FROM app.content_state AS s
+                LEFT JOIN app.catalog_episodes AS e ON e.episode_tconst = s.tconst
+                WHERE s.interest_state = 'watched'
+                  AND COALESCE(e.series_tconst, s.tconst) IS NOT NULL
+
+                UNION ALL
+
+                SELECT
+                    COALESCE(e.series_tconst, r.tconst) AS tconst,
+                    'user_rating' AS source,
+                    r.rated_at::date AS source_date,
+                    r.rating AS user_rating
+                FROM app.user_ratings AS r
+                LEFT JOIN app.catalog_episodes AS e ON e.episode_tconst = r.tconst
+                {rated_filter}
+
+                UNION ALL
+
+                SELECT
+                    i.display_tconst AS tconst,
+                    'negative_list' AS source,
+                    i.added_at::date AS source_date,
+                    NULL::integer AS user_rating
+                FROM app.active_user_list_display_items AS i
+                JOIN app.user_lists AS l ON l.id = i.list_id
+                {negative_filter}
+            ),
+            grouped AS (
+                SELECT
+                    tconst,
+                    array_agg(DISTINCT source ORDER BY source) AS sources,
+                    MAX(source_date) AS latest_source_date,
+                    MAX(user_rating) FILTER (WHERE user_rating IS NOT NULL) AS user_rating
+                FROM source_rows
+                GROUP BY tconst
+            ),
+            source_counts AS (
+                SELECT source, COUNT(DISTINCT tconst) AS item_count
+                FROM source_rows
+                GROUP BY source
+            )
+            SELECT
+                g.tconst,
+                t.primary_title,
+                t.original_title,
+                t.title_type,
+                t.start_year,
+                t.genres,
+                t.average_rating,
+                t.num_votes,
+                map.tmdb_id,
+                g.user_rating,
+                g.latest_source_date,
+                g.sources,
+                (SELECT jsonb_object_agg(source, item_count) FROM source_counts) AS source_counts
+            FROM grouped AS g
+            LEFT JOIN app.catalog_titles AS t ON t.tconst = g.tconst
+            LEFT JOIN app.tmdb_title_map AS map ON map.tconst = g.tconst
+            ORDER BY COALESCE(g.latest_source_date, DATE '1900-01-01') DESC, COALESCE(t.primary_title, g.tconst)
+            """)
+        rows = cursor.fetchall()
+    source_counts = rows[0][12] if rows and rows[0][12] is not None else {}
+    items = [
+        {
+            'imdb_id': row[0],
+            'tconst': row[0],
+            'tmdb_id': row[8],
+            'title': row[1],
+            'original_title': row[2],
+            'title_type': row[3],
+            'year': row[4],
+            'genres': [genre for genre in str(row[5] or '').split(',') if genre],
+            'imdb_rating': row[6],
+            'imdb_votes': row[7],
+            'user_rating': row[9],
+            'latest_source_date': row[10].isoformat() if row[10] is not None else None,
+            'sources': list(row[11] or []),
+        }
+        for row in rows
+    ]
+    return {
+        'contract_version': 1,
+        'filters': {'include_rated': include_rated, 'include_negative': include_negative},
+        'item_count': len(items),
+        'source_counts': dict(source_counts),
+        'items': items,
+        'usage_notes': [
+            'Use this endpoint as a complete hard exclusion list before generating new recommendations.',
+            'The endpoint is not limit-based; it is intended as a blacklist, not a taste seed.',
+            'Episode-level watch/rating/list signals are normalized to their parent series display title when available.',
+        ],
+    }
+
 def insert_watch_event(*, event_id: str, tconst: str, event_scope: str, watched_on: str, notes: str | None, created_at: str) -> dict[str, Any]:
     """Insert one local watch event and sync content_state in PostgreSQL."""
     with _connect() as conn, conn.cursor() as cursor:
@@ -616,6 +739,22 @@ def delete_user_list(list_id: str) -> dict[str, Any] | None:
         conn.commit()
     return {'id': row[0], 'slug': row[1], 'name': row[2], 'description': row[3], 'list_kind': row[4], 'ai_input_role': row[5]}
 
+def clear_ai_suggestions_list_items() -> dict[str, Any] | None:
+    """Physically remove all user-list items from the AI suggestions inbox."""
+    with _connect() as conn, conn.cursor() as cursor:
+        cursor.execute('\n            SELECT id, slug, name, description, list_kind, ai_input_role\n            FROM app.user_lists\n            WHERE id = %s\n            ', ('ai-suggestions',))
+        row = cursor.fetchone()
+        if row is None:
+            conn.rollback()
+            return None
+        if row[5] != 'external_suggestion':
+            conn.rollback()
+            return {'id': row[0], 'slug': row[1], 'name': row[2], 'description': row[3], 'list_kind': row[4], 'ai_input_role': row[5], 'deleted_items': 0}
+        cursor.execute('DELETE FROM app.user_list_items WHERE list_id = %s', ('ai-suggestions',))
+        deleted_items = cursor.rowcount
+        conn.commit()
+    return {'id': row[0], 'slug': row[1], 'name': row[2], 'description': row[3], 'list_kind': row[4], 'ai_input_role': row[5], 'deleted_items': deleted_items}
+
 def slug_exists(slug: str) -> bool:
     """Return whether one user-list slug already exists in PostgreSQL."""
     with _connect() as conn, conn.cursor() as cursor:
@@ -633,6 +772,16 @@ def archive_user_list_item(list_id: str, canonical_key: str, now: str) -> None:
     with _connect() as conn, conn.cursor() as cursor:
         cursor.execute('\n            UPDATE app.user_list_items\n            SET is_archived = TRUE, updated_at = %s::timestamp\n            WHERE list_id = %s AND canonical_key = %s\n            ', (now, list_id, canonical_key))
         conn.commit()
+
+def archive_user_list_group(*, list_id: str, display_tconst: str, now: str) -> dict[str, Any]:
+    """Archive all active items for one displayed title group in a list."""
+    with _connect() as conn, conn.cursor() as cursor:
+        cursor.execute('\n            SELECT list_found, archived_items\n            FROM app.archive_user_list_group(%s, %s, %s::timestamp)\n            ', (list_id, display_tconst, now))
+        row = cursor.fetchone()
+        conn.commit()
+    if row is None:
+        raise RuntimeError('PostgreSQL archive_user_list_group nevratil vysledek.')
+    return {'list_found': bool(row[0]), 'archived_items': int(row[1] or 0)}
 
 def fetch_user_list_item_counts() -> dict[str, int]:
     """Return aggregate list and active-item counts from PostgreSQL."""
