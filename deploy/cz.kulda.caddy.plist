@@ -4,16 +4,18 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>cz.kulda.filmy</string>
+  <string>cz.kulda.caddy</string>
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/kulda/apps/FILMY/.venv/bin/python</string>
-    <string>/Users/kulda/apps/FILMY/main.py</string>
+    <string>/opt/homebrew/bin/caddy</string>
+    <string>run</string>
+    <string>--config</string>
+    <string>/Users/kulda/apps/Caddyfile</string>
   </array>
 
   <key>WorkingDirectory</key>
-  <string>/Users/kulda/apps/FILMY</string>
+  <string>/Users/kulda/apps</string>
 
   <key>RunAtLoad</key>
   <true/>
@@ -23,17 +25,17 @@
 
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PYTHONUNBUFFERED</key>
-    <string>1</string>
+    <key>HOME</key>
+    <string>/var/root</string>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
 
   <key>StandardOutPath</key>
-  <string>/Users/kulda/apps/FILMY/logs/launchd.stdout.log</string>
+  <string>/Users/kulda/apps/logs/caddy.stdout.log</string>
 
   <key>StandardErrorPath</key>
-  <string>/Users/kulda/apps/FILMY/logs/launchd.stderr.log</string>
+  <string>/Users/kulda/apps/logs/caddy.stderr.log</string>
 
   <key>ProcessType</key>
   <string>Background</string>

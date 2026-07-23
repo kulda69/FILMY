@@ -19,6 +19,7 @@ filmy-jobs-status = "filmy.scripts.background_jobs_status:main"
 filmy-sync-plex = "filmy.scripts.sync_plex:main"
 filmy-inspect-plex = "filmy.scripts.inspect_plex:main"
 filmy-probe-plex = "filmy.scripts.probe_plex_import:main"
+filmy-upgrade-database = "filmy.scripts.upgrade_database:main"
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

@@ -9,6 +9,17 @@ Navazujici runtime runner vytvori omezenou roli, `002_runtime_schema.sql`
 vytvori sest explicitnich tabulek a az po exact fingerprint kontrole
 `003_runtime_grants.sql` udeli aplikacni prava. Aplikace je PostgreSQL-only.
 
+Po nasazeni na server se dalsi zmeny databaze nepropisuji rucnim prenosem
+databaze z vyvojoveho stroje. Pouziva se upgrade runner:
+
+```bash
+uv run filmy-upgrade-database
+```
+
+Runner zaklada `app.database_upgrades`, eviduje aplikovane verze a spousti
+idempotentni SQL migrace jen jako chybejici kroky. Kazda dalsi DB zmena musi mit
+novy verziovany upgrade krok.
+
 Bootstrap je fail-closed: prihlaseny administrator musi vlastnit databazi,
 schemata `app`, `old` a `public` i obe rozsireni. Explicitni ACL smi mirit jen
 na vlastnika. Jedinou povolenou vyjimkou je `PUBLIC USAGE` na schematu

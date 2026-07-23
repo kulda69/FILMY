@@ -219,6 +219,25 @@ Související rozhodnutí: [AI taste bridge je datový kontrakt, ne náhrada lok
 - `API_ENDPOINTY.md` byl aktualizovaný jako kontrakt pro navazující projekt.
 - Ověření: cílený API test prošel, `compileall` prošel a živý helper smoke v aktuální DB vrátil `item_count=1952`.
 
+## 2026-07-22 - Oprava deploy cesty pro Mac mini LaunchAgent
+
+- Šablona `deploy/cz.kulda.filmy.plist` byla opravena z chybné cesty `/Volumes/kulda/apps/FILMY` na skutečnou cestu `/Users/kulda/apps/FILMY`.
+- Stejná oprava byla propsaná i do `README.md` a `INSTALACE.md`, aby nasazení na `mac-mini` odpovídalo reálnému umístění projektu.
+- Dvojité lomítko z ručně dopsaného návrhu bylo při zápisu jen normalizované; význam cesty zůstal stejný.
+
+## 2026-07-23 - Oprava Tailscale/Caddy HTTPS vrstvy na Mac mini
+
+- Původní App Store build `Tailscale.app` na `mac-mini` byl rozbitý pro CLI i `.ts.net` HTTPS vrstvu: `tailscale status` padal na `BundleIdentifiers.swift:47`, chyběl `/var/run/tailscaled.socket` a `Caddy` přes `.ts.net` vracel TLS internal error.
+- Po přechodu na standalone Tailscale build se CLI rozběhlo přes `TAILSCALE_BE_CLI=1`, aktivní network extension byla potvrzena a skutečný blocker se zúžil na změněnou identitu node po reinstalaci.
+- Nový aktivní node byl nejdřív `kulda-mini-3` s IP `100.91.68.48`, zatímco starý `mini.taildce711.ts.net` dál mířil na offline node `100.124.124.95`. Po přejmenování v Tailscale adminu se finální MagicDNS hostname ustálil na `kulda-mini.taildce711.ts.net`.
+- `Caddyfile` byl přepnutý na nový hostname/IP a HTTPS bylo ověřené end-to-end: `curl -vk https://kulda-mini.taildce711.ts.net:8019` vrátil `HTTP/2 200`; `curl -skI` na `8019` i `8020` vrací očekávané `HTTP/2 405` s `allow: GET`, `server: uvicorn` a `via: 1.1 Caddy`.
+- Pro `Caddy` přibyl samostatný `launchd` plist `deploy/cz.kulda.caddy.plist`, určený pro `LaunchDaemon` v `/Library/LaunchDaemons`. Tím proxy vrstva běží i bez otevřeného Terminálu.
+- Při stabilizaci se ukázalo, že vedle systémového `LaunchDaemon`u zůstával starý uživatelský `~/Library/LaunchAgents/cz.kulda.caddy.plist`, který dělal duplicitní starty a chyby `127.0.0.1:2019 already in use`. Po jeho odstranění a vyprázdnění logu už nové chyby nepřibývají.
+- Ověřený provozní stav na `mac-mini` je:
+  - `FILMY`: `https://kulda-mini.taildce711.ts.net:8019`
+  - druhá appka: `https://kulda-mini.taildce711.ts.net:8020`
+- Otevřená poznámka: z tohoto Macu zatím Jiří nepotvrdil reálné načtení těch URL v prohlížeči; zatím je potvrzený shell/curl průchod na samotném `mac-mini`. Pokud mají být odkazy považované za hotově dosažitelné i z jiného zařízení, je potřeba ještě samostatný klientský smoke mimo `mac-mini`.
+
 ## 2026-07-20 - Vyčištění položek v AI návrzích
 
 - Na Jiřího žádost byly odstraněné aktivní položky ze seznamu `AI návrhy`.
@@ -255,3 +274,10 @@ Související rozhodnutí: [AI taste bridge je datový kontrakt, ne náhrada lok
 - Aplikační fasáda zachovala stejné chyby a návratový tvar, ale místo načítání aktivních položek a Python smyčky volá jeden PostgreSQL entrypoint.
 - Lokální migrace `002/003` byly znovu aplikované do PostgreSQL. Rollback smoke nad dočasným seznamem ověřil `list_found=True`, `archived_items=1` a archivovaný řádek.
 - Ověření: cílené testy prošly `26 passed`, `compileall` prošel a celý `uv run pytest` skončil `73 passed`.
+
+## 2026-07-21 - Pravidlo pro serverové DB upgrady
+
+- Po přenosu projektu na server se už nemá databáze ručně přenášet mezi stroji při dalších změnách.
+- Každá další změna PostgreSQL schématu, funkce, view, constraintu, indexu nebo seed/role dat musí mít idempotentní upgrade krok v repozitáři.
+- Přibyl runner `filmy.scripts.upgrade_database` / `filmy-upgrade-database`, který zakládá ledger `app.database_upgrades` a spouští verziované migrace.
+- Instalační postup byl doplněný tak, aby se po `git pull` a `uv sync` spouštělo `uv run filmy-upgrade-database`.

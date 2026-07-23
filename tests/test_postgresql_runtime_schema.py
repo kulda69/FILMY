@@ -33,3 +33,15 @@ def test_person_lookup_levenshtein_extension_is_part_of_bootstrap_contract() -> 
     assert "('fuzzystrmatch')" in bootstrap_sql
     assert "('fuzzystrmatch')" in bootstrap_runner
     assert "public.levenshtein(%s::text, name_key::text)" in runtime_postgres
+
+
+def test_database_upgrade_runner_tracks_versioned_steps() -> None:
+    upgrade_runner = Path("filmy/scripts/upgrade_database.py").read_text(encoding="utf-8")
+    pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
+    install_doc = Path("INSTALACE.md").read_text(encoding="utf-8")
+
+    assert "app.database_upgrades" in upgrade_runner
+    assert '"0002-runtime-schema", "002_runtime_schema.sql"' in upgrade_runner
+    assert '"0005-catalog-grants", "005_catalog_grants.sql"' in upgrade_runner
+    assert "filmy-upgrade-database = \"filmy.scripts.upgrade_database:main\"" in pyproject
+    assert "uv run filmy-upgrade-database" in install_doc

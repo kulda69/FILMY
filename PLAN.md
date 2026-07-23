@@ -42,6 +42,12 @@ Jak to používat:
 
 ## Další kroky
 
+- [ ] Zavést a používat serverový upgrade režim databáze.
+  Důvod: po přesunu na Mac mini už se databáze nemá znovu ručně přenášet mezi stroji. Každá další DB změna musí být reprodukovatelná po `git pull` na serveru.
+  Checkpoint:
+  - 2026-07-21: zavedeno pravidlo, že změny PostgreSQL schématu/funkcí/view/constraintů/indexů/seed/role dat musí mít idempotentní upgrade krok. Přibyl runner `filmy.scripts.upgrade_database` / CLI `filmy-upgrade-database`, který používá stejnou admin konfiguraci jako bootstrap, zakládá ledger `app.database_upgrades` a aplikuje existující SQL migrace `001` až `005` jako verziované kroky. Další DB změny už mají přidat nový verzovaný krok místo ručního psql zásahu.
+  - Otevřené: změny jsou zatím jen v pracovním stromu, nejsou stagované ani commitnuté; live `filmy-upgrade-database` proti skutečné DB nebyl spuštěn.
+
 - [ ] Realizovat po malých krocích serverovou část PostgreSQL runtime podle [POSTGRESQL_SERVER_SIDE_PLAN.md](POSTGRESQL_SERVER_SIDE_PLAN.md).
   Důvod: PG-first runtime je funkční, ale importní commit a akce `Watched` mají ještě orchestrace rozdělené mezi několik Python zápisů. První kandidát je atomický importní commit; views a materialized views až po měření.
   Checkpoint:
@@ -248,6 +254,11 @@ Jak to používat:
 
 ## Checkpoint
 
+- 2026-07-23: Tailscale/Caddy HTTPS vrstva na `mac-mini` je opravená a stabilizovaná. App Store build `Tailscale` byl nahrazen standalone variantou, node byl po reinstalaci srovnaný zpět na `kulda-mini.taildce711.ts.net`, `Caddyfile` běží nad novou IP `100.91.68.48` a HTTPS request na `https://kulda-mini.taildce711.ts.net:8019` vrací `HTTP/2 200`. Pro `Caddy` přibyl `LaunchDaemon` `deploy/cz.kulda.caddy.plist`; po odstranění starého uživatelského `cz.kulda.caddy` LaunchAgentu už log nezaplňují duplicitní starty na `127.0.0.1:2019`. Otevřený zbytkový bod: z tohoto Macu ještě nebyl potvrzený běžný browser smoke na těch URL, zatím je ověřený shell/curl průchod na samotném `mac-mini`.
+- 2026-07-23: z tohoto MacBooku (`Jiris-MacBook-Pro`) zatím MagicDNS jméno `kulda-mini.taildce711.ts.net` nejde přeložit: `curl -vk https://kulda-mini.taildce711.ts.net:8019` vrací `Could not resolve host`. To ukazuje na klientský Tailscale problém na MacBooku, ne na serverovou stranu `mac-mini`. Než se URL prohlásí za hotově dosažitelné i z jiného zařízení, je potřeba zprovoznit Tailscale/MagicDNS na tomto klientovi.
+- 2026-07-22: `FILMY` je na `mac-mini` už nainstalované a opravený `deploy/cz.kulda.filmy.plist` funguje pro cestu `/Users/kulda/apps/FILMY`; LaunchAgent se po opravě cesty rozběhl. Otevřený provozní problém už není v appce, ale v HTTPS vrstvě přes `Caddy` + `Tailscale`: `Caddyfile` v `/Users/kulda/apps/Caddyfile` má bloky pro `8019` i `8020`, ale ruční `caddy run --config /Users/kulda/apps/Caddyfile` padá při TLS handshaku na `Get "http://local-tailscaled.sock/...": dial unix /var/run/tailscaled.socket: connect: no such file or directory`. Na stroji běží appková varianta `/Applications/Tailscale.app`, CLI `/usr/local/bin/tailscale` symlinkuje do té appky a `tailscale status` padá na `BundleIdentifiers.swift:47`; `ls /var/run/tailscaled.socket` potvrzuje, že socket neexistuje. Nejbližší další krok: zítra dořešit Tailscale/Caddy HTTPS vrstvu na `mac-mini` bez návratu k plain HTTP a až potom ověřit `https://mini.taildce711.ts.net:8019`.
+- 2026-07-21: při krátkém resume/closeout bloku bylo výslovně potvrzeno, že pokračování v `FILMY` má jet už jen přes novou verzi `project-brain`. Prakticky to znamená: jako zdroj kontinuity brát `AGENTS.md`, `PLAN.md`, `Historie projektu.md`, `Rozhodnuti projektu.md` a `.agents/project-brain.json`; session logy nebo starší paměťové vrstvy nepoužívat, pokud tyto soubory nestačí.
+- 2026-07-21: otevřený produktový směr se tímto closeoutem nemění. Nejbližší reálné navázání je pořád buď dotáhnout doménová pravidla akce `Watched` mezi seznamy, nebo pokračovat dalším malým server-side PostgreSQL krokem podle `POSTGRESQL_SERVER_SIDE_PLAN.md`.
 - 2026-07-10: po přesunu projektu na externí disk už `ensure_database()` nespouští zbytečný full refresh IMDb katalogu jen kvůli změně absolutní cesty nebo `mtime`; refresh se teď řídí skutečnou změnou obsahu a při pouhém přesunu se jen přepíše manifest/meta.
 - 2026-07-10: homepage a listy už nejsou závislé na starých absolutních `local_path` u TMDB assetů. Read vrstva nově preferuje `relative_path` a fallback helper ještě umí přečíst i starší asset záznamy se starou absolutní cestou, takže přesun mezi disky nerozbije postery ani portréty.
 - 2026-07-10: výběr lidí pro background portréty je zúžený jen na osoby navázané na tituly v `app.user_list_items` a na explicitně oblíbené osoby (`affinity_rating > 0` nebo `is_favorite = true`). Už se nemají rozjíždět tisíce zbytečných portrait fetchů mimo reálně relevantní knihovnu.

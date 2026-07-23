@@ -23,7 +23,7 @@ Kdyz uz mas pripravene lokalni virtualni prostredi, jde i kratka varianta:
 .venv/bin/python main.py
 ```
 
-Na Mac mini, ktery bude slouzit jako domaci server, se appka bude spoustet pres `main.py`, protoze pobehzi pod `LaunchAgents`.
+Na Mac mini, ktery bude slouzit jako domaci server, se appka bude spoustet pres `main.py`, protoze pobehzi pod `LaunchAgents` z cesty `/Users/kulda/apps/FILMY`.
 
 Krátký postup instalace nebo aktualizace projektu na jiném počítači je v
 [`INSTALACE.md`](INSTALACE.md).

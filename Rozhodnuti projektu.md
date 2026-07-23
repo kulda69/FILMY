@@ -48,6 +48,14 @@ Důvod: po přechodu na PostgreSQL, AI endpointech a importu AI doporučení už
 
 Důsledek: nové importy, rebuildy, maintenance akce i veřejné/navazující endpointy se mají dělat PostgreSQL cestou. Neobnovovat backend přepínače ani staré fallback větve. Historické migrační dokumenty mohou zůstat jako archiv, ale nejsou platný pracovní směr.
 
+## 2026-07-21 - DB změny po deployi musí být verziované upgrady
+
+Rozhodnutí: po přesunu projektu na server se další databázové změny nesmí řešit ručním přenosem databáze z vývojového stroje. Každá změna PostgreSQL schématu, funkce, view, constraintu, indexu nebo seed/role dat musí mít idempotentní upgrade krok v repozitáři a musí být spustitelná přes `filmy-upgrade-database` / `python -m filmy.scripts.upgrade_database`.
+
+Důvod: server po `git pull` musí umět sám zjistit, které DB kroky už má, a bezpečně provést jen ty chybějící. Jinak by se další vývoj začal rozjíždět mezi lokální databází a serverem.
+
+Důsledek: při každé budoucí DB změně se aktualizuje upgrade runner nebo jeho seznam verzovaných kroků, testy a případně dokumentace. Ledger `app.database_upgrades` je technický zdroj pravdy pro aplikované databázové upgrady.
+
 ## 2026-07-19 - Akce na detailu zustavaji na detailu
 
 Rozhodnutí: když je titul otevřený ze seznamu, formulářové akce na detailu mají po uložení vrátit uživatele zpět na stejný detail titulu, ne přímo do zdrojového seznamu.

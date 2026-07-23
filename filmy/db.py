@@ -70,8 +70,15 @@ def _ensure_postgres_catalog_startup() -> None:
         return
     stored = {row['source_key']: {'path': row['source_path'], 'mtime': row['source_mtime'], 'size': row['source_size'], 'sha256': row['source_sha256']} for row in fetch_imdb_manifest_rows()}
     meta_rows = fetch_catalog_refresh_rows()
+    source_files_present = all(source.path.exists() for source in SOURCE_FILES)
     if not stored or not meta_rows:
+        if not source_files_present:
+            logger.info('PostgreSQL catalog startup: local IMDb TSV files are missing, but catalog already exists; skipping rebuild check.')
+            return
         rebuild_catalog_from_current_imdb(force=False)
+        return
+    if not source_files_present:
+        logger.info('PostgreSQL catalog startup: local IMDb TSV files are missing, but catalog metadata already exists; skipping file drift check.')
         return
     manifest_needs_update = False
     for source in SOURCE_FILES:
@@ -1679,8 +1686,13 @@ def get_tmdb_asset_summary(tconst: str) -> dict[str, dict[str, Any]]:
         asset_kind = asset['asset_kind']
         if asset_kind in latest_by_kind:
             continue
-        local_path = asset.get('local_path')
-        latest_by_kind[asset_kind] = {'status': asset.get('status'), 'local_path': local_path, 'exists': bool(local_path and Path(local_path).exists()), 'fetched_at': asset.get('fetched_at')}
+        resolved_local_path = _resolve_tmdb_asset_local_path(asset)
+        latest_by_kind[asset_kind] = {
+            'status': asset.get('status'),
+            'local_path': resolved_local_path,
+            'exists': bool(resolved_local_path and Path(resolved_local_path).exists()),
+            'fetched_at': asset.get('fetched_at'),
+        }
     return latest_by_kind
 
 def get_latest_poster_records(tconsts: list[str]) -> dict[str, dict[str, Any]]:
@@ -2098,19 +2110,41 @@ def get_local_library_status() -> dict[str, Any]:
 
 def _poster_url_from_detail(detail: dict[str, Any] | None) -> str | None:
     tmdb = (detail or {}).get('tmdb') or {}
-    assets = tmdb.get('assets') or []
-    poster_asset = next((asset for asset in assets if asset.get('asset_kind') == 'poster' and asset.get('local_path')), None)
-    if not poster_asset or not poster_asset.get('local_path'):
+    poster_asset = _latest_tmdb_asset_by_kind(tmdb.get('assets') or [], 'poster')
+    local_path = _resolve_tmdb_asset_local_path(poster_asset)
+    if not local_path:
         return None
-    return _poster_url_from_local_path(str(poster_asset['local_path']))
+    return _poster_url_from_local_path(local_path)
 
 def _backdrop_url_from_detail(detail: dict[str, Any] | None) -> str | None:
     tmdb = (detail or {}).get('tmdb') or {}
-    assets = tmdb.get('assets') or []
-    backdrop_asset = next((asset for asset in assets if asset.get('asset_kind') == 'backdrop' and asset.get('local_path')), None)
-    if not backdrop_asset or not backdrop_asset.get('local_path'):
+    backdrop_asset = _latest_tmdb_asset_by_kind(tmdb.get('assets') or [], 'backdrop')
+    local_path = _resolve_tmdb_asset_local_path(backdrop_asset)
+    if not local_path:
         return None
-    return _poster_url_from_local_path(str(backdrop_asset['local_path']))
+    return _poster_url_from_local_path(local_path)
+
+def _latest_tmdb_asset_by_kind(assets: list[dict[str, Any]], asset_kind: str) -> dict[str, Any] | None:
+    for asset in assets:
+        if str(asset.get('asset_kind')) == asset_kind:
+            return asset
+    return None
+
+def _resolve_tmdb_asset_local_path(asset: dict[str, Any] | None) -> str | None:
+    if not asset:
+        return None
+    local_path_value = str(asset.get('local_path') or '').strip()
+    relative_path_value = str(asset.get('relative_path') or '').strip()
+    if local_path_value:
+        local_path = Path(local_path_value)
+        if local_path.exists():
+            return local_path.as_posix()
+    if relative_path_value:
+        relative_path = Path(relative_path_value)
+        candidate = ASSETS_DIR / relative_path
+        if candidate.exists():
+            return candidate.as_posix()
+    return local_path_value or ((ASSETS_DIR / Path(relative_path_value)).as_posix() if relative_path_value else None)
 
 def _poster_url_from_local_path(local_path_value: str | None) -> str | None:
     return _asset_url_from_local_path(local_path_value, assets_root=ASSETS_DIR, mount_path='/assets/tmdb')

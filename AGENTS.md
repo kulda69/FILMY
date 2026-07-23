@@ -15,6 +15,7 @@ Technické prostředí
 - Lokálně může běžet Ollama (modely nomic-embed-text pro embeddingy, qwen3:14b pro generování).
 - Appka se spouští jako desktopová přes Brave/Chrome app mód, případně později pywebview.
 - Projekt je PostgreSQL-only. Nezavádět zpět souborový databázový backend ani fallback větve mimo PostgreSQL.
+- Po nasazení na server už se databáze nepřenáší ručně mezi stroji. Každá změna PostgreSQL schématu, funkce, view, constraintu, indexu nebo seed/role dat musí mít idempotentní upgrade krok spustitelný přes `filmy-upgrade-database` / `python -m filmy.scripts.upgrade_database`; upgrade runner má sám ověřit stav přes tabulku verzí a provést jen chybějící kroky.
 - `API_ENDPOINTY.md` je živý kontrakt pro navazující projekty. Při přidání, změně nebo upřesnění veřejného/navazujícího endpointu ho průběžně aktualizovat.
 - `filmy_output/` je stabilní lokální zdroj AI doporučení pro import zpět do FILMY. Importer má číst jeho standardní JSON schéma; prázdná/nepoužitá pole zůstávají jako `null` nebo prázdné seznamy, ne jako chybějící pole.
 
@@ -58,6 +59,7 @@ Poznámka: API klíče (IMDb/TMDB) nepatří sem do instrukcí — dej je do .en
 ## Project Brain
 
 - This project uses the `project-brain` skill for durable memory and recall.
+- V tomto projektu používat výhradně novou verzi `project-brain` jako continuity vrstvu; staré session logy nebo jiné historické paměťové vrstvy brát jen jako nouzový fallback, když nestačí lokální project-brain soubory.
 - At the start of substantive work, read `PLAN.md` and recall relevant `memories.sh` context.
 - Record important events in `Historie projektu.md` and reasons or rejected approaches in `Rozhodnuti projektu.md`.
 - Propagate durable AI rules into `AGENTS.md`; keep current-stage direction and the next action in `PLAN.md`.
