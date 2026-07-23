@@ -92,6 +92,21 @@ def _record_upgrade(config, version: str, script_name: str, checksum: str) -> No
     _run_psql(config, TARGET_DATABASE, "-c", query)
 
 
+def _bootstrap_required(config) -> bool:
+    """Return True only when the core bootstrap schema is still missing."""
+
+    output = _run_psql(
+        config,
+        TARGET_DATABASE,
+        "-A",
+        "-t",
+        "-c",
+        "SELECT to_regnamespace('app') IS NOT NULL;",
+        capture_output=True,
+    )
+    return output.strip().lower() not in {"t", "true"}
+
+
 def upgrade_database(*, dry_run: bool = False) -> None:
     """Apply pending database upgrades in version order."""
 
@@ -105,7 +120,11 @@ def upgrade_database(*, dry_run: bool = False) -> None:
         return
 
     config = _load_config()
-    _run_psql(config, TARGET_DATABASE, "-f", str(bootstrap_path))
+    if _bootstrap_required(config):
+        print(f"apply 0001-bootstrap {bootstrap_path.name}")
+        _run_psql(config, TARGET_DATABASE, "-f", str(bootstrap_path))
+    else:
+        print(f"skip 0001-bootstrap {bootstrap_path.name} (app schema already exists)")
     _ensure_ledger(config)
     _record_upgrade(config, "0001-bootstrap", bootstrap_path.name, _sha256(bootstrap_path))
     applied = _applied_versions(config)

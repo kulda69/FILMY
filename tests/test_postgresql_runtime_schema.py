@@ -41,6 +41,8 @@ def test_database_upgrade_runner_tracks_versioned_steps() -> None:
     install_doc = Path("INSTALACE.md").read_text(encoding="utf-8")
 
     assert "app.database_upgrades" in upgrade_runner
+    assert "SELECT to_regnamespace('app') IS NOT NULL;" in upgrade_runner
+    assert "skip 0001-bootstrap" in upgrade_runner
     assert '"0002-runtime-schema", "002_runtime_schema.sql"' in upgrade_runner
     assert '"0005-catalog-grants", "005_catalog_grants.sql"' in upgrade_runner
     assert "filmy-upgrade-database = \"filmy.scripts.upgrade_database:main\"" in pyproject
