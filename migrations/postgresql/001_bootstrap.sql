@@ -31,9 +31,12 @@ BEGIN
         FROM pg_namespace
         WHERE nspname = schema_name;
 
-        IF FOUND AND schema_owner IS DISTINCT FROM current_user THEN
+        IF FOUND AND NOT (
+            schema_owner IS NOT DISTINCT FROM current_user
+            OR (schema_name = 'public' AND schema_owner = 'pg_database_owner')
+        ) THEN
             RAISE EXCEPTION
-                'Schema % is owned by %, expected current administrator %',
+                'Schema % is owned by %, expected current administrator % or pg_database_owner for public',
                 schema_name, schema_owner, current_user;
         END IF;
     END LOOP;
@@ -143,7 +146,10 @@ BEGIN
                       COALESCE(pg_get_userbyid(namespace.nspowner), '<missing>'))
         FROM protected_schemas AS expected
         LEFT JOIN pg_namespace AS namespace ON namespace.nspname = expected.name
-        WHERE namespace.oid IS NULL OR namespace.nspowner <> current_user::regrole
+        WHERE namespace.oid IS NULL OR NOT (
+            namespace.nspowner = current_user::regrole
+            OR (expected.name = 'public' AND pg_get_userbyid(namespace.nspowner) = 'pg_database_owner')
+        )
         UNION ALL
         SELECT format('extension %s is missing, owned by %s, or in schema %s',
                       expected.name, COALESCE(pg_get_userbyid(extension_entry.extowner), '<missing>'),

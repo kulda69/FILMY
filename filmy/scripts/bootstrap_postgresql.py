@@ -209,7 +209,10 @@ def check(config: PostgreSQLConfig) -> None:
                           COALESCE(pg_get_userbyid(namespace.nspowner), '<missing>'), current_user)
             FROM protected_schemas AS expected
             LEFT JOIN pg_namespace AS namespace ON namespace.nspname = expected.name
-            WHERE namespace.oid IS NULL OR namespace.nspowner <> current_user::regrole
+            WHERE namespace.oid IS NULL OR NOT (
+                namespace.nspowner = current_user::regrole
+                OR (expected.name = 'public' AND pg_get_userbyid(namespace.nspowner) = 'pg_database_owner')
+            )
             UNION ALL
             SELECT format('extension %s missing or owner=%s schema=%s (expected %s/public)',
                           expected.name, COALESCE(pg_get_userbyid(extension_entry.extowner), '<missing>'),
@@ -286,7 +289,7 @@ def check(config: PostgreSQLConfig) -> None:
         raise RuntimeError("Kontrola PostgreSQL selhala: " + "; ".join(failures))
 
     print(
-        "PostgreSQL kontrola OK: vlastníci filmy/app/old/public, "
+        "PostgreSQL kontrola OK: vlastníci filmy/app/old a public/current or pg_database_owner, "
         "pg_trgm/unaccent/fuzzystrmatch v public a přesné ACL včetně filmy_app."
     )
 

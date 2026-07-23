@@ -45,3 +45,12 @@ def test_database_upgrade_runner_tracks_versioned_steps() -> None:
     assert '"0005-catalog-grants", "005_catalog_grants.sql"' in upgrade_runner
     assert "filmy-upgrade-database = \"filmy.scripts.upgrade_database:main\"" in pyproject
     assert "uv run filmy-upgrade-database" in install_doc
+
+
+def test_bootstrap_accepts_pg_database_owner_for_public_schema() -> None:
+    bootstrap_sql = Path("migrations/postgresql/001_bootstrap.sql").read_text(encoding="utf-8")
+    bootstrap_runner = Path("filmy/scripts/bootstrap_postgresql.py").read_text(encoding="utf-8")
+
+    assert "schema_name = 'public' AND schema_owner = 'pg_database_owner'" in bootstrap_sql
+    assert "expected.name = 'public' AND pg_get_userbyid(namespace.nspowner) = 'pg_database_owner'" in bootstrap_sql
+    assert "expected.name = 'public' AND pg_get_userbyid(namespace.nspowner) = 'pg_database_owner'" in bootstrap_runner
