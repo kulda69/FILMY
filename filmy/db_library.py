@@ -16,7 +16,9 @@ import time
 from copy import deepcopy
 from datetime import datetime
 from typing import Any
-from filmy.runtime_postgres import archive_user_list_group, archive_user_list_item, clear_ai_suggestions_list_items as clear_ai_suggestions_list_items_postgres, create_user_list as create_user_list_postgres, delete_user_list as delete_user_list_postgres, delete_title_role_signals as delete_title_role_signals_postgres, fetch_all_watch_events, fetch_existing_watch_tconsts, fetch_active_user_list_items, fetch_continue_watching_catalog_rows, fetch_episode_series_map, fetch_hot_watchlist_page_rows, fetch_person_catalog_row, fetch_title_role_signals as fetch_title_role_signals_postgres, fetch_library_status_projection, fetch_library_status_snapshot, fetch_person_affinity_rating, fetch_series_episode_rows, fetch_title_card_rows, fetch_user_list, fetch_user_list_page_rows, fetch_user_list_item_counts, fetch_user_lists, delete_user_rating as delete_user_rating_postgres, fetch_latest_ratings_for_tconsts, insert_watch_events as insert_watch_events_postgres, list_in_progress_content_states, record_watched as record_watched_postgres, slug_exists, upsert_user_rating as upsert_user_rating_postgres, upsert_user_list_item, upsert_person_affinity, upsert_title_role_signal, update_content_state as update_content_state_postgres, update_user_list_description as update_user_list_description_postgres
+from urllib.parse import parse_qs, unquote, urlparse
+
+from filmy.runtime_postgres import apply_title_session_effects, archive_user_list_group, archive_user_list_item, clear_ai_suggestions_list_items as clear_ai_suggestions_list_items_postgres, create_user_list as create_user_list_postgres, delete_user_list as delete_user_list_postgres, delete_title_role_signals as delete_title_role_signals_postgres, fetch_all_watch_events, fetch_existing_watch_tconsts, fetch_active_user_list_items, fetch_continue_watching_catalog_rows, fetch_episode_series_map, fetch_hot_watchlist_page_rows, fetch_library_status_projection, fetch_library_status_snapshot, fetch_list_action_rules, fetch_person_affinity_rating, fetch_person_catalog_row, fetch_series_episode_rows, fetch_title_card_rows, fetch_title_role_signals as fetch_title_role_signals_postgres, fetch_user_list, fetch_user_list_item_counts, fetch_user_list_page_rows, fetch_user_lists, finalize_title_session, delete_user_rating as delete_user_rating_postgres, fetch_latest_ratings_for_tconsts, insert_title_session_action, insert_watch_events as insert_watch_events_postgres, list_in_progress_content_states, queue_title_session_action_effects, record_watched as record_watched_postgres, slug_exists, upsert_person_affinity, upsert_title_session, upsert_title_role_signal, upsert_user_list_item, upsert_user_rating as upsert_user_rating_postgres, update_content_state as update_content_state_postgres, update_user_list_description as update_user_list_description_postgres
 
 def _db():
     """Vrat pozde nacitany modul `filmy.db` kvuli stabilni facade vrstve."""
@@ -38,6 +40,240 @@ def _invalidate_title_cache(db: Any, *tconsts: str | None) -> None:
             db.clear_title_presentation_cache()
     if not seen:
         db.clear_title_presentation_cache()
+
+
+def _resolve_existing_list_id(list_id: str | None) -> str | None:
+    """Over a vrat existujici list id, jinak `None`."""
+
+    cleaned = (list_id or '').strip()
+    if not cleaned:
+        return None
+    row = fetch_user_list(cleaned)
+    if row is None:
+        return None
+    return str(row['id'])
+
+
+def _infer_source_list_id(*, source_list_id: str | None=None, return_to_url: str | None=None) -> str | None:
+    """Najdi zdrojovy seznam z explicitni hodnoty nebo z `return_to` URL."""
+
+    resolved_explicit = _resolve_existing_list_id(source_list_id)
+    if resolved_explicit is not None:
+        return resolved_explicit
+    pending = [(return_to_url or '').strip()]
+    visited: set[str] = set()
+    while pending:
+        raw_value = pending.pop(0)
+        if not raw_value or raw_value in visited:
+            continue
+        visited.add(raw_value)
+        decoded_value = unquote(raw_value)
+        if decoded_value != raw_value and decoded_value not in visited:
+            pending.append(decoded_value)
+        parsed = urlparse(decoded_value)
+        path_parts = [part for part in parsed.path.split('/') if part]
+        if len(path_parts) >= 2 and path_parts[0] == 'lists':
+            resolved = _resolve_existing_list_id(path_parts[1])
+            if resolved is not None:
+                return resolved
+        query = parse_qs(parsed.query, keep_blank_values=False)
+        for candidate_key in ('source_list_id', 'list_id'):
+            for value in query.get(candidate_key, []):
+                resolved = _resolve_existing_list_id(value)
+                if resolved is not None:
+                    return resolved
+        for nested_value in query.get('return_to', []):
+            if nested_value not in visited:
+                pending.append(nested_value)
+    return None
+
+
+def _build_title_session_media_payload(
+    *,
+    media: dict[str, Any],
+    canonical_key: str,
+    source_ref: str,
+    source_origin: str='local_app',
+) -> dict[str, Any]:
+    """Sestav sdileny action payload pro title-session effecty."""
+
+    return {
+        'canonical_key': canonical_key,
+        'tconst': media['tconst'],
+        'media_type': media['media_type'],
+        'imdb_id': media['imdb_id'],
+        'tmdb_id': media['tmdb_id'],
+        'trakt_id': None,
+        'parent_tconst': media['parent_tconst'],
+        'parent_title': media['parent_title'],
+        'title': media['title'],
+        'season_number': media['season_number'],
+        'episode_number': media['episode_number'],
+        'source_origin': source_origin,
+        'source_ref': source_ref,
+    }
+
+
+def _build_title_session_group_payload(
+    *,
+    items: list[dict[str, Any]],
+    display_tconst: str,
+    source_ref_prefix: str,
+) -> dict[str, Any]:
+    """Sestav action payload pro copy/move cele display skupiny."""
+
+    group_items: list[dict[str, Any]] = []
+    for index, item in enumerate(items, start=1):
+        added_at = item.get('added_at')
+        group_items.append(
+            {
+                'item_id': f'{source_ref_prefix}:item:{index}',
+                'canonical_key': str(item['canonical_key']),
+                'tconst': item.get('tconst'),
+                'media_type': str(item['media_type']),
+                'imdb_id': item.get('imdb_id'),
+                'tmdb_id': item.get('tmdb_id'),
+                'trakt_id': item.get('trakt_id'),
+                'parent_tconst': item.get('parent_tconst'),
+                'parent_title': item.get('parent_title'),
+                'title': item.get('title'),
+                'season_number': item.get('season_number'),
+                'episode_number': item.get('episode_number'),
+                'rank': item.get('rank'),
+                'added_at': added_at.isoformat() if added_at else None,
+                'notes': item.get('notes'),
+                'source_origin': str(item.get('source_origin') or 'title_session'),
+                'source_ref': item.get('source_ref') or source_ref_prefix,
+            }
+        )
+    representative = group_items[0]
+    return {
+        **representative,
+        'tconst': display_tconst,
+        'display_tconst': display_tconst,
+        'group_items': group_items,
+        'group_size': len(group_items),
+        'source_ref': source_ref_prefix,
+    }
+
+
+def _count_effect_results(effect_rows: list[dict[str, Any]], effect_type: str, result: str='applied') -> int:
+    """Spocitej, kolik effectu daneho typu skoncilo zvolenym vysledkem."""
+
+    return sum(
+        1
+        for row in effect_rows
+        if row.get('result') == result and str((row.get('effect') or {}).get('effect_type') or '') == effect_type
+    )
+
+
+def _upsert_group_items_to_user_list(*, db: Any, items: list[dict[str, Any]], target_list_id: str, now: str) -> None:
+    """Zapis vsechny polozky jedne display skupiny do ciloveho seznamu."""
+
+    for item in items:
+        added_at = item.get('added_at')
+        upsert_user_list_item(
+            item_id=str(db.uuid.uuid4()),
+            list_id=target_list_id,
+            canonical_key=str(item['canonical_key']),
+            tconst=item.get('tconst'),
+            media_type=str(item['media_type']),
+            imdb_id=item.get('imdb_id'),
+            tmdb_id=item.get('tmdb_id'),
+            trakt_id=item.get('trakt_id'),
+            parent_tconst=item.get('parent_tconst'),
+            parent_title=item.get('parent_title'),
+            title=item.get('title'),
+            season_number=item.get('season_number'),
+            episode_number=item.get('episode_number'),
+            rank=item.get('rank'),
+            added_at=added_at.isoformat() if added_at else None,
+            notes=item.get('notes'),
+            source_origin=str(item['source_origin']),
+            source_ref=item.get('source_ref'),
+            now=now,
+        )
+
+
+def _archive_group_items_from_user_list(items: list[dict[str, Any]], *, source_list_id: str, now: str) -> None:
+    """Deaktivuj vsechny polozky jedne display skupiny ve zdrojovem seznamu."""
+
+    for item in items:
+        archive_user_list_item(source_list_id, str(item['canonical_key']), now)
+
+
+def _run_title_session_action(
+    *,
+    db: Any,
+    tconst: str,
+    trigger_action: str,
+    action_payload: dict[str, Any],
+    now: str,
+    source_list_id: str | None=None,
+    return_to_url: str | None=None,
+    target_list_id: str | None=None,
+    rating_value: int | None=None,
+    notes_text: str | None=None,
+    auto_finalize: bool=True,
+    session_scope: str='title_detail',
+) -> dict[str, Any] | None:
+    """Zkus provest zapis pres title-session workflow, jinak vrat `None`."""
+
+    resolved_source_list_id = _infer_source_list_id(
+        source_list_id=source_list_id,
+        return_to_url=return_to_url,
+    )
+    if resolved_source_list_id is None:
+        return None
+    rules = fetch_list_action_rules(
+        source_list_id=resolved_source_list_id,
+        trigger_action=trigger_action,
+        target_list_id=target_list_id,
+        enabled_only=True,
+    )
+    if not rules:
+        return None
+    session_id = f'title-session:{db.uuid.uuid4()}'
+    action_id = f'title-session-action:{db.uuid.uuid4()}'
+    session = upsert_title_session(
+        session_id=session_id,
+        tconst=tconst,
+        status='open',
+        opened_from=resolved_source_list_id,
+        return_to_url=return_to_url,
+        source_list_id=resolved_source_list_id,
+        session_scope=session_scope,
+        started_at=now,
+    )
+    action = insert_title_session_action(
+        action_id=action_id,
+        session_id=session_id,
+        tconst=tconst,
+        source_list_id=resolved_source_list_id,
+        trigger_action=trigger_action,
+        target_list_id=target_list_id,
+        rating_value=rating_value,
+        notes_text=notes_text,
+        action_payload=action_payload,
+        action_order=10,
+        created_at=now,
+    )
+    queued = queue_title_session_action_effects(action_id, queued_at=now)
+    immediate = apply_title_session_effects(
+        session_id,
+        phase='immediate',
+        executed_at=now,
+        effect_status='pending',
+    )
+    finalized = finalize_title_session(session_id, finalized_at=now) if auto_finalize else None
+    return {
+        'source_list_id': resolved_source_list_id,
+        'session': session,
+        'action': action,
+        'queued': queued,
+        'immediate': immediate,
+        'finalized': finalized,
+    }
 
 _LOCAL_LIBRARY_STATUS_CACHE_TTL_SECONDS = 5.0
 _local_library_status_cache_lock = threading.Lock()
@@ -219,7 +455,7 @@ def add_title_to_user_list(tconst: str, list_id: str, *, notes: str | None=None)
     _invalidate_title_cache(db, tconst, media.get('parent_tconst'))
     return {'tconst': tconst, 'list_id': list_id, 'updated_at': now, 'library': db._get_library_summary_for_tconst(tconst)}
 
-def set_user_rating(tconst: str, rating: int, *, liked_notes: str | None=None, disliked_notes: str | None=None) -> dict[str, Any]:
+def set_user_rating(tconst: str, rating: int, *, liked_notes: str | None=None, disliked_notes: str | None=None, source_list_id: str | None=None, return_to_url: str | None=None) -> dict[str, Any]:
     """Uloz lokalni rating titulu vcetne volitelnych slovnich poznamek."""
     db = _db()
     if rating < 1 or rating > 10:
@@ -233,9 +469,36 @@ def set_user_rating(tconst: str, rating: int, *, liked_notes: str | None=None, d
     cleaned_liked_notes = existing_rating.get('liked_notes') if liked_notes is None else ((liked_notes or '').strip() or None)
     cleaned_disliked_notes = existing_rating.get('disliked_notes') if disliked_notes is None else ((disliked_notes or '').strip() or None)
     canonical_key = db._canonical_media_key(media['media_type'], media['tconst'], media['imdb_id'], media['tmdb_id'], None, media['season_number'], media['episode_number'])
-    upsert_user_rating_postgres(canonical_key=canonical_key, tconst=media['tconst'], media_type=media['media_type'], imdb_id=media['imdb_id'], tmdb_id=media['tmdb_id'], trakt_id=None, parent_tconst=media['parent_tconst'], parent_title=media['parent_title'], title=media['title'], season_number=media['season_number'], episode_number=media['episode_number'], rating=rating, liked_notes=cleaned_liked_notes, disliked_notes=cleaned_disliked_notes, rated_at=now, source_origin='local_app', source_ref=f'manual_rating:{tconst}', now=now)
+    action_payload = _build_title_session_media_payload(
+        media=media,
+        canonical_key=canonical_key,
+        source_ref=f'manual_rating:{tconst}',
+    ) | {
+        'rating_value': rating,
+        'rated_at': now,
+        'liked_notes': cleaned_liked_notes,
+        'disliked_notes': cleaned_disliked_notes,
+    }
+    session_result = _run_title_session_action(
+        db=db,
+        tconst=tconst,
+        trigger_action='set_rating',
+        action_payload=action_payload,
+        now=now,
+        source_list_id=source_list_id,
+        return_to_url=return_to_url,
+        rating_value=rating,
+        notes_text=cleaned_liked_notes or cleaned_disliked_notes,
+        auto_finalize=True,
+    )
+    if session_result is None:
+        upsert_user_rating_postgres(canonical_key=canonical_key, tconst=media['tconst'], media_type=media['media_type'], imdb_id=media['imdb_id'], tmdb_id=media['tmdb_id'], trakt_id=None, parent_tconst=media['parent_tconst'], parent_title=media['parent_title'], title=media['title'], season_number=media['season_number'], episode_number=media['episode_number'], rating=rating, liked_notes=cleaned_liked_notes, disliked_notes=cleaned_disliked_notes, rated_at=now, source_origin='local_app', source_ref=f'manual_rating:{tconst}', now=now)
     _invalidate_title_cache(db, tconst, media.get('parent_tconst'))
-    return {'tconst': tconst, 'rating': rating, 'rated_at': now, 'library': db._get_library_summary_for_tconst(tconst)}
+    result = {'tconst': tconst, 'rating': rating, 'rated_at': now, 'library': db._get_library_summary_for_tconst(tconst)}
+    if session_result is not None:
+        result['session_id'] = session_result['session']['session_id']
+        result['workflow'] = 'title_session'
+    return result
 
 def set_person_affinity_rating(nconst: str, rating: int) -> dict[str, Any]:
     """Uloz lokalni oblibenost osoby v rozsahu 0..10."""
@@ -363,7 +626,7 @@ def clear_user_rating(tconst: str) -> dict[str, Any]:
     _invalidate_title_cache(db, tconst, media.get('parent_tconst'))
     return {'tconst': tconst, 'rating': None, 'updated_at': now, 'library': db._get_library_summary_for_tconst(tconst)}
 
-def record_watch_event(tconst: str, *, watched_on: str | None=None, notes: str | None=None, add_to_watched_list: bool=False, archive_from_list_id: str | None=None, archive_display_tconst: str | None=None) -> dict[str, Any]:
+def record_watch_event(tconst: str, *, watched_on: str | None=None, notes: str | None=None, add_to_watched_list: bool=False, archive_from_list_id: str | None=None, archive_display_tconst: str | None=None, return_to_url: str | None=None) -> dict[str, Any]:
     """Zapis jeden watch event a pripadne archivuj souvisejici list polozku."""
     db = _db()
     detail = db.get_content_detail(tconst)
@@ -386,9 +649,40 @@ def record_watch_event(tconst: str, *, watched_on: str | None=None, notes: str |
     elif detail['kind'] != 'episode':
         effective_archive_list_id = 'watchlist'
         effective_archive_canonical_key = canonical_key
-    action_result = record_watched_postgres(event_id=event_id, tconst=tconst, event_scope=event_scope, watched_on=effective_watched_on, notes=notes, created_at=now, archive_from_list_id=effective_archive_list_id, archive_canonical_key=effective_archive_canonical_key, archive_display_tconst=archive_display_tconst)
+    action_payload = _build_title_session_media_payload(
+        media=media,
+        canonical_key=canonical_key,
+        source_ref=f'manual_watch:{tconst}',
+    ) | {
+        'event_id': event_id,
+        'event_scope': event_scope,
+        'watched_on': effective_watched_on,
+        'notes': notes,
+        'display_tconst': archive_display_tconst,
+    }
+    session_result = _run_title_session_action(
+        db=db,
+        tconst=tconst,
+        trigger_action='mark_watched',
+        action_payload=action_payload,
+        now=now,
+        source_list_id=effective_archive_list_id,
+        return_to_url=return_to_url,
+        notes_text=notes,
+        auto_finalize=True,
+    )
+    if session_result is None:
+        action_result = record_watched_postgres(event_id=event_id, tconst=tconst, event_scope=event_scope, watched_on=effective_watched_on, notes=notes, created_at=now, archive_from_list_id=effective_archive_list_id, archive_canonical_key=effective_archive_canonical_key, archive_display_tconst=archive_display_tconst)
+        archived_items = action_result['archived_items']
+    else:
+        finalize_effects = ((session_result.get('finalized') or {}).get('finalize') or {}).get('effects') or []
+        archived_items = _count_effect_results(finalize_effects, 'deactivate_source_membership')
     _invalidate_title_cache(db, tconst, media.get('parent_tconst'), archive_display_tconst)
-    return {'id': action_result['event_id'], 'tconst': tconst, 'event_scope': event_scope, 'watched_on': effective_watched_on, 'created_at': now, 'archived_items': action_result['archived_items'], 'library': db._get_library_summary_for_tconst(tconst)}
+    result = {'id': event_id, 'tconst': tconst, 'event_scope': event_scope, 'watched_on': effective_watched_on, 'created_at': now, 'archived_items': archived_items, 'library': db._get_library_summary_for_tconst(tconst)}
+    if session_result is not None:
+        result['session_id'] = session_result['session']['session_id']
+        result['workflow'] = 'title_session'
+    return result
 
 def record_watch_events_through_episode(episode_tconst: str, *, watched_on: str | None=None, notes: str | None=None) -> dict[str, Any]:
     """Oznac jako zhlednute vsechny epizody serialu az po zadanou epizodu."""
@@ -443,12 +737,41 @@ def move_group_between_user_lists(source_list_id: str, target_list_id: str, disp
         raise ValueError('Cílový seznam nebyl nalezen.')
     if not items:
         raise ValueError('V seznamu nebyla nalezena žádná položka k přesunu.')
-    for item in items:
-        upsert_user_list_item(item_id=str(db.uuid.uuid4()), list_id=target_list_id, canonical_key=str(item['canonical_key']), tconst=item.get('tconst'), media_type=str(item['media_type']), imdb_id=item.get('imdb_id'), tmdb_id=item.get('tmdb_id'), trakt_id=item.get('trakt_id'), parent_tconst=item.get('parent_tconst'), parent_title=item.get('parent_title'), title=item.get('title'), season_number=item.get('season_number'), episode_number=item.get('episode_number'), rank=item.get('rank'), added_at=item.get('added_at').isoformat() if item.get('added_at') else None, notes=item.get('notes'), source_origin=str(item['source_origin']), source_ref=item.get('source_ref'), now=now)
-    for item in items:
-        archive_user_list_item(source_list_id, str(item['canonical_key']), now)
+    action_payload = _build_title_session_group_payload(
+        items=items,
+        display_tconst=display_tconst,
+        source_ref_prefix=f'manual_move_group:{source_list_id}:{target_list_id}:{display_tconst}',
+    )
+    session_result = _run_title_session_action(
+        db=db,
+        tconst=display_tconst,
+        trigger_action='move_to_list',
+        action_payload=action_payload,
+        now=now,
+        source_list_id=source_list_id,
+        target_list_id=target_list_id,
+        notes_text=None,
+        auto_finalize=True,
+        session_scope='list_row_menu',
+    )
+    if session_result is None:
+        _upsert_group_items_to_user_list(
+            db=db,
+            items=items,
+            target_list_id=target_list_id,
+            now=now,
+        )
+        _archive_group_items_from_user_list(
+            items,
+            source_list_id=source_list_id,
+            now=now,
+        )
     db.clear_title_presentation_cache()
-    return {'source_list_id': source_list_id, 'target_list_id': target_list_id, 'display_tconst': display_tconst, 'moved_rows': len(items), 'updated_at': now}
+    result = {'source_list_id': source_list_id, 'target_list_id': target_list_id, 'display_tconst': display_tconst, 'moved_rows': len(items), 'updated_at': now}
+    if session_result is not None:
+        result['session_id'] = session_result['session']['session_id']
+        result['workflow'] = 'title_session'
+    return result
 
 def copy_group_to_user_list(source_list_id: str, target_list_id: str, display_tconst: str) -> dict[str, Any]:
     """Zkopiruj celou display skupinu z jednoho seznamu do druheho."""
@@ -464,10 +787,36 @@ def copy_group_to_user_list(source_list_id: str, target_list_id: str, display_tc
         raise ValueError('Cílový seznam nebyl nalezen.')
     if not items:
         raise ValueError('V seznamu nebyla nalezena žádná položka ke kopii.')
-    for item in items:
-        upsert_user_list_item(item_id=str(db.uuid.uuid4()), list_id=target_list_id, canonical_key=str(item['canonical_key']), tconst=item.get('tconst'), media_type=str(item['media_type']), imdb_id=item.get('imdb_id'), tmdb_id=item.get('tmdb_id'), trakt_id=item.get('trakt_id'), parent_tconst=item.get('parent_tconst'), parent_title=item.get('parent_title'), title=item.get('title'), season_number=item.get('season_number'), episode_number=item.get('episode_number'), rank=item.get('rank'), added_at=item.get('added_at').isoformat() if item.get('added_at') else None, notes=item.get('notes'), source_origin=str(item['source_origin']), source_ref=item.get('source_ref'), now=now)
+    action_payload = _build_title_session_group_payload(
+        items=items,
+        display_tconst=display_tconst,
+        source_ref_prefix=f'manual_copy_group:{source_list_id}:{target_list_id}:{display_tconst}',
+    )
+    session_result = _run_title_session_action(
+        db=db,
+        tconst=display_tconst,
+        trigger_action='copy_to_list',
+        action_payload=action_payload,
+        now=now,
+        source_list_id=source_list_id,
+        target_list_id=target_list_id,
+        notes_text=None,
+        auto_finalize=True,
+        session_scope='list_row_menu',
+    )
+    if session_result is None:
+        _upsert_group_items_to_user_list(
+            db=db,
+            items=items,
+            target_list_id=target_list_id,
+            now=now,
+        )
     db.clear_title_presentation_cache()
-    return {'source_list_id': source_list_id, 'target_list_id': target_list_id, 'display_tconst': display_tconst, 'copied_rows': len(items), 'updated_at': now}
+    result = {'source_list_id': source_list_id, 'target_list_id': target_list_id, 'display_tconst': display_tconst, 'copied_rows': len(items), 'updated_at': now}
+    if session_result is not None:
+        result['session_id'] = session_result['session']['session_id']
+        result['workflow'] = 'title_session'
+    return result
 
 def create_user_list(name: str, description: str | None=None) -> dict[str, Any]:
     """Vytvor novy uzivatelsky seznam s uniknim slugem."""

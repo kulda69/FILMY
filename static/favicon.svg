@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
+  <title id="title">FILMY favicon</title>
+  <desc id="desc">Tmavy ctverec s filmovym rameckem a pismenem F.</desc>
+  <rect width="64" height="64" rx="14" fill="#121417"/>
+  <rect x="10" y="10" width="44" height="44" rx="10" fill="#1e2329" stroke="#b56a33" stroke-width="3"/>
+  <path d="M22 18h5v28h-5zm10 0h14v5H32zm0 11h12v5H32zm0 17h8v-5h-8z" fill="#f0ede7"/>
+  <g fill="#b56a33">
+    <rect x="14" y="15" width="5" height="5" rx="1.2"/>
+    <rect x="14" y="25" width="5" height="5" rx="1.2"/>
+    <rect x="14" y="35" width="5" height="5" rx="1.2"/>
+    <rect x="14" y="45" width="5" height="5" rx="1.2"/>
+    <rect x="45" y="15" width="5" height="5" rx="1.2"/>
+    <rect x="45" y="25" width="5" height="5" rx="1.2"/>
+    <rect x="45" y="35" width="5" height="5" rx="1.2"/>
+    <rect x="45" y="45" width="5" height="5" rx="1.2"/>
+  </g>
+</svg>

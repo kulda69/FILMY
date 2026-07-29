@@ -489,11 +489,11 @@ def add_title_to_user_list(tconst: str, list_id: str, *, notes: str | None=None)
     from filmy.db_library import add_title_to_user_list as _impl
     return _impl(tconst, list_id, notes=notes)
 
-def set_user_rating(tconst: str, rating: int, *, liked_notes: str | None=None, disliked_notes: str | None=None) -> dict[str, Any]:
+def set_user_rating(tconst: str, rating: int, *, liked_notes: str | None=None, disliked_notes: str | None=None, source_list_id: str | None=None, return_to_url: str | None=None) -> dict[str, Any]:
     """Kompatibilni facade pro zapis uzivatelskeho ratingu titulu."""
 
     from filmy.db_library import set_user_rating as _impl
-    return _impl(tconst, rating, liked_notes=liked_notes, disliked_notes=disliked_notes)
+    return _impl(tconst, rating, liked_notes=liked_notes, disliked_notes=disliked_notes, source_list_id=source_list_id, return_to_url=return_to_url)
 
 def set_person_affinity_rating(nconst: str, rating: int) -> dict[str, Any]:
     """Kompatibilni facade pro affinity rating osoby."""
@@ -780,11 +780,11 @@ def _get_latest_genre_scores(conn, *, score_scope: str | None, limit: int | None
     items = [{'id': row[0], 'genre': row[1], 'generated_at': row[2], 'algorithm_version': row[3], 'score_scope': row[4], 'source_origin': row[5], 'source_ref': row[6], 'titles_considered': row[7], 'watched_titles_considered': row[8], 'rated_titles_considered': row[9], 'contributing_titles': _loads_json_or_none(row[10]), 'excluded_titles': _loads_json_or_none(row[11]), 'favorite_genre_weight': row[12], 'preference_overlap_score': row[13], 'preference_alignment_score': row[14], 'affinity_score': row[15], 'rating_signal_score': row[16], 'watch_signal_score': row[17], 'recency_score': row[18], 'actor_affinity_score': row[19], 'frequency_score': row[20], 'consistency_score': row[21], 'novelty_score': row[22], 'confidence_score': row[23], 'manual_adjustment_score': row[24], 'final_score': row[25], 'normalized_score': row[26], 'rank_in_run': row[27], 'metrics': _loads_json_or_none(row[28]), 'explanation': row[29], 'created_at': row[30]} for row in rows]
     return {'generated_at': generated_at, 'score_scope': resolved_scope, 'count': len(items), 'items': items}
 
-def record_watch_event(tconst: str, *, watched_on: str | None=None, notes: str | None=None, add_to_watched_list: bool=False, archive_from_list_id: str | None=None, archive_display_tconst: str | None=None) -> dict[str, Any]:
+def record_watch_event(tconst: str, *, watched_on: str | None=None, notes: str | None=None, add_to_watched_list: bool=False, archive_from_list_id: str | None=None, archive_display_tconst: str | None=None, return_to_url: str | None=None) -> dict[str, Any]:
     """Kompatibilni facade pro zapis jednoho watch eventu."""
 
     from filmy.db_library import record_watch_event as _impl
-    return _impl(tconst, watched_on=watched_on, notes=notes, add_to_watched_list=add_to_watched_list, archive_from_list_id=archive_from_list_id, archive_display_tconst=archive_display_tconst)
+    return _impl(tconst, watched_on=watched_on, notes=notes, add_to_watched_list=add_to_watched_list, archive_from_list_id=archive_from_list_id, archive_display_tconst=archive_display_tconst, return_to_url=return_to_url)
 
 def record_watch_events_through_episode(episode_tconst: str, *, watched_on: str | None=None, notes: str | None=None) -> dict[str, Any]:
     """Kompatibilni facade pro serialovy watched-through zapis."""

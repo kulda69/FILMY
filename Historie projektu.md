@@ -1,5 +1,88 @@
 # Historie projektu
 
+## 2026-07-29 - Prvni zapojeni editace List Action Rules
+
+- Read-only detail [templates/system_list_action_rules_detail.html](templates/system_list_action_rules_detail.html) se zmenil na skutecny editor po jednom listu. U kazdeho triggeru `Set Rating`, `Mark Watched`, `Copy To List` a `Move To List` jsou ted editovatelne radky s `effect`, volitelnym `target list`, `phase`, `order`, stavem `active/disabled` a tlacitky pro ulozeni nebo smazani.
+- Backend editoru je zamerne porad konzervativni a bez nove migrace. Do [filmy/runtime_postgres_title_sessions.py](filmy/runtime_postgres_title_sessions.py) pribyly write helpery `fetch_rule`, `upsert_rule` a `delete_rule`, facade wrappery jsou v [filmy/runtime_postgres.py](filmy/runtime_postgres.py) a formularove routy + validace v [filmy/routers/web_system.py](filmy/routers/web_system.py).
+- Validace drzi dnesni odsouhlasene mantinely: `copy_to_list` a `move_to_list` musi mit konkretni cil, bezcilove akce cil mit nesmi, editor neumozni jako cil `watchlist` ani `ai-navrhy` a blokuje zjevne nesmyslnou kombinaci `move_to_list + preserve_source_membership`.
+- Soucasne zustava zachovany princip, ze disabled radek je stale editovatelny, zatimco skutecne locknuta kombinace se v detailu jen zobrazi s duvodem a bez editace.
+- Overeni proslo pres `python3 -m py_compile filmy/routers/web_system.py filmy/runtime_postgres.py filmy/runtime_postgres_title_sessions.py` a cileny pytest `tests/test_ui_system_list_action_rules.py`, ktery skoncil `5 passed`.
+- Na navazujicim realnem UI smoke v browseru se ukazala jeste jedna render regrese: existujici pravidla se zobrazovala jako `Disabled`, prestoze helper data mela `enabled=True`. Pricina byla v Jinja vyhodnoceni status selectu; detail sablona ted pouziva explicitni pristup `rule["is_enabled"]` misto problematickeho vyhodnoceni pres teckovou notaci.
+- Oprava byla overena dvojmo: helper vrstva nad `watchlist` vratila stale `enabled=True`, pytest znovu proslel a cista docasna lokalni instance aplikace v browser smoke uz vykreslila u existujicich pravidel `Active`. Zbyvajici console chyba byla jen nepodstatna `404 /favicon.ico`.
+- Na tenhle posledni zbytek navazuje i nova favicona: v projektu pribyl asset [static/favicon.svg](static/favicon.svg), layout [templates/base.html](templates/base.html) ho zapojuje pres `rel="icon"` a [filmy/main.py](filmy/main.py) nove obsluhuje `/static` a presmerovani `/favicon.ico -> /static/favicon.svg`. Tj. browser smoke uz nema ani tenhle zbytecny 404 sum.
+
+## 2026-07-29 - Prvni read-only UI pro List Action Rules
+
+- V `System` menu pribyla nova polozka `List Action Rules` a prvni dve read-only stranky nad realnymi daty: overview [templates/system_list_action_rules_overview.html](templates/system_list_action_rules_overview.html) a detail jednoho listu [templates/system_list_action_rules_detail.html](templates/system_list_action_rules_detail.html).
+- Overview zamerne neni kartovy dashboard, ale prostornejsi seznam po jednom radku na list. Ukazuje konkretni seznam, kind, AI roli, pocet pravidel, pocet locku a posledni rule update. Detail pak sklada pravidla po trigger akcich `Set Rating`, `Mark Watched`, `Copy To List` a `Move To List`.
+- Backend pro tenhle UI rez zustal zamerne jednoduchy a read-only: [filmy/routers/web_system.py](filmy/routers/web_system.py) si bere listy a pravidla primo z PostgreSQL helperu a zadnou editaci nebo novy DB kontrakt zatim nepridava.
+- Overeni proslo pres `python3 -m py_compile filmy/routers/web_system.py` a cileny pytest `tests/test_ui_system_list_action_rules.py tests/test_ui_import_ai_suggestions.py tests/test_home_ai_suggestions.py`, ktery skoncil `11 passed`.
+
+## 2026-07-29 - Rozdeleni title-session domeny do samostatneho Python modulu
+
+- Pred navazanim na UI editor pravidel probehl udrzovaci rez v runtime vrstve: title-session storage a orchestrace uz nelezi primo v [filmy/runtime_postgres.py](filmy/runtime_postgres.py), ale v novem modulu [filmy/runtime_postgres_title_sessions.py](filmy/runtime_postgres_title_sessions.py).
+- Nova modulova hranice je zamerne konzervativni: verejne wrappery `fetch_list_action_rules(...)`, `upsert_title_session(...)`, `insert_title_session_action(...)`, `queue_title_session_action_effects(...)`, `apply_title_session_effects(...)` a `finalize_title_session(...)` zustaly v [filmy/runtime_postgres.py](filmy/runtime_postgres.py), takze `db_library.py` ani testy nemusely menit svuj kontrakt.
+- Soucasne probehl maly cleanup fallback vetve v [filmy/db_library.py](filmy/db_library.py): opakovany write loop pro group `copy/move` je vytazeny do sdilenych helperu misto duplikace dvou skoro stejnych smycek.
+- Overeni proslo pres `python3 -m py_compile filmy/runtime_postgres.py filmy/runtime_postgres_title_sessions.py filmy/db_library.py` a cileny pytest `tests/test_runtime_postgres_content_state.py tests/test_user_lists_postgres_overlay.py tests/test_postgresql_runtime_schema.py`, ktery skoncil `44 passed`.
+
+## 2026-07-29 - Dokonceni backend napojeni pro copy/move mezi seznamy
+
+- Title-session backend je dodelany i pro cilove list akce `copy_to_list` a `move_to_list`. V [filmy/db_library.py](filmy/db_library.py) se tyto write flow uz nejdriv snazi bezet pres novou session/orchestraci a jen pri chybejicich pravidlech spadnou zpet na puvodni prime PG upsert/archive smycky.
+- Pro tenhle rez pribyl novy seed krok [009_list_action_target_rule_seed.sql](migrations/postgresql/009_list_action_target_rule_seed.sql). Zaklada prvni sadu pravidel pro dnesni realne seznamy a zamerne nepovoluje cile `watchlist` ani `ai-navrhy`, aby backend respektoval aktualne domluveny workflow.
+- [filmy/runtime_postgres.py](filmy/runtime_postgres.py) nove umi u effectu `add_target_membership` obslouzit i `group_items`, takze jedna session akce muze pridat nebo presunout celou display skupinu polozek misto jednoho samotneho titulu.
+- Testy pokryvaji jak session cestu, tak fallback cestu pro `move/copy`, plus novy schema/upgrade kontrakt a group-item orchestraci.
+- Overeni proslo pres `python3 -m py_compile filmy/db_library.py filmy/runtime_postgres.py filmy/scripts/upgrade_database.py`, cileny pytest `tests/test_user_lists_postgres_overlay.py tests/test_runtime_postgres_content_state.py tests/test_postgresql_runtime_schema.py` se `44 passed` a `python -m filmy.scripts.upgrade_database --dry-run` uz vypisuje i krok `0009-list-action-target-rule-seed`.
+
+## 2026-07-29 - Prvni backend napojeni title-session write flow
+
+- Nad predchozi DB kostrou, helper vrstvou a finalize orchestraci uz pribylo prvni skutecne backendove napojeni do dnesnich write flow v [filmy/db_library.py](filmy/db_library.py).
+- `set_user_rating(...)` a `record_watch_event(...)` se ted nejdriv pokusi bezet pres title-session workflow: umi odvodit `source_list_id` nejen z explicitniho parametru, ale i z `return_to` URL nebo vnoreneho `return_to`, a podle `app.list_action_rules` rozhodnou, jestli maji pouzit novou orchestraci.
+- Prakticky to zatim drzi bezpecny kompromis: kdyz pro zdrojovy seznam nejsou seedovana pravidla nebo kontext nelze spolehlive odvodit, zapis neselze a spadne zpet na dosavadni prime PostgreSQL write chovani.
+- V [filmy/routers/ui.py](filmy/routers/ui.py) se watched/rating formulare uz propisuji i s `return_to`; rating routy navic umi prijmout volitelne `source_list_id`, aby slo pozdeji bez dalsiho API lomu doplnit explicitni UI wiring.
+- Overeni proslo pres `python3 -m py_compile filmy/db_library.py filmy/db.py filmy/routers/ui.py` a cileny pytest `tests/test_user_lists_postgres_overlay.py tests/test_postgresql_runtime_schema.py tests/test_runtime_postgres_content_state.py`, ktery skoncil `40 passed`.
+
+## 2026-07-29 - Databazovy navrh pro rule builder a title session
+
+- Na scenarovou matici a obecny rule-builder navazal konkretnejsi technicky navrh [LIST_ACTION_DB_SCHEMA_DRAFT.md](LIST_ACTION_DB_SCHEMA_DRAFT.md), ktery uz rozepisuje predpokladane PostgreSQL tabulky a beh session nad jednim titulem.
+- Navrh rozdeluje problem do tri vrstev: konfiguracni `list_action_rules`, kratkodobe `title_sessions` + `title_session_actions` a operacni `title_session_effect_queue`, kam se ma zapisovat konkretni execution plan odvozeny z pravidel a z uzivatelskych kroku.
+- Dulezite rozhodnuti v navrhu: `derive_watched` a dalsi immediate write efekty se maji provadet hned, ale session ma zustat otevrena, aby po ratingu nebo watched slo nad stejnym titulem jeste delat `copy_to_list` nebo `move_to_list`.
+- Dokument zaroven zamerne drzi prvni implementaci pri zemi: pravidla se edituji po konkretnim listu, ne pres role sablony; `title_session*` tabulky jsou jen orchestracni vrstva nad existujicimi rating/watch/list tabulkami; a UI editor se ma resit az po overeni databazove kostry a prvniho finalize flow.
+
+## 2026-07-29 - Prvni implementacni rez: DB kostra pro list actions a title session
+
+- Z navrhove dokumentace uz vznikl prvni skutecny databazovy rez. Pribyly nove verziovane migrace [006_list_actions_session_schema.sql](migrations/postgresql/006_list_actions_session_schema.sql) a [007_list_actions_session_grants.sql](migrations/postgresql/007_list_actions_session_grants.sql).
+- Schema krok `006` zavadi ctyri nove orchestration tabulky `app.list_action_rules`, `app.title_sessions`, `app.title_session_actions` a `app.title_session_effect_queue`, jejich check constrainty, indexy a `touch_updated_at` triggery pro upravovane tabulky.
+- Prakticky zamer tohohle rezu je ziskat pevnou PostgreSQL kostru bez toho, aby se hned michala nova session logika do existujicich write endpointu. Proto zatim nepribyly zadne finalize funkce ani backend napojeni; jen pripraveny datovy zaklad.
+- Upgrade runner [filmy/scripts/upgrade_database.py](filmy/scripts/upgrade_database.py) uz zna nove kroky `0006-list-actions-session-schema` a `0007-list-actions-session-grants`.
+- Ověření: cílený `pytest` nad [tests/test_postgresql_runtime_schema.py](tests/test_postgresql_runtime_schema.py) skončil `7 passed` a `--dry-run` upgradu vypsal nové kroky `006` a `007` ve správném pořadí.
+
+## 2026-07-29 - Druhy implementacni rez: runtime helper vrstva pro title session
+
+- Nad novou databazovou kostrou uz pribyla prvni Python orchestration vrstva v [filmy/runtime_postgres.py](filmy/runtime_postgres.py). Nova trida `TitleSessionStore` drzi pohromade nacitani pravidel, zalozeni nebo obnoveni session, zapis explicitnich session akci a cteni nebo zapis effect queue.
+- Zpetne kompatibilni wrappery v modulu jsou zatim ciste storage API, bez finalize rozhodovaci logiky: `fetch_list_action_rules(...)`, `upsert_title_session(...)`, `fetch_title_session(...)`, `insert_title_session_action(...)`, `fetch_title_session_actions(...)`, `insert_title_session_effect_rows(...)` a `fetch_title_session_effect_queue(...)`.
+- Tohle je zamerne oddelene od stavajicich write endpointu. Cilem druheho rezu bylo mit nejdriv overeny runtime helper kontrakt, aby finalize engine nemusel vznikat naslepo primo v routerech nebo `db_library.py`.
+- Ověření: cílený `pytest` nad [tests/test_postgresql_runtime_schema.py](tests/test_postgresql_runtime_schema.py) a [tests/test_runtime_postgres_content_state.py](tests/test_runtime_postgres_content_state.py) skončil `20 passed`.
+
+## 2026-07-29 - Treti implementacni rez: prvni finalize orchestrator
+
+- Nad storage vrstvou uz vznikla i prvni skutecna orchestrace v [filmy/runtime_postgres.py](filmy/runtime_postgres.py). Nova trida `TitleSessionOrchestrator` umi z jedne session akce a odpovidajicich `list_action_rules` sestavit effect queue, ulozit ji do `app.title_session_effect_queue` a spustit vybranou phase.
+- Prvni funkcni wrappery jsou `queue_title_session_action_effects(...)`, `apply_title_session_effects(...)` a `finalize_title_session(...)`. Zatim je to porad bez napojeni do routeru nebo `db_library.py`; smyslem bylo nejdriv overit, ze samotna orchestracni vrstva funguje a ma testovatelny kontrakt.
+- V prvnim rezu umi orchestrator bezpecne obslouzit ty effect typy, ktere uz maji prirozeny low-level backend helper: `write_rating`, `write_watched`, `add_target_membership` a `deactivate_source_membership`. Neutralni kroky typu `derive_watched`, `preserve_*` a `noop` se jen korektne propisou jako aplikovane queue radky.
+- Ověření: cílený `pytest` nad [tests/test_runtime_postgres_content_state.py](tests/test_runtime_postgres_content_state.py) a [tests/test_postgresql_runtime_schema.py](tests/test_postgresql_runtime_schema.py) skončil `23 passed`.
+
+## 2026-07-29 - Konkretni matice scenaru pro list actions
+
+- K obecnému návrhu `title session` přibyl konkrétní mezikrok [LIST_ACTIONS_SCENARIO_MATRIX.md](LIST_ACTIONS_SCENARIO_MATRIX.md), který rozepsal dnešní skutečné FILMY seznamy proti běžným akcím `mark_watched`, `set_rating`, `move_to_list` a `copy_to_list`.
+- Matice používá reálné dnešní seznamy z databáze (`Watchlist`, `Koukni rychle`, `Kouknout znou`, `Mam`, `Plex Library`, `Rozkoukáno`, `AI návrhy`, `Nedokoukáno`, `Stáhnout`) a u každého případu rozlišuje `immediate write`, `finalize effect` a `preserve`.
+- Praktický cíl této matice je zúžit další technický návrh: ukazuje, že `set_rating` a `mark_watched` mohou být pravděpodobně immediate write, zatímco cleanup vztahů mezi seznamy patří až do `finalize_title_session(...)`.
+- Tím se zpřesnil další očekávaný DB řez: místo slepého parseru pravidel nebo okamžitého runtime engine má následovat návrh `title_sessions`, `title_session_actions`, `pending_membership_changes` a serverového finalize kroku.
+
+## 2026-07-29 - Posun od scenarove matice k obecnemu rule builderu
+
+- Pri dalsim rozboru se ukazalo, ze samotna scenarova matice jeste neni dost obecna pro budouci editovatelne UI. Jiří upřesnil, že nechce sadu pevně předepsaných kombinací, ale jednotný editor pravidel, kde každý list uvidí stejnou sadu akcí a jen nesmyslné kombinace budou zamčené.
+- Vznikl proto nový technický návrh [LIST_ACTION_RULE_BUILDER_DRAFT.md](LIST_ACTION_RULE_BUILDER_DRAFT.md). Zavádí pevné typy `trigger_action` (`set_rating`, `mark_watched`, `copy_to_list`, `move_to_list`, ...) a pevné typy `effect_type` (`write_rating`, `derive_watched`, `write_watched`, `add_target_membership`, `archive_source_membership`, `preserve_source_membership`, ...).
+- Současně je v návrhu i pracovní tvar jednoho řádku pravidla a celé skupiny kroků pro jednu akci, takže další DB návrh se už nebude odvíjet od ručně rozepsaných vět, ale od kontrolovaného modelu, který půjde validovat v UI i backendu.
+
 ## 2026-07-29 - Technicke navazani po cleanupu a smoke pred commitem
 
 - Navazani na posledni cleanup checkpoint probehlo bez dalsich oprav kodu: nejdriv proslo staticke overeni `python3 -m py_compile` nad hlavni FastAPI/router/DB vrstvou.

@@ -11,6 +11,7 @@ from dotenv import dotenv_values
 import psycopg
 from filmy.config import UiConfig, get_ui_config
 from filmy.paths import ENV_PATH
+from filmy.runtime_postgres_title_sessions import TitleSessionOrchestrator, TitleSessionStore
 TARGET_DATABASE = 'filmy'
 
 @dataclass(frozen=True)
@@ -1267,6 +1268,109 @@ def fetch_existing_import_commits(batch_id: str, import_row_ids: list[str]) -> s
     """Return which import row ids already produced watch events in PostgreSQL."""
     return _import_batch_store.fetch_existing_commits(batch_id, import_row_ids)
 
+def fetch_list_action_rules(*, source_list_id: str, trigger_action: str | None=None, target_list_id: str | None=None, enabled_only: bool=True) -> list[dict[str, Any]]:
+    """Read list-action rules for one source list from PostgreSQL."""
+    return _title_session_store.fetch_rules(
+        source_list_id=source_list_id,
+        trigger_action=trigger_action,
+        target_list_id=target_list_id,
+        enabled_only=enabled_only,
+    )
+
+def fetch_list_action_rule(rule_id: str) -> dict[str, Any] | None:
+    """Read one list-action rule from PostgreSQL."""
+    return _title_session_store.fetch_rule(rule_id)
+
+def upsert_list_action_rule(*, rule_id: str, source_list_id: str, trigger_action: str, target_list_id: str | None, effect_type: str, phase: str, order_index: int, enabled: bool, lock_reason_key: str | None=None, lock_reason_text: str | None=None, effect_params: dict[str, Any] | None=None) -> dict[str, Any]:
+    """Create or update one list-action rule in PostgreSQL."""
+    return _title_session_store.upsert_rule(
+        rule_id=rule_id,
+        source_list_id=source_list_id,
+        trigger_action=trigger_action,
+        target_list_id=target_list_id,
+        effect_type=effect_type,
+        phase=phase,
+        order_index=order_index,
+        enabled=enabled,
+        lock_reason_key=lock_reason_key,
+        lock_reason_text=lock_reason_text,
+        effect_params=effect_params,
+    )
+
+def delete_list_action_rule(rule_id: str) -> bool:
+    """Delete one list-action rule from PostgreSQL."""
+    return _title_session_store.delete_rule(rule_id)
+
+def upsert_title_session(*, session_id: str, tconst: str, status: str, opened_from: str | None, return_to_url: str | None, source_list_id: str | None, session_scope: str, started_at: str) -> dict[str, Any]:
+    """Create or refresh one title session in PostgreSQL."""
+    return _title_session_store.upsert_session(
+        session_id=session_id,
+        tconst=tconst,
+        status=status,
+        opened_from=opened_from,
+        return_to_url=return_to_url,
+        source_list_id=source_list_id,
+        session_scope=session_scope,
+        started_at=started_at,
+    )
+
+def fetch_title_session(session_id: str) -> dict[str, Any] | None:
+    """Read one title session from PostgreSQL."""
+    return _title_session_store.fetch_session(session_id)
+
+def fetch_title_session_action(action_id: str) -> dict[str, Any] | None:
+    """Read one explicit title-session action from PostgreSQL."""
+    return _title_session_store.fetch_action(action_id)
+
+def insert_title_session_action(*, action_id: str, session_id: str, tconst: str, source_list_id: str | None, trigger_action: str, target_list_id: str | None, rating_value: int | None, notes_text: str | None, action_payload: dict[str, Any], action_order: int, created_at: str) -> dict[str, Any]:
+    """Insert one explicit user action into a title session."""
+    return _title_session_store.insert_action(
+        action_id=action_id,
+        session_id=session_id,
+        tconst=tconst,
+        source_list_id=source_list_id,
+        trigger_action=trigger_action,
+        target_list_id=target_list_id,
+        rating_value=rating_value,
+        notes_text=notes_text,
+        action_payload=action_payload,
+        action_order=action_order,
+        created_at=created_at,
+    )
+
+def fetch_title_session_actions(session_id: str) -> list[dict[str, Any]]:
+    """Read ordered actions for one title session."""
+    return _title_session_store.fetch_actions(session_id)
+
+def insert_title_session_effect_rows(rows: list[dict[str, Any]]) -> None:
+    """Insert prepared effect queue rows for one title session."""
+    _title_session_store.insert_effect_rows(rows)
+
+def fetch_title_session_effect_queue(session_id: str, *, phase: str | None=None, effect_status: str | None=None) -> list[dict[str, Any]]:
+    """Read effect queue rows for one title session."""
+    return _title_session_store.fetch_effect_queue(
+        session_id,
+        phase=phase,
+        effect_status=effect_status,
+    )
+
+def queue_title_session_action_effects(action_id: str, *, queued_at: str) -> dict[str, Any]:
+    """Build and persist effect queue rows for one title-session action."""
+    return _title_session_orchestrator.queue_action_effects(action_id, queued_at=queued_at)
+
+def apply_title_session_effects(session_id: str, *, phase: str, executed_at: str, effect_status: str='pending') -> dict[str, Any]:
+    """Execute queued title-session effects for one phase."""
+    return _title_session_orchestrator.apply_effects(
+        session_id,
+        phase=phase,
+        executed_at=executed_at,
+        effect_status=effect_status,
+    )
+
+def finalize_title_session(session_id: str, *, finalized_at: str) -> dict[str, Any]:
+    """Finalize one title session and execute its finalize-only queue."""
+    return _title_session_orchestrator.finalize_session(session_id, finalized_at=finalized_at)
+
 def upsert_tmdb_mapping_record(*, tconst: str, tmdb_media_type: str, tmdb_id: int, matched_by: str, sync_status: str, matched_at: str, last_error: str | None) -> None:
     """Upsert one TMDB mapping row in PostgreSQL."""
     with _connect() as conn, conn.cursor() as cursor:
@@ -1423,6 +1527,15 @@ def _loads_json_or_none(value: str | None) -> Any:
         return None
     return json.loads(value)
 
+def _loads_json_or_default(value: Any, *, default: Any) -> Any:
+    """Nacte JSON payload nebo vrati vychozi Python hodnotu."""
+
+    if value in (None, ''):
+        return default
+    if isinstance(value, str):
+        return json.loads(value)
+    return value
+
 def _connect() -> psycopg.Connection:
     """Vytvori runtime psycopg spojeni pro aplikačni DB roli."""
 
@@ -1438,3 +1551,19 @@ def _load_runtime_postgres_config() -> RuntimePostgresConfig:
     if not password:
         raise RuntimeError('POSTGRES_APP_PASSWORD v .env chybí nebo je prázdné.')
     return RuntimePostgresConfig(host=values.get('POSTGRES_APP_HOST') or '/private/tmp', port=values.get('POSTGRES_APP_PORT') or '5432', database=values.get('POSTGRES_APP_DATABASE') or TARGET_DATABASE, user=values.get('POSTGRES_APP_USER') or 'filmy_app', password=password)
+
+
+_title_session_store = TitleSessionStore(
+    connect=lambda: _connect(),
+    loads_json_or_default=lambda value, *, default: _loads_json_or_default(value, default=default),
+    parse_optional_timestamp=lambda value: _parse_optional_timestamp(value),
+)
+
+_title_session_orchestrator = TitleSessionOrchestrator(
+    store=_title_session_store,
+    upsert_user_rating=lambda **kwargs: upsert_user_rating(**kwargs),
+    record_watched=lambda **kwargs: record_watched(**kwargs),
+    upsert_user_list_item=lambda **kwargs: upsert_user_list_item(**kwargs),
+    archive_user_list_item=lambda list_id, canonical_key, now: archive_user_list_item(list_id, canonical_key, now),
+    archive_user_list_group=lambda **kwargs: archive_user_list_group(**kwargs),
+)

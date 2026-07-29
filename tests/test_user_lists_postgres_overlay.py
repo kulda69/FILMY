@@ -192,6 +192,8 @@ class UserListsPostgresOverlayTests(unittest.TestCase):
         )
         with (
             patch("filmy.db_library._db", return_value=fake_db),
+            patch("filmy.db_library.fetch_user_list", return_value={"id": "watchlist", "name": "Watchlist", "list_kind": "watchlist"}),
+            patch("filmy.db_library.fetch_list_action_rules", return_value=[]),
             patch(
                 "filmy.db_library.record_watched_postgres",
                 return_value={"event_id": "event-1", "content_state_changed": True, "archived_items": 1},
@@ -211,6 +213,153 @@ class UserListsPostgresOverlayTests(unittest.TestCase):
             archive_display_tconst=None,
         )
         self.assertEqual(result["tconst"], "tt1")
+        self.assertEqual(result["archived_items"], 1)
+
+    def test_set_user_rating_uses_title_session_when_source_list_inferred_from_return_to(self) -> None:
+        fake_db = SimpleNamespace(
+            get_content_detail=lambda tconst: {"kind": "title", "tconst": tconst, "tmdb": {"tmdb_id": 123}, "library": {}},
+            _now_iso=lambda: "2026-07-29T09:00:00",
+            uuid=SimpleNamespace(uuid4=lambda: "uuid-1"),
+            _build_local_media_identity=lambda detail: {
+                "media_type": "title",
+                "tconst": detail["tconst"],
+                "imdb_id": detail["tconst"],
+                "tmdb_id": detail["tmdb"]["tmdb_id"],
+                "parent_tconst": None,
+                "parent_title": None,
+                "title": "Alpha",
+                "season_number": None,
+                "episode_number": None,
+            },
+            _canonical_media_key=lambda *args: "title:tt1",
+            clear_title_presentation_cache=lambda: None,
+            _get_library_summary_for_tconst=lambda tconst: {"tconst": tconst},
+        )
+        with (
+            patch("filmy.db_library._db", return_value=fake_db),
+            patch("filmy.db_library.fetch_user_list", return_value={"id": "watchlist", "name": "Watchlist", "list_kind": "watchlist"}),
+            patch("filmy.db_library.fetch_list_action_rules", return_value=[{"rule_id": "r1"}]) as rules_mock,
+            patch("filmy.db_library.upsert_title_session", return_value={"session_id": "title-session:uuid-1"}) as session_mock,
+            patch("filmy.db_library.insert_title_session_action", return_value={"action_id": "title-session-action:uuid-1"}) as action_mock,
+            patch("filmy.db_library.queue_title_session_action_effects", return_value={"queued_count": 4}) as queue_mock,
+            patch("filmy.db_library.apply_title_session_effects", return_value={"applied_count": 2, "effects": []}) as immediate_mock,
+            patch(
+                "filmy.db_library.finalize_title_session",
+                return_value={
+                    "session": {"session_id": "title-session:uuid-1"},
+                    "finalize": {"effects": [{"result": "applied", "effect": {"effect_type": "write_watched"}}]},
+                },
+            ) as finalize_mock,
+            patch("filmy.db_library.upsert_user_rating_postgres") as direct_rating_mock,
+        ):
+            result = db_library.set_user_rating(
+                "tt1",
+                8,
+                return_to_url="/titles/tt1?return_to=%2F%3Flist_id%3Dwatchlist",
+            )
+
+        rules_mock.assert_called_once_with(
+            source_list_id="watchlist",
+            trigger_action="set_rating",
+            target_list_id=None,
+            enabled_only=True,
+        )
+        session_mock.assert_called_once()
+        action_mock.assert_called_once()
+        queue_mock.assert_called_once_with("title-session-action:uuid-1", queued_at="2026-07-29T09:00:00")
+        immediate_mock.assert_called_once_with(
+            "title-session:uuid-1",
+            phase="immediate",
+            executed_at="2026-07-29T09:00:00",
+            effect_status="pending",
+        )
+        finalize_mock.assert_called_once_with("title-session:uuid-1", finalized_at="2026-07-29T09:00:00")
+        direct_rating_mock.assert_not_called()
+        self.assertEqual(result["workflow"], "title_session")
+        self.assertEqual(result["session_id"], "title-session:uuid-1")
+
+    def test_set_user_rating_falls_back_to_direct_write_without_rules(self) -> None:
+        fake_db = SimpleNamespace(
+            get_content_detail=lambda tconst: {"kind": "title", "tconst": tconst, "tmdb": {"tmdb_id": 123}, "library": {}},
+            _now_iso=lambda: "2026-07-29T09:00:00",
+            uuid=SimpleNamespace(uuid4=lambda: "uuid-1"),
+            _build_local_media_identity=lambda detail: {
+                "media_type": "title",
+                "tconst": detail["tconst"],
+                "imdb_id": detail["tconst"],
+                "tmdb_id": detail["tmdb"]["tmdb_id"],
+                "parent_tconst": None,
+                "parent_title": None,
+                "title": "Alpha",
+                "season_number": None,
+                "episode_number": None,
+            },
+            _canonical_media_key=lambda *args: "title:tt1",
+            clear_title_presentation_cache=lambda: None,
+            _get_library_summary_for_tconst=lambda tconst: {"tconst": tconst},
+        )
+        with (
+            patch("filmy.db_library._db", return_value=fake_db),
+            patch("filmy.db_library.fetch_user_list", return_value={"id": "watchlist", "name": "Watchlist", "list_kind": "watchlist"}),
+            patch("filmy.db_library.fetch_list_action_rules", return_value=[]),
+            patch("filmy.db_library.upsert_user_rating_postgres") as direct_rating_mock,
+        ):
+            result = db_library.set_user_rating(
+                "tt1",
+                8,
+                return_to_url="/lists/watchlist",
+            )
+
+        direct_rating_mock.assert_called_once()
+        self.assertNotIn("workflow", result)
+
+    def test_record_watch_event_uses_title_session_when_source_list_is_available(self) -> None:
+        fake_db = SimpleNamespace(
+            get_content_detail=lambda tconst: {"kind": "title", "tconst": tconst, "tmdb": {"tmdb_id": 123}},
+            _now_iso=lambda: "2026-07-29T09:15:00",
+            uuid=SimpleNamespace(uuid4=lambda: "event-1"),
+            datetime=__import__("datetime").datetime,
+            _build_local_media_identity=lambda detail: {
+                "media_type": "title",
+                "tconst": detail["tconst"],
+                "imdb_id": detail["tconst"],
+                "tmdb_id": detail["tmdb"]["tmdb_id"],
+                "parent_tconst": None,
+                "parent_title": None,
+                "title": "Alpha",
+                "season_number": None,
+                "episode_number": None,
+            },
+            _canonical_media_key=lambda *args: "title:tt1",
+            clear_title_presentation_cache=lambda: None,
+            _get_library_summary_for_tconst=lambda tconst: {"tconst": tconst},
+        )
+        with (
+            patch("filmy.db_library._db", return_value=fake_db),
+            patch("filmy.db_library.fetch_user_list", return_value={"id": "watchlist", "name": "Watchlist", "list_kind": "watchlist"}),
+            patch("filmy.db_library.fetch_list_action_rules", return_value=[{"rule_id": "r1"}]),
+            patch("filmy.db_library.upsert_title_session", return_value={"session_id": "title-session:event-1"}),
+            patch("filmy.db_library.insert_title_session_action", return_value={"action_id": "title-session-action:event-1"}),
+            patch("filmy.db_library.queue_title_session_action_effects", return_value={"queued_count": 2}),
+            patch("filmy.db_library.apply_title_session_effects", return_value={"applied_count": 0, "effects": []}),
+            patch(
+                "filmy.db_library.finalize_title_session",
+                return_value={
+                    "session": {"session_id": "title-session:event-1"},
+                    "finalize": {
+                        "effects": [
+                            {"result": "applied", "effect": {"effect_type": "write_watched"}},
+                            {"result": "applied", "effect": {"effect_type": "deactivate_source_membership"}},
+                        ]
+                    },
+                },
+            ),
+            patch("filmy.db_library.record_watched_postgres") as direct_watch_mock,
+        ):
+            result = db_library.record_watch_event("tt1", archive_from_list_id="watchlist")
+
+        direct_watch_mock.assert_not_called()
+        self.assertEqual(result["workflow"], "title_session")
         self.assertEqual(result["archived_items"], 1)
 
     def test_delete_group_from_user_list_archives_postgres_items(self) -> None:
@@ -306,7 +455,8 @@ class UserListsPostgresOverlayTests(unittest.TestCase):
                 "filmy.db_library._get_postgres_group_items_for_list",
                 return_value=({"id": "list-a", "name": "List A", "list_kind": "custom"}, [item]),
             ),
-            patch("filmy.db_library.fetch_user_list", return_value={"id": "list-b", "name": "List B", "list_kind": "custom"}),
+            patch("filmy.db_library.fetch_user_list", side_effect=[{"id": "list-b", "name": "List B", "list_kind": "custom"}, {"id": "list-a", "name": "List A", "list_kind": "custom"}]),
+            patch("filmy.db_library.fetch_list_action_rules", return_value=[]),
             patch("filmy.db_library.upsert_user_list_item") as upsert_mock,
             patch("filmy.db_library.archive_user_list_item") as archive_mock,
         ):
@@ -315,6 +465,52 @@ class UserListsPostgresOverlayTests(unittest.TestCase):
         self.assertEqual(result["moved_rows"], 1)
         upsert_mock.assert_called_once()
         archive_mock.assert_called_once_with("list-a", "title:tt1", "2026-07-11T10:00:00")
+
+    def test_move_group_between_user_lists_uses_title_session_when_rules_exist(self) -> None:
+        fake_db = SimpleNamespace(
+            _now_iso=lambda: "2026-07-29T10:00:00",
+            clear_title_presentation_cache=lambda: None,
+            uuid=SimpleNamespace(uuid4=lambda: "new-id"),
+        )
+        item = {
+            "canonical_key": "title:tt1",
+            "tconst": "tt1",
+            "media_type": "title",
+            "imdb_id": "tt1",
+            "tmdb_id": 11,
+            "trakt_id": None,
+            "parent_tconst": None,
+            "parent_title": None,
+            "title": "Alpha",
+            "season_number": None,
+            "episode_number": None,
+            "rank": 3,
+            "added_at": datetime(2026, 7, 10, 12, 0, 0),
+            "notes": "x",
+            "source_origin": "local_app",
+            "source_ref": "manual",
+        }
+        with (
+            patch("filmy.db_library._db", return_value=fake_db),
+            patch(
+                "filmy.db_library._get_postgres_group_items_for_list",
+                return_value=({"id": "list-a", "name": "List A", "list_kind": "custom"}, [item]),
+            ),
+            patch("filmy.db_library.fetch_user_list", side_effect=[{"id": "list-b", "name": "List B", "list_kind": "custom"}, {"id": "list-a", "name": "List A", "list_kind": "custom"}]),
+            patch("filmy.db_library.fetch_list_action_rules", return_value=[{"rule_id": "r1"}]),
+            patch("filmy.db_library.upsert_title_session", return_value={"session_id": "title-session:new-id"}),
+            patch("filmy.db_library.insert_title_session_action", return_value={"action_id": "title-session-action:new-id"}),
+            patch("filmy.db_library.queue_title_session_action_effects", return_value={"queued_count": 2}),
+            patch("filmy.db_library.apply_title_session_effects", return_value={"applied_count": 1, "effects": []}),
+            patch("filmy.db_library.finalize_title_session", return_value={"session": {"session_id": "title-session:new-id"}, "finalize": {"effects": []}}),
+            patch("filmy.db_library.upsert_user_list_item") as upsert_mock,
+            patch("filmy.db_library.archive_user_list_item") as archive_mock,
+        ):
+            result = db_library.move_group_between_user_lists("list-a", "list-b", "tt1")
+
+        upsert_mock.assert_not_called()
+        archive_mock.assert_not_called()
+        self.assertEqual(result["workflow"], "title_session")
 
     def test_copy_group_to_user_list_copies_postgres_items(self) -> None:
         fake_db = SimpleNamespace(
@@ -346,7 +542,8 @@ class UserListsPostgresOverlayTests(unittest.TestCase):
                 "filmy.db_library._get_postgres_group_items_for_list",
                 return_value=({"id": "list-a", "name": "List A", "list_kind": "custom"}, [item]),
             ),
-            patch("filmy.db_library.fetch_user_list", return_value={"id": "list-b", "name": "List B", "list_kind": "custom"}),
+            patch("filmy.db_library.fetch_user_list", side_effect=[{"id": "list-b", "name": "List B", "list_kind": "custom"}, {"id": "list-a", "name": "List A", "list_kind": "custom"}]),
+            patch("filmy.db_library.fetch_list_action_rules", return_value=[]),
             patch("filmy.db_library.upsert_user_list_item") as upsert_mock,
             patch("filmy.db_library.archive_user_list_item") as archive_mock,
         ):
@@ -355,6 +552,52 @@ class UserListsPostgresOverlayTests(unittest.TestCase):
         self.assertEqual(result["copied_rows"], 1)
         upsert_mock.assert_called_once()
         archive_mock.assert_not_called()
+
+    def test_copy_group_to_user_list_uses_title_session_when_rules_exist(self) -> None:
+        fake_db = SimpleNamespace(
+            _now_iso=lambda: "2026-07-29T10:05:00",
+            clear_title_presentation_cache=lambda: None,
+            uuid=SimpleNamespace(uuid4=lambda: "new-id"),
+        )
+        item = {
+            "canonical_key": "title:tt1",
+            "tconst": "tt1",
+            "media_type": "title",
+            "imdb_id": "tt1",
+            "tmdb_id": None,
+            "trakt_id": None,
+            "parent_tconst": None,
+            "parent_title": None,
+            "title": "Alpha",
+            "season_number": None,
+            "episode_number": None,
+            "rank": None,
+            "added_at": None,
+            "notes": None,
+            "source_origin": "local_app",
+            "source_ref": "manual",
+        }
+        with (
+            patch("filmy.db_library._db", return_value=fake_db),
+            patch(
+                "filmy.db_library._get_postgres_group_items_for_list",
+                return_value=({"id": "list-a", "name": "List A", "list_kind": "custom"}, [item]),
+            ),
+            patch("filmy.db_library.fetch_user_list", side_effect=[{"id": "list-b", "name": "List B", "list_kind": "custom"}, {"id": "list-a", "name": "List A", "list_kind": "custom"}]),
+            patch("filmy.db_library.fetch_list_action_rules", return_value=[{"rule_id": "r1"}]),
+            patch("filmy.db_library.upsert_title_session", return_value={"session_id": "title-session:new-id"}),
+            patch("filmy.db_library.insert_title_session_action", return_value={"action_id": "title-session-action:new-id"}),
+            patch("filmy.db_library.queue_title_session_action_effects", return_value={"queued_count": 1}),
+            patch("filmy.db_library.apply_title_session_effects", return_value={"applied_count": 1, "effects": []}),
+            patch("filmy.db_library.finalize_title_session", return_value={"session": {"session_id": "title-session:new-id"}, "finalize": {"effects": []}}),
+            patch("filmy.db_library.upsert_user_list_item") as upsert_mock,
+            patch("filmy.db_library.archive_user_list_item") as archive_mock,
+        ):
+            result = db_library.copy_group_to_user_list("list-a", "list-b", "tt1")
+
+        upsert_mock.assert_not_called()
+        archive_mock.assert_not_called()
+        self.assertEqual(result["workflow"], "title_session")
 
 
 if __name__ == "__main__":

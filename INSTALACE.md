@@ -54,6 +54,7 @@ Po nasazeni na server se databaze uz nema rucne prenaset z vyvojoveho stroje.
 Po kazdem `git pull` spust databazovy upgrade:
 
 ```bash
+uv run filmy-upgrade-database
 .venv/bin/python -m filmy.scripts.upgrade_database
 ```
 

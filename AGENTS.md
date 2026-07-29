@@ -31,6 +31,7 @@ Projekt: Filmy a seriály
 
 - Před většími změnami mini plán.
 - Postupovat v malých inkrementálních krocích, na konci každého krátké shrnutí.
+- Kdyz se do `PLAN.md` zapisuje navrh, how-to nebo navazujici postup v samostatnem souboru, pridat k tomu primo odkaz na ten konkretni soubor; pokud existuje technicky navrh i lidsky/manualovy vyklad, odkazat oba.
 - Kvalitní docstringy, čitelnost před chytrostí. docstringy podle běžných Python pravidel; v česky orientovaném projektu je piš česky bez háčků a čárek.
 - Kde v Pythonu dava smysl skutecna `class` jako nosic vicekrokove logiky nebo sdileneho kontextu, vytvor ji i bez explicitniho vyzadani od Jiriho. Nepouzivat ji jen jako formalni obal bez prinosu.
 - Kdyz uz Python `class` vznika, dopln podrobny docstring tridy i jejich dulezitych metod. Docstringy drzet prakticke, konkretni a psane cesky bez hacku a carek.

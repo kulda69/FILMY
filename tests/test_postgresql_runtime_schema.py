@@ -45,8 +45,63 @@ def test_database_upgrade_runner_tracks_versioned_steps() -> None:
     assert "skip 0001-bootstrap" in upgrade_runner
     assert '"0002-runtime-schema", "002_runtime_schema.sql"' in upgrade_runner
     assert '"0005-catalog-grants", "005_catalog_grants.sql"' in upgrade_runner
+    assert '"0006-list-actions-session-schema", "006_list_actions_session_schema.sql"' in upgrade_runner
+    assert '"0007-list-actions-session-grants", "007_list_actions_session_grants.sql"' in upgrade_runner
+    assert '"0008-list-action-rule-seed", "008_list_action_rule_seed.sql"' in upgrade_runner
+    assert '"0009-list-action-target-rule-seed", "009_list_action_target_rule_seed.sql"' in upgrade_runner
     assert "filmy-upgrade-database = \"filmy.scripts.upgrade_database:main\"" in pyproject
     assert "uv run filmy-upgrade-database" in install_doc
+
+
+def test_list_actions_session_schema_upgrade_defines_core_tables_and_triggers() -> None:
+    schema_sql = Path("migrations/postgresql/006_list_actions_session_schema.sql").read_text(encoding="utf-8")
+
+    assert "CREATE TABLE IF NOT EXISTS app.list_action_rules (" in schema_sql
+    assert "CREATE TABLE IF NOT EXISTS app.title_sessions (" in schema_sql
+    assert "CREATE TABLE IF NOT EXISTS app.title_session_actions (" in schema_sql
+    assert "CREATE TABLE IF NOT EXISTS app.title_session_effect_queue (" in schema_sql
+    assert "list_action_rules_trigger_action_check" in schema_sql
+    assert "title_sessions_status_check" in schema_sql
+    assert "title_session_actions_session_order_key" in schema_sql
+    assert "title_session_effect_queue_effect_status_check" in schema_sql
+    assert "trg_list_action_rules_touch_updated_at" in schema_sql
+    assert "trg_title_sessions_touch_updated_at" in schema_sql
+
+
+def test_list_actions_session_grants_upgrade_covers_new_tables() -> None:
+    grants_sql = Path("migrations/postgresql/007_list_actions_session_grants.sql").read_text(encoding="utf-8")
+
+    assert "app.list_action_rules" in grants_sql
+    assert "app.title_sessions" in grants_sql
+    assert "app.title_session_actions" in grants_sql
+    assert "app.title_session_effect_queue" in grants_sql
+    assert "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE" in grants_sql
+
+
+def test_list_action_rule_seed_upgrade_covers_current_lists_and_targetless_actions() -> None:
+    seed_sql = Path("migrations/postgresql/008_list_action_rule_seed.sql").read_text(encoding="utf-8")
+
+    assert "'watchlist'" in seed_sql
+    assert "'koukni-rychle'" in seed_sql
+    assert "'plex-library'" in seed_sql
+    assert "'stahnout'" in seed_sql
+    assert "'set_rating'" in seed_sql
+    assert "'mark_watched'" in seed_sql
+    assert "'write_rating'" in seed_sql
+    assert "'write_watched'" in seed_sql
+    assert "'deactivate_source_membership'" in seed_sql
+    assert "'preserve_source_membership'" in seed_sql
+
+
+def test_list_action_target_rule_seed_upgrade_covers_move_and_copy_rules() -> None:
+    seed_sql = Path("migrations/postgresql/009_list_action_target_rule_seed.sql").read_text(encoding="utf-8")
+
+    assert "'copy_to_list'" in seed_sql
+    assert "'move_to_list'" in seed_sql
+    assert "'add_target_membership'" in seed_sql
+    assert "'deactivate_source_membership'" in seed_sql
+    assert "'watchlist'" not in seed_sql.split("target_lists AS", 1)[1]
+    assert "'ai-navrhy'" not in seed_sql.split("target_lists AS", 1)[1]
 
 
 def test_bootstrap_accepts_pg_database_owner_for_public_schema() -> None:

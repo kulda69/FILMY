@@ -115,6 +115,7 @@ async def ui_list_action_watched(
             add_to_watched_list=True,
             archive_from_list_id=list_id,
             archive_display_tconst=display_tconst,
+            return_to_url=return_to,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -126,12 +127,13 @@ async def ui_list_action_watched(
 async def ui_list_action_rating(
     tconst: str = Form(),
     rating: int = Form(),
+    source_list_id: str | None = Form(default=None),
     return_to: str | None = Form(default=None),
 ):
     """Uloz ciselne hodnoceni titulu z jednoducheho formulare."""
 
     try:
-        set_user_rating(tconst, rating)
+        set_user_rating(tconst, rating, source_list_id=source_list_id, return_to_url=return_to)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     signal_metadata_pipeline("ui_rating_set")
@@ -144,6 +146,7 @@ async def ui_list_action_rating_notes(
     rating: int = Form(),
     liked_notes: str | None = Form(default=None),
     disliked_notes: str | None = Form(default=None),
+    source_list_id: str | None = Form(default=None),
     return_to: str | None = Form(default=None),
 ):
     """Uloz hodnoceni titulu vcetne slovnich poznamek."""
@@ -154,6 +157,8 @@ async def ui_list_action_rating_notes(
             rating,
             liked_notes=liked_notes,
             disliked_notes=disliked_notes,
+            source_list_id=source_list_id,
+            return_to_url=return_to,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

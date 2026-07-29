@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from urllib.parse import urlencode
+import uuid
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Form, HTTPException, Query, Request
+import psycopg
 from starlette.responses import HTMLResponse, RedirectResponse
 
 from filmy.app_shared import (
@@ -27,10 +29,204 @@ from filmy.db import (
     replace_favorite_traits,
 )
 from filmy.imdb_refresh import get_imdb_refresh_snapshot, start_imdb_refresh_job
+from filmy.runtime_postgres import (
+    delete_list_action_rule,
+    fetch_list_action_rule,
+    fetch_list_action_rules,
+    fetch_user_list,
+    fetch_user_lists,
+    upsert_list_action_rule,
+)
 
 from .web_shared import DEFAULT_FAVORITE_TRAITS, PREFERENCE_PRIORITY_MAX, PREFERENCE_PRIORITY_MIN
 
 router = APIRouter()
+
+LIST_RULE_TRIGGER_ORDER: tuple[str, ...] = (
+    "set_rating",
+    "mark_watched",
+    "copy_to_list",
+    "move_to_list",
+)
+
+LIST_RULE_TRIGGER_LABELS = {
+    "set_rating": "Set Rating",
+    "mark_watched": "Mark Watched",
+    "copy_to_list": "Copy To List",
+    "move_to_list": "Move To List",
+}
+
+LIST_RULE_EFFECT_LABELS = {
+    "write_rating": "Write rating",
+    "derive_watched": "Derive watched",
+    "write_watched": "Write watched",
+    "add_target_membership": "Add target membership",
+    "deactivate_source_membership": "Deactivate source membership",
+    "preserve_source_membership": "Preserve source membership",
+    "preserve_target_membership": "Preserve target membership",
+    "remove_source_membership": "Remove source membership",
+    "remove_target_membership": "Remove target membership",
+    "noop": "No-op",
+}
+
+LIST_RULE_PHASE_LABELS = {
+    "immediate": "Immediate",
+    "finalize_only": "Finalize only",
+}
+
+LIST_RULE_TRIGGER_HELP = {
+    "set_rating": "Akce bez cíle. Typicky zapisuje rating a odvozené watched efekty.",
+    "mark_watched": "Akce bez cíle. Typicky zapisuje watched a source cleanup.",
+    "copy_to_list": "Akce s konkrétním cílovým listem. Zdroj typicky zůstává zachovaný.",
+    "move_to_list": "Akce s konkrétním cílovým listem. Zdroj typicky končí deaktivací.",
+}
+
+LIST_RULE_TRIGGER_EFFECT_OPTIONS = {
+    "set_rating": (
+        "write_rating",
+        "derive_watched",
+        "write_watched",
+        "deactivate_source_membership",
+        "preserve_source_membership",
+        "noop",
+    ),
+    "mark_watched": (
+        "write_watched",
+        "deactivate_source_membership",
+        "preserve_source_membership",
+        "noop",
+    ),
+    "copy_to_list": (
+        "add_target_membership",
+        "preserve_source_membership",
+        "preserve_target_membership",
+        "remove_target_membership",
+        "noop",
+    ),
+    "move_to_list": (
+        "add_target_membership",
+        "deactivate_source_membership",
+        "remove_source_membership",
+        "preserve_target_membership",
+        "remove_target_membership",
+        "noop",
+    ),
+}
+
+LIST_KIND_LABELS = {
+    "watchlist": "System",
+    "custom": "Custom",
+    "view": "View",
+}
+
+
+def _ai_role_label(value: str | None) -> str:
+    """Preved AI input roli na lidsky citelny kratky label."""
+
+    labels = {
+        "strong_positive": "Silně se mi líbí",
+        "interested_owned": "Mám",
+        "interested_planned": "Chci vidět",
+        "in_progress": "Rozkoukáno",
+        "negative": "Nechci",
+        "external_suggestion": "Návrh od AI",
+        "ignore": "Nepoužívat",
+    }
+    return labels.get(str(value or "").strip(), "—")
+
+
+def _build_rule_overview_rows(filter_kind: str) -> list[dict[str, object]]:
+    """Sloz overview radky listu vcetne rule souhrnu pro system editor."""
+
+    rows: list[dict[str, object]] = []
+    for list_row in fetch_user_lists():
+        list_kind = str(list_row.get("list_kind") or "")
+        if filter_kind == "custom" and list_kind != "custom":
+            continue
+        if filter_kind == "system" and list_kind == "custom":
+            continue
+        rules = fetch_list_action_rules(source_list_id=str(list_row["id"]), enabled_only=False)
+        locked_count = sum(
+            1
+            for rule in rules
+            if (not bool(rule.get("enabled", True))) or rule.get("lock_reason_key") or rule.get("lock_reason_text")
+        )
+        updated_candidates = [rule.get("updated_at") for rule in rules if rule.get("updated_at") is not None]
+        rows.append(
+            {
+                "id": list_row["id"],
+                "slug": list_row.get("slug"),
+                "name": list_row["name"],
+                "description": list_row.get("description"),
+                "list_kind": list_kind,
+                "list_kind_label": LIST_KIND_LABELS.get(list_kind, list_kind or "—"),
+                "ai_input_role": list_row.get("ai_input_role"),
+                "ai_input_role_label": _ai_role_label(list_row.get("ai_input_role")),
+                "rule_count": len(rules),
+                "locked_count": locked_count,
+                "updated_at": max(updated_candidates) if updated_candidates else None,
+            }
+        )
+    rows.sort(key=lambda item: (str(item["list_kind"]) == "custom", str(item["name"]).casefold()))
+    return rows
+
+
+def _group_rules_for_list(list_id: str) -> list[dict[str, object]]:
+    """Sloz read-only skupiny pravidel pro detail jednoho seznamu."""
+
+    target_lists_by_id = {row["id"]: row for row in fetch_user_lists()}
+    groups: list[dict[str, object]] = []
+    for trigger_action in LIST_RULE_TRIGGER_ORDER:
+        rules = fetch_list_action_rules(
+            source_list_id=list_id,
+            trigger_action=trigger_action,
+            enabled_only=False,
+        )
+        prepared_rules: list[dict[str, object]] = []
+        for rule in rules:
+            target_list = target_lists_by_id.get(rule.get("target_list_id") or "")
+            lock_reason = str(rule.get("lock_reason_text") or "").strip() or None
+            if lock_reason is None and rule.get("lock_reason_key"):
+                lock_reason = str(rule["lock_reason_key"])
+            prepared_rules.append(
+                {
+                    **rule,
+                    "target_list_name": target_list["name"] if target_list else "—",
+                    "effect_label": LIST_RULE_EFFECT_LABELS.get(str(rule.get("effect_type") or ""), str(rule.get("effect_type") or "—")),
+                    "phase_label": LIST_RULE_PHASE_LABELS.get(str(rule.get("phase") or ""), str(rule.get("phase") or "—")),
+                    "is_locked": bool(lock_reason),
+                    "is_enabled": bool(rule.get("enabled", True)),
+                    "lock_reason": lock_reason,
+                }
+            )
+        groups.append(
+            {
+                "trigger_action": trigger_action,
+                "trigger_label": LIST_RULE_TRIGGER_LABELS[trigger_action],
+                "trigger_help": LIST_RULE_TRIGGER_HELP.get(trigger_action, ""),
+                "target_required": trigger_action in {"copy_to_list", "move_to_list"},
+                "effect_options": [
+                    {
+                        "value": effect_type,
+                        "label": LIST_RULE_EFFECT_LABELS.get(effect_type, effect_type),
+                    }
+                    for effect_type in LIST_RULE_TRIGGER_EFFECT_OPTIONS.get(trigger_action, ())
+                ],
+                "rules": prepared_rules,
+                "rule_count": len(prepared_rules),
+            }
+        )
+    return groups
+
+
+def _list_action_rules_setup_message() -> str:
+    """Vrat lidsky citelnou hlasku pro chybejici DB schema list-action rules."""
+
+    return (
+        "Tahle databáze ještě nemá tabulku app.list_action_rules. "
+        "Nejdřív spusť databázový upgrade přes `filmy-upgrade-database` "
+        "nebo `python -m filmy.scripts.upgrade_database`."
+    )
 
 
 def _no_store_redirect(url: str) -> RedirectResponse:
@@ -39,6 +235,337 @@ def _no_store_redirect(url: str) -> RedirectResponse:
     response.headers["Cache-Control"] = "no-store, max-age=0"
     response.headers["Pragma"] = "no-cache"
     return response
+
+
+def _build_list_action_rule_detail_url(
+    list_id: str,
+    *,
+    return_to: str | None,
+    saved: str | None = None,
+    error: str | None = None,
+) -> str:
+    """Sestav detail URL editoru pravidel vcetne navratoveho stavu."""
+
+    params: dict[str, str] = {}
+    if return_to:
+        params["return_to"] = return_to
+    if saved:
+        params["saved"] = saved
+    if error:
+        params["error"] = error
+    if not params:
+        return f"/system/list-action-rules/{list_id}"
+    return f"/system/list-action-rules/{list_id}?{urlencode(params)}"
+
+
+def _build_rule_editor_target_options(source_list_id: str) -> list[dict[str, str]]:
+    """Vrat povolene cilove seznamy pro editor target akci."""
+
+    blocked_slugs = {"watchlist", "ai-navrhy"}
+    blocked_ids = {"watchlist", "ai-suggestions"}
+    rows: list[dict[str, str]] = []
+    for list_row in fetch_user_lists():
+        list_id = str(list_row.get("id") or "")
+        slug = str(list_row.get("slug") or "")
+        if not list_id or list_id == source_list_id:
+            continue
+        if list_id in blocked_ids or slug in blocked_slugs:
+            continue
+        rows.append(
+            {
+                "id": list_id,
+                "name": str(list_row.get("name") or list_id),
+                "slug": slug,
+            }
+        )
+    rows.sort(key=lambda item: item["name"].casefold())
+    return rows
+
+
+def _parse_rule_enabled(value: str | None) -> bool:
+    """Preved formularovy stav enabled na boolean."""
+
+    return str(value or "true").strip().lower() not in {"0", "false", "off", "disabled"}
+
+
+def _validate_list_action_rule_payload(
+    *,
+    source_list: dict[str, object],
+    trigger_action: str,
+    target_list_id: str | None,
+    effect_type: str,
+    phase: str,
+    order_index: int,
+) -> dict[str, object]:
+    """Zvaliduj editor payload a vrat normalizovana data pro ulozeni."""
+
+    normalized_trigger = str(trigger_action or "").strip()
+    if normalized_trigger not in LIST_RULE_TRIGGER_ORDER:
+        raise ValueError("Neznámá trigger akce.")
+
+    normalized_effect = str(effect_type or "").strip()
+    allowed_effects = LIST_RULE_TRIGGER_EFFECT_OPTIONS.get(normalized_trigger, ())
+    if normalized_effect not in allowed_effects:
+        raise ValueError("Vybraný effect pro tuhle trigger akci nedává smysl.")
+
+    normalized_phase = str(phase or "").strip()
+    if normalized_phase not in LIST_RULE_PHASE_LABELS:
+        raise ValueError("Neznámá phase pravidla.")
+
+    if order_index <= 0:
+        raise ValueError("Pořadí pravidla musí být kladné číslo.")
+
+    target_required = normalized_trigger in {"copy_to_list", "move_to_list"}
+    normalized_target = str(target_list_id or "").strip() or None
+    if target_required and normalized_target is None:
+        raise ValueError("Tahle trigger akce vyžaduje konkrétní cílový list.")
+    if (not target_required) and normalized_target is not None:
+        raise ValueError("Tahle trigger akce nesmí mít cílový list.")
+
+    if normalized_target is not None:
+        if normalized_target == str(source_list["id"]):
+            raise ValueError("Cílový list nesmí být stejný jako zdrojový.")
+        target_list = fetch_user_list(normalized_target)
+        if target_list is None:
+            raise ValueError("Vybraný cílový list neexistuje.")
+        target_slug = str(target_list.get("slug") or "")
+        if normalized_target in {"watchlist", "ai-suggestions"} or target_slug in {"watchlist", "ai-navrhy"}:
+            raise ValueError("Do Watchlistu ani do AI návrhů se přes editor pravidel zapisovat nesmí.")
+
+    if normalized_effect == "write_rating" and normalized_phase != "immediate":
+        raise ValueError("Write rating dává smysl jen jako immediate effect.")
+    if normalized_effect == "derive_watched" and normalized_phase != "immediate":
+        raise ValueError("Derive watched dává smysl jen jako immediate effect.")
+    if normalized_trigger == "move_to_list" and normalized_effect == "preserve_source_membership":
+        raise ValueError("Move to list nesmí zachovat source membership.")
+
+    return {
+        "trigger_action": normalized_trigger,
+        "target_list_id": normalized_target,
+        "effect_type": normalized_effect,
+        "phase": normalized_phase,
+        "order_index": order_index,
+    }
+
+
+@router.get("/system/list-action-rules", response_class=HTMLResponse)
+async def list_action_rules_overview_page(
+    request: Request,
+    return_to: str | None = Query(default=None),
+    filter_kind: str = Query(default="all"),
+):
+    """Vykresli overview seznam listu pro read-only spravu list action rules."""
+
+    normalized_filter = str(filter_kind or "all").strip().lower()
+    if normalized_filter not in {"all", "system", "custom"}:
+        normalized_filter = "all"
+    breadcrumb_context = build_breadcrumb_context(request, "List Action Rules", return_to=return_to, default_trail=[{"url": "/", "label": "Home"}])
+    setup_message: str | None = None
+    try:
+        rows = _build_rule_overview_rows(normalized_filter)
+    except psycopg.errors.UndefinedTable:
+        rows = []
+        setup_message = _list_action_rules_setup_message()
+    response = templates.TemplateResponse(
+        request,
+        "system_list_action_rules_overview.html",
+        {
+            **breadcrumb_context,
+            "return_to": breadcrumb_context["page_return_to"],
+            "filter_kind": normalized_filter,
+            "overview_rows": rows,
+            "list_count": len(rows),
+            "configured_rule_count": sum(int(item["rule_count"]) for item in rows),
+            "locked_rule_count": sum(int(item["locked_count"]) for item in rows),
+            "setup_message": setup_message,
+            "format_czech_datetime": format_czech_datetime,
+        },
+    )
+    return response
+
+
+@router.get("/system/list-action-rules/{list_id}", response_class=HTMLResponse)
+async def list_action_rules_detail_page(
+    request: Request,
+    list_id: str,
+    return_to: str | None = Query(default=None),
+    saved: str | None = Query(default=None),
+    error: str | None = Query(default=None),
+):
+    """Vykresli detail a editor pravidel jednoho konkretniho seznamu."""
+
+    list_row = fetch_user_list(list_id)
+    if list_row is None:
+        raise HTTPException(status_code=404, detail="Seznam nebyl nalezen.")
+    breadcrumb_context = build_breadcrumb_context(
+        request,
+        "List Action Rules",
+        return_to=return_to or "/system/list-action-rules",
+        default_trail=[{"url": "/", "label": "Home"}, {"url": "/system/list-action-rules", "label": "List Action Rules"}],
+    )
+    setup_message: str | None = None
+    try:
+        rule_groups = _group_rules_for_list(list_id)
+    except psycopg.errors.UndefinedTable:
+        rule_groups = [
+            {
+                "trigger_action": trigger_action,
+                "trigger_label": LIST_RULE_TRIGGER_LABELS[trigger_action],
+                "rules": [],
+                "rule_count": 0,
+            }
+            for trigger_action in LIST_RULE_TRIGGER_ORDER
+        ]
+        setup_message = _list_action_rules_setup_message()
+    all_rules = [rule for group in rule_groups for rule in group["rules"]]
+    response = templates.TemplateResponse(
+        request,
+        "system_list_action_rules_detail.html",
+        {
+            **breadcrumb_context,
+            "return_to": breadcrumb_context["page_return_to"],
+            "list_row": {
+                **list_row,
+                "list_kind_label": LIST_KIND_LABELS.get(str(list_row.get("list_kind") or ""), str(list_row.get("list_kind") or "—")),
+                "ai_input_role_label": _ai_role_label(list_row.get("ai_input_role")),
+            },
+            "rule_groups": rule_groups,
+            "rule_count": len(all_rules),
+            "locked_rule_count": sum(1 for rule in all_rules if rule["is_locked"] or (not rule["is_enabled"])),
+            "target_list_options": _build_rule_editor_target_options(list_id),
+            "setup_message": setup_message,
+            "saved_message": {
+                "created": "Pravidlo bylo přidané.",
+                "updated": "Pravidlo bylo uložené.",
+                "deleted": "Pravidlo bylo smazané.",
+            }.get(str(saved or "").strip()),
+            "error_message": str(error or "").strip() or None,
+            "format_czech_datetime": format_czech_datetime,
+        },
+    )
+    return response
+
+
+@router.post("/system/list-action-rules/{list_id}/rules/create")
+async def list_action_rules_create(
+    list_id: str,
+    trigger_action: str = Form(),
+    target_list_id: str | None = Form(default=None),
+    effect_type: str = Form(),
+    phase: str = Form(),
+    order_index: int | None = Form(default=None),
+    enabled: str | None = Form(default="true"),
+    return_to: str | None = Form(default=None),
+):
+    """Pridej nove pravidlo do editoru konkretniho seznamu."""
+
+    list_row = fetch_user_list(list_id)
+    if list_row is None:
+        raise HTTPException(status_code=404, detail="Seznam nebyl nalezen.")
+    try:
+        normalized = _validate_list_action_rule_payload(
+            source_list=list_row,
+            trigger_action=trigger_action,
+            target_list_id=target_list_id,
+            effect_type=effect_type,
+            phase=phase,
+            order_index=int(order_index or 0),
+        )
+        upsert_list_action_rule(
+            rule_id=f"rule:custom:{uuid.uuid4()}",
+            source_list_id=list_id,
+            trigger_action=str(normalized["trigger_action"]),
+            target_list_id=normalized["target_list_id"],
+            effect_type=str(normalized["effect_type"]),
+            phase=str(normalized["phase"]),
+            order_index=int(normalized["order_index"]),
+            enabled=_parse_rule_enabled(enabled),
+            effect_params={},
+        )
+    except (ValueError, psycopg.Error) as exc:
+        return _no_store_redirect(_build_list_action_rule_detail_url(list_id, return_to=return_to, error=str(exc)))
+    return _no_store_redirect(_build_list_action_rule_detail_url(list_id, return_to=return_to, saved="created"))
+
+
+@router.post("/system/list-action-rules/{list_id}/rules/{rule_id}/update")
+async def list_action_rules_update(
+    list_id: str,
+    rule_id: str,
+    trigger_action: str = Form(),
+    target_list_id: str | None = Form(default=None),
+    effect_type: str = Form(),
+    phase: str = Form(),
+    order_index: int | None = Form(default=None),
+    enabled: str | None = Form(default="true"),
+    return_to: str | None = Form(default=None),
+):
+    """Uprav existujici pravidlo v editoru konkretniho seznamu."""
+
+    list_row = fetch_user_list(list_id)
+    if list_row is None:
+        raise HTTPException(status_code=404, detail="Seznam nebyl nalezen.")
+    existing_rule = fetch_list_action_rule(rule_id)
+    if existing_rule is None or str(existing_rule.get("source_list_id") or "") != list_id:
+        raise HTTPException(status_code=404, detail="Pravidlo nebylo nalezeno.")
+    if existing_rule.get("lock_reason_key") or existing_rule.get("lock_reason_text"):
+        return _no_store_redirect(
+            _build_list_action_rule_detail_url(
+                list_id,
+                return_to=return_to,
+                error=str(existing_rule.get("lock_reason_text") or "Tahle kombinace je zamčená a nejde upravit."),
+            )
+        )
+    try:
+        normalized = _validate_list_action_rule_payload(
+            source_list=list_row,
+            trigger_action=trigger_action,
+            target_list_id=target_list_id,
+            effect_type=effect_type,
+            phase=phase,
+            order_index=int(order_index or 0),
+        )
+        upsert_list_action_rule(
+            rule_id=rule_id,
+            source_list_id=list_id,
+            trigger_action=str(normalized["trigger_action"]),
+            target_list_id=normalized["target_list_id"],
+            effect_type=str(normalized["effect_type"]),
+            phase=str(normalized["phase"]),
+            order_index=int(normalized["order_index"]),
+            enabled=_parse_rule_enabled(enabled),
+            lock_reason_key=str(existing_rule.get("lock_reason_key") or "") or None,
+            lock_reason_text=str(existing_rule.get("lock_reason_text") or "") or None,
+            effect_params=dict(existing_rule.get("effect_params") or {}),
+        )
+    except (ValueError, psycopg.Error) as exc:
+        return _no_store_redirect(_build_list_action_rule_detail_url(list_id, return_to=return_to, error=str(exc)))
+    return _no_store_redirect(_build_list_action_rule_detail_url(list_id, return_to=return_to, saved="updated"))
+
+
+@router.post("/system/list-action-rules/{list_id}/rules/{rule_id}/delete")
+async def list_action_rules_delete(
+    list_id: str,
+    rule_id: str,
+    return_to: str | None = Form(default=None),
+):
+    """Smaz existujici pravidlo z editoru konkretniho seznamu."""
+
+    existing_rule = fetch_list_action_rule(rule_id)
+    if existing_rule is None or str(existing_rule.get("source_list_id") or "") != list_id:
+        raise HTTPException(status_code=404, detail="Pravidlo nebylo nalezeno.")
+    if existing_rule.get("lock_reason_key") or existing_rule.get("lock_reason_text"):
+        return _no_store_redirect(
+            _build_list_action_rule_detail_url(
+                list_id,
+                return_to=return_to,
+                error=str(existing_rule.get("lock_reason_text") or "Tahle kombinace je zamčená a nejde smazat."),
+            )
+        )
+    try:
+        delete_list_action_rule(rule_id)
+    except psycopg.Error as exc:
+        return _no_store_redirect(_build_list_action_rule_detail_url(list_id, return_to=return_to, error=str(exc)))
+    return _no_store_redirect(_build_list_action_rule_detail_url(list_id, return_to=return_to, saved="deleted"))
 
 
 @router.get("/system/favorite-genres", response_class=HTMLResponse)

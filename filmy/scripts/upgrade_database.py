@@ -27,6 +27,10 @@ UPGRADES: tuple[tuple[str, str], ...] = (
     ("0003-runtime-grants", "003_runtime_grants.sql"),
     ("0004-catalog-schema", "004_catalog_schema.sql"),
     ("0005-catalog-grants", "005_catalog_grants.sql"),
+    ("0006-list-actions-session-schema", "006_list_actions_session_schema.sql"),
+    ("0007-list-actions-session-grants", "007_list_actions_session_grants.sql"),
+    ("0008-list-action-rule-seed", "008_list_action_rule_seed.sql"),
+    ("0009-list-action-target-rule-seed", "009_list_action_target_rule_seed.sql"),
 )
 
 

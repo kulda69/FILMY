@@ -51,5 +51,6 @@ data/imdb_refresh_status.json
 tmp/
 output/playwright/
 Screenshot *.png
+list-action-rules-watchlist-editor.png
 data/*.duckdb*
 logs/

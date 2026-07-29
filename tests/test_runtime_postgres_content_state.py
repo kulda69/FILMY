@@ -149,6 +149,290 @@ class RuntimePostgresTests(unittest.TestCase):
         self.assertIn("app.archive_user_list_group", executed_sql)
         conn.commit.assert_called_once_with()
 
+    @patch("filmy.runtime_postgres._connect")
+    def test_fetch_list_action_rules_parses_jsonb_payload(self, connect_mock) -> None:
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [
+            (
+                "rule-1",
+                "watchlist",
+                "set_rating",
+                None,
+                "derive_watched",
+                "immediate",
+                10,
+                True,
+                None,
+                None,
+                {"threshold": 7},
+                datetime(2026, 7, 29, 10, 0, 0),
+                datetime(2026, 7, 29, 10, 5, 0),
+            )
+        ]
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cursor
+        connect_mock.return_value.__enter__.return_value = conn
+
+        result = runtime_postgres.fetch_list_action_rules(
+            source_list_id="watchlist",
+            trigger_action="set_rating",
+        )
+
+        self.assertEqual(result[0]["rule_id"], "rule-1")
+        self.assertEqual(result[0]["effect_params"], {"threshold": 7})
+        executed_sql = cursor.execute.call_args.args[0]
+        self.assertIn("FROM app.list_action_rules", executed_sql)
+
+    @patch("filmy.runtime_postgres._connect")
+    def test_upsert_title_session_returns_stored_row(self, connect_mock) -> None:
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (
+            "session-1",
+            "tt0133093",
+            "open",
+            "title_detail",
+            "/titles/tt0133093",
+            "watchlist",
+            "title_detail",
+            datetime(2026, 7, 29, 11, 0, 0),
+            datetime(2026, 7, 29, 11, 0, 0),
+            None,
+        )
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cursor
+        connect_mock.return_value.__enter__.return_value = conn
+
+        result = runtime_postgres.upsert_title_session(
+            session_id="session-1",
+            tconst="tt0133093",
+            status="open",
+            opened_from="title_detail",
+            return_to_url="/titles/tt0133093",
+            source_list_id="watchlist",
+            session_scope="title_detail",
+            started_at="2026-07-29T11:00:00",
+        )
+
+        self.assertEqual(result["session_id"], "session-1")
+        self.assertEqual(result["source_list_id"], "watchlist")
+        executed_sql = cursor.execute.call_args.args[0]
+        self.assertIn("INSERT INTO app.title_sessions", executed_sql)
+        self.assertIn("ON CONFLICT (session_id) DO UPDATE", executed_sql)
+        conn.commit.assert_called_once_with()
+
+    @patch("filmy.runtime_postgres._connect")
+    def test_insert_title_session_action_returns_payload(self, connect_mock) -> None:
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (
+            "action-1",
+            "session-1",
+            "tt0133093",
+            "watchlist",
+            "set_rating",
+            None,
+            9,
+            "skvely finale",
+            {"source": "manual"},
+            1,
+            datetime(2026, 7, 29, 11, 5, 0),
+        )
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cursor
+        connect_mock.return_value.__enter__.return_value = conn
+
+        result = runtime_postgres.insert_title_session_action(
+            action_id="action-1",
+            session_id="session-1",
+            tconst="tt0133093",
+            source_list_id="watchlist",
+            trigger_action="set_rating",
+            target_list_id=None,
+            rating_value=9,
+            notes_text="skvely finale",
+            action_payload={"source": "manual"},
+            action_order=1,
+            created_at="2026-07-29T11:05:00",
+        )
+
+        self.assertEqual(result["rating_value"], 9)
+        self.assertEqual(result["action_payload"], {"source": "manual"})
+        executed_sql = cursor.execute.call_args.args[0]
+        self.assertIn("INSERT INTO app.title_session_actions", executed_sql)
+        self.assertIn("%s::jsonb", executed_sql)
+        conn.commit.assert_called_once_with()
+
+    @patch("filmy.runtime_postgres._title_session_store.insert_effect_rows")
+    @patch("filmy.runtime_postgres._title_session_store.fetch_effect_queue")
+    @patch("filmy.runtime_postgres._title_session_store.fetch_rules")
+    @patch("filmy.runtime_postgres._title_session_store.fetch_action")
+    def test_queue_title_session_action_effects_builds_immediate_and_finalize_rows(
+        self,
+        fetch_action_mock,
+        fetch_rules_mock,
+        fetch_effect_queue_mock,
+        insert_effect_rows_mock,
+    ) -> None:
+        fetch_action_mock.return_value = {
+            "action_id": "action-1",
+            "session_id": "session-1",
+            "tconst": "tt0133093",
+            "source_list_id": "watchlist",
+            "trigger_action": "set_rating",
+            "target_list_id": None,
+            "rating_value": 9,
+            "notes_text": "silny finale",
+            "action_payload": {"canonical_key": "title:tt0133093", "media_type": "title"},
+            "action_order": 1,
+            "created_at": datetime(2026, 7, 29, 12, 0, 0),
+        }
+        fetch_rules_mock.return_value = [
+            {
+                "rule_id": "rule-1",
+                "effect_type": "write_rating",
+                "phase": "immediate",
+                "target_list_id": None,
+            },
+            {
+                "rule_id": "rule-2",
+                "effect_type": "write_watched",
+                "phase": "finalize_only",
+                "target_list_id": None,
+            },
+        ]
+        fetch_effect_queue_mock.return_value = []
+
+        result = runtime_postgres.queue_title_session_action_effects(
+            "action-1",
+            queued_at="2026-07-29T12:01:00",
+        )
+
+        self.assertEqual(result["queued_count"], 2)
+        self.assertEqual(result["immediate_count"], 1)
+        self.assertEqual(result["finalize_only_count"], 1)
+        queued_rows = insert_effect_rows_mock.call_args.args[0]
+        self.assertEqual(queued_rows[0]["effect_order"], 10)
+        self.assertEqual(queued_rows[1]["effect_order"], 20)
+        self.assertEqual(queued_rows[0]["effect_payload"]["rating_value"], 9)
+
+    @patch("filmy.runtime_postgres._title_session_store.update_effect_status")
+    @patch("filmy.runtime_postgres.archive_user_list_item")
+    @patch("filmy.runtime_postgres.record_watched")
+    @patch("filmy.runtime_postgres._title_session_store.fetch_effect_queue")
+    def test_apply_title_session_effects_executes_finalize_rows(
+        self,
+        fetch_effect_queue_mock,
+        record_watched_mock,
+        archive_item_mock,
+        update_effect_status_mock,
+    ) -> None:
+        fetch_effect_queue_mock.return_value = [
+            {
+                "effect_id": "effect-1",
+                "session_id": "session-1",
+                "action_id": "action-1",
+                "rule_id": "rule-1",
+                "tconst": "tt0133093",
+                "effect_type": "write_watched",
+                "phase": "finalize_only",
+                "source_list_id": "watchlist",
+                "target_list_id": None,
+                "effect_status": "pending",
+                "effect_order": 10,
+                "effect_payload": {"tconst": "tt0133093", "event_scope": "title", "watched_on": "2026-07-29"},
+                "created_at": datetime(2026, 7, 29, 12, 2, 0),
+                "executed_at": None,
+            },
+            {
+                "effect_id": "effect-2",
+                "session_id": "session-1",
+                "action_id": "action-1",
+                "rule_id": "rule-2",
+                "tconst": "tt0133093",
+                "effect_type": "deactivate_source_membership",
+                "phase": "finalize_only",
+                "source_list_id": "watchlist",
+                "target_list_id": None,
+                "effect_status": "pending",
+                "effect_order": 20,
+                "effect_payload": {"canonical_key": "title:tt0133093"},
+                "created_at": datetime(2026, 7, 29, 12, 2, 0),
+                "executed_at": None,
+            },
+        ]
+        update_effect_status_mock.side_effect = lambda effect_id, **kwargs: {"effect_id": effect_id, **kwargs}
+
+        result = runtime_postgres.apply_title_session_effects(
+            "session-1",
+            phase="finalize_only",
+            executed_at="2026-07-29T12:03:00",
+        )
+
+        self.assertEqual(result["applied_count"], 2)
+        record_watched_mock.assert_called_once()
+        archive_item_mock.assert_called_once_with("watchlist", "title:tt0133093", "2026-07-29T12:03:00")
+        self.assertEqual(update_effect_status_mock.call_count, 2)
+
+    @patch("filmy.runtime_postgres._title_session_store.update_effect_status")
+    @patch("filmy.runtime_postgres.upsert_user_list_item")
+    @patch("filmy.runtime_postgres._title_session_store.fetch_effect_queue")
+    def test_apply_title_session_effects_adds_group_items_to_target_list(
+        self,
+        fetch_effect_queue_mock,
+        upsert_item_mock,
+        update_effect_status_mock,
+    ) -> None:
+        fetch_effect_queue_mock.return_value = [
+            {
+                "effect_id": "effect-1",
+                "session_id": "session-1",
+                "action_id": "action-1",
+                "rule_id": "rule-1",
+                "tconst": "tt0133093",
+                "effect_type": "add_target_membership",
+                "phase": "immediate",
+                "source_list_id": "watchlist",
+                "target_list_id": "stahnout",
+                "effect_status": "pending",
+                "effect_order": 10,
+                "effect_payload": {
+                    "group_items": [
+                        {"canonical_key": "title:tt0133093", "media_type": "title", "tconst": "tt0133093", "source_ref": "one"},
+                        {"canonical_key": "title:tt0234215", "media_type": "title", "tconst": "tt0234215", "source_ref": "two"},
+                    ]
+                },
+                "created_at": datetime(2026, 7, 29, 12, 2, 0),
+                "executed_at": None,
+            }
+        ]
+        update_effect_status_mock.side_effect = lambda effect_id, **kwargs: {"effect_id": effect_id, **kwargs}
+
+        result = runtime_postgres.apply_title_session_effects(
+            "session-1",
+            phase="immediate",
+            executed_at="2026-07-29T12:03:00",
+        )
+
+        self.assertEqual(result["applied_count"], 1)
+        self.assertEqual(upsert_item_mock.call_count, 2)
+
+    @patch("filmy.runtime_postgres._title_session_store.update_session_status")
+    @patch("filmy.runtime_postgres._title_session_orchestrator.apply_effects")
+    def test_finalize_title_session_updates_session_state(self, apply_effects_mock, update_session_status_mock) -> None:
+        update_session_status_mock.side_effect = [
+            {"session_id": "session-1", "status": "finalizing"},
+            {"session_id": "session-1", "status": "finalized", "finalized_at": datetime(2026, 7, 29, 12, 5, 0)},
+        ]
+        apply_effects_mock.return_value = {"applied_count": 2, "failed_count": 0, "skipped_count": 0, "effects": []}
+
+        result = runtime_postgres.finalize_title_session(
+            "session-1",
+            finalized_at="2026-07-29T12:05:00",
+        )
+
+        self.assertEqual(result["session"]["status"], "finalized")
+        self.assertEqual(result["finalize"]["applied_count"], 2)
+        self.assertEqual(update_session_status_mock.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
+from starlette.responses import RedirectResponse
 
 from filmy.app_shared import background_supervisor
 from filmy.db import ASSETS_DIR, PEOPLE_ASSETS_DIR, ensure_database
@@ -29,6 +30,14 @@ async def lifespan(_: FastAPI):
 app = FastAPI(lifespan=lifespan)
 app.mount("/assets/tmdb", StaticFiles(directory=ASSETS_DIR.as_posix()), name="tmdb_assets")
 app.mount("/assets/people", StaticFiles(directory=PEOPLE_ASSETS_DIR.as_posix()), name="people_assets")
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon_redirect():
+    """Presmeruj bezny browser favicon dotaz na lokalni SVG asset."""
+
+    return RedirectResponse(url="/static/favicon.svg", status_code=307)
 
 app.include_router(web_router)
 app.include_router(ui_router)
