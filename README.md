@@ -28,6 +28,16 @@ Na Mac mini, ktery bude slouzit jako domaci server, se appka bude spoustet pres 
 Krátký postup instalace nebo aktualizace projektu na jiném počítači je v
 [`INSTALACE.md`](INSTALACE.md).
 
+## Navrh workflow a budouci manual
+
+Pro rozpracovany navrh vztahu mezi seznamy, akci `Watched`, `Move to`, `Copy to`
+a zachovani kontextu pri praci s jednim titulem slouzi:
+
+- [`LIST_ACTIONS_AND_TITLE_SESSION.md`](LIST_ACTIONS_AND_TITLE_SESSION.md)
+- [`MANUAL_TITLE_WORKFLOW_DRAFT.md`](MANUAL_TITLE_WORKFLOW_DRAFT.md)
+- [`AVAILABILITY_SIGNALS_DRAFT.md`](AVAILABILITY_SIGNALS_DRAFT.md)
+- [`CSFD_INTEGRATION_DRAFT.md`](CSFD_INTEGRATION_DRAFT.md)
+
 ## Poznamka k TMDB
 
 Appka se umi spustit i bez TMDB, ale funkce zavisle na TMDB potrebuji v `.env`:

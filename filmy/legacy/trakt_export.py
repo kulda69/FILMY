@@ -1,3 +1,5 @@
+"""Jednorazovy export osobnich Trakt seznamu pres device-flow OAuth."""
+
 from __future__ import annotations
 
 import json
@@ -22,14 +24,20 @@ load_dotenv(ENV_PATH)
 
 
 class TraktConfigError(RuntimeError):
+    """Chyba lokalni konfigurace Trakt exportu."""
+
     pass
 
 
 class TraktApiError(RuntimeError):
+    """Chyba vzdalenych Trakt API volani nebo autorizace."""
+
     pass
 
 
 def export_personal_lists() -> dict[str, Any]:
+    """Autorizuje Trakt a vyexportuje osobni seznamy do JSON souboru."""
+
     client_id, client_secret = _require_credentials()
     token_payload = _authorize_device_flow(client_id, client_secret)
     access_token = token_payload["access_token"]
@@ -86,6 +94,8 @@ def export_personal_lists() -> dict[str, Any]:
 
 
 def _authorize_device_flow(client_id: str, client_secret: str) -> dict[str, Any]:
+    """Provede device-flow OAuth autorizaci a vrati token payload."""
+
     device = _api_post("/oauth/device/code", {"client_id": client_id})
     verification_url = device["verification_url"]
     user_code = device["user_code"]
@@ -130,6 +140,8 @@ def _authorize_device_flow(client_id: str, client_secret: str) -> dict[str, Any]
 
 
 def _api_get(path: str, access_token: str | None = None, query: dict[str, str] | None = None) -> Any:
+    """Zavola Trakt GET endpoint a vrati rozparsovany JSON."""
+
     query_string = f"?{urlencode(query)}" if query else ""
     request = Request(
         f"{TRAKT_API_BASE}{path}{query_string}",
@@ -139,6 +151,8 @@ def _api_get(path: str, access_token: str | None = None, query: dict[str, str] |
 
 
 def _api_post(path: str, payload: dict[str, Any], access_token: str | None = None) -> Any:
+    """Zavola Trakt POST endpoint a vrati rozparsovany JSON."""
+
     request = Request(
         f"{TRAKT_API_BASE}{path}",
         data=json.dumps(payload).encode("utf-8"),
@@ -149,6 +163,8 @@ def _api_post(path: str, payload: dict[str, Any], access_token: str | None = Non
 
 
 def _headers(access_token: str | None = None) -> dict[str, str]:
+    """Slozi HTTP hlavicky pro Trakt API."""
+
     client_id = os.getenv("TRAKT_CLIENT_ID")
     if not client_id:
         raise TraktConfigError("Chybí TRAKT_CLIENT_ID v .env.")
@@ -166,6 +182,8 @@ def _headers(access_token: str | None = None) -> dict[str, str]:
 
 
 def _read_json(request: Request) -> Any:
+    """Provede HTTP request a vrati JSON nebo vyhodi TraktApiError."""
+
     try:
         with urlopen(request, timeout=30) as response:
             return json.loads(response.read().decode("utf-8"))
@@ -177,6 +195,8 @@ def _read_json(request: Request) -> Any:
 
 
 def _require_credentials() -> tuple[str, str]:
+    """Nacte a zvaliduje Trakt client credentials z `.env`."""
+
     client_id = os.getenv("TRAKT_CLIENT_ID")
     client_secret = os.getenv("TRAKT_CLIENT_SECRET")
     if not client_id or not client_secret:
@@ -193,22 +213,30 @@ def _require_credentials() -> tuple[str, str]:
 
 
 def _build_activate_url(verification_url: str, user_code: str) -> str | None:
+    """Postavi rychly aktivacni odkaz pro Trakt device flow."""
+
     if verification_url.rstrip("/") == "https://trakt.tv/activate":
         return f"{verification_url.rstrip('/')}/{user_code}"
     return None
 
 
 def _safe_slug(value: str) -> str:
+    """Prevede Trakt slug na filesystem-safe variantu."""
+
     cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in value.lower())
     cleaned = cleaned.strip("-")
     return cleaned or "list"
 
 
 def _now_utc() -> datetime:
+    """Vrati aktualni UTC cas bez mikrosekund."""
+
     return datetime.now(UTC).replace(microsecond=0)
 
 
 def main() -> int:
+    """CLI vstup pro lokalni Trakt export."""
+
     try:
         manifest = export_personal_lists()
     except (TraktApiError, TraktConfigError) as exc:

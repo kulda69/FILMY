@@ -1,3 +1,5 @@
+"""CLI refresh zastaralych title presentation cache zaznamu."""
+
 from __future__ import annotations
 
 import json
@@ -8,6 +10,7 @@ from filmy.paths import ASSETS_DIR
 
 
 def _iter_stale_title_tconsts() -> list[str]:
+    """Najdi title detail cache soubory, ktere vypadaji zastarale nebo rozbite."""
     items: list[str] = []
     for path in ASSETS_DIR.glob("*/detail.json"):
         try:
@@ -34,6 +37,7 @@ def _iter_stale_title_tconsts() -> list[str]:
 
 
 def main() -> int:
+    """Obnov zastarale title detail cache soubory z presentation vrstvy."""
     targets = _iter_stale_title_tconsts()
     print(json.dumps({"phase": "start", "targets": len(targets)}, ensure_ascii=False), flush=True)
 

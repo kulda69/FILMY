@@ -1,3 +1,5 @@
+"""CLI wrapper pro periodicky IMDb refresh workflow."""
+
 from __future__ import annotations
 
 import atexit
@@ -28,21 +30,27 @@ IMDB_DATASET_FILES = (
     "title.principals.tsv.gz",
     "name.basics.tsv.gz",
 )
+
+
 def _now_ts() -> float:
+    """Vrat aktualni cas jako unix timestamp."""
     import time
 
     return time.time()
 
 
 def _now_iso() -> str:
+    """Vrat aktualni UTC cas v ISO formatu bez mikrosekund."""
     return datetime.now(UTC).replace(microsecond=0).isoformat()
 
 
 def _emit(payload: dict[str, object]) -> None:
+    """Vypis jeden strojove cteny log zaznam."""
     print(json.dumps(payload, ensure_ascii=False), flush=True)
 
 
 def _write_status(**updates: object) -> None:
+    """Uloz prubezny stav refresh behu do status JSONu."""
     current: dict[str, object] = {}
     if IMDB_REFRESH_STATUS_PATH.exists():
         try:
@@ -57,12 +65,15 @@ def _write_status(**updates: object) -> None:
 
 
 def _set_error(message: str) -> None:
+    """Zapis chybovy stav a soucasne ho emituj do stdout logu."""
     _write_status(state="error", stage="error", message=message, error=message, finished_at=_now_iso())
     _emit({"phase": "error", "message": message})
 
 
 def _install_lifecycle_logging() -> None:
+    """Nastav signal handlery a uklid PID souboru pri ukonceni."""
     def handle_signal(signum: int, _: object) -> None:
+        """Preved procesni signal na citelny chybovy stav refresh behu."""
         name = signal.Signals(signum).name
         _set_error(f"IMDb refresh prerusen signalem {name}.")
         raise SystemExit(128 + signum)
@@ -74,16 +85,19 @@ def _install_lifecycle_logging() -> None:
 
 
 def _download_file(url: str, destination: Path) -> None:
+    """Stahni jeden IMDb archiv do pracovniho adresare."""
     with urlopen(url, timeout=120) as response, destination.open("wb") as handle:
         shutil.copyfileobj(response, handle, length=1024 * 1024)
 
 
 def _extract_gzip(source: Path, destination: Path) -> None:
+    """Rozbal jeden `.gz` archiv do TSV souboru."""
     with gzip.open(source, "rb") as compressed, destination.open("wb") as extracted:
         shutil.copyfileobj(compressed, extracted, length=1024 * 1024)
 
 
 def _validate_extracted_files(extracted_dir: Path) -> None:
+    """Over, ze vsechny povinne IMDb TSV soubory existuji a nejsou prazdne."""
     missing: list[str] = []
     empty: list[str] = []
     for gz_name in IMDB_DATASET_FILES:
@@ -104,6 +118,7 @@ def _validate_extracted_files(extracted_dir: Path) -> None:
 
 
 def _swap_imdb_directory(extracted_dir: Path) -> Path | None:
+    """Prohod aktivni IMDb adresar za nove rozbalenou verzi a vrat rollback adresar."""
     backup_dir: Path | None = None
     if IMDB_DIR.exists():
         backup_dir = IMDB_REFRESH_DIR / f"rollback-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}"
@@ -117,6 +132,7 @@ def _swap_imdb_directory(extracted_dir: Path) -> Path | None:
 
 
 def main() -> int:
+    """Proved cely refresh IMDb dumpu vcetne obnovy PostgreSQL katalogu."""
     _install_lifecycle_logging()
     started_at = _now_ts()
     run_id = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
@@ -190,6 +206,7 @@ def main() -> int:
             _write_status(stage="refresh_catalog", message="Obnovuji katalog v PostgreSQL.", current_file=None)
 
             def _progress(**payload: object) -> None:
+                """Propis prubezny stav rebuild kroku do statusu i stdout logu."""
                 status_payload = {"stage": "refresh_catalog", **payload}
                 _write_status(**status_payload)
                 _emit({"phase": "refresh_catalog_progress", **payload})

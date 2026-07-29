@@ -1,3 +1,5 @@
+"""Read-only integrace Plex API pro import a obohaceni lokalni knihovny."""
+
 from __future__ import annotations
 
 import json
@@ -22,6 +24,8 @@ class PlexApiError(RuntimeError):
 
 @dataclass(frozen=True)
 class PlexResource:
+    """Jedno Plex zarizeni nebo server vratene z `plex.tv/api/resources`."""
+
     name: str
     product: str
     provides: str
@@ -284,6 +288,8 @@ def build_import_probe(
 
 
 def _server_xml_get(resource: PlexResource, path: str) -> ET.Element:
+    """Proved XML request proti konkretni Plex server connection."""
+
     local_connection = next((connection for connection in resource.connections if connection.get("local") == "1"), None)
     connection = local_connection or (resource.connections[0] if resource.connections else None)
     if connection is None:
@@ -295,6 +301,8 @@ def _server_xml_get(resource: PlexResource, path: str) -> ET.Element:
 
 
 def _xml_get(url: str) -> ET.Element:
+    """Stahni XML dokument a vrat jeho korenovy element."""
+
     request = Request(url, headers={"Accept": "application/xml"})
     ssl_context = ssl.create_default_context()
     ssl_context.check_hostname = False
@@ -315,6 +323,8 @@ def _debug_dump_json(data: dict[str, Any]) -> str:
 
 
 def _extract_external_ids(guids: list[str]) -> dict[str, str | None]:
+    """Preved Plex GUID pole na kompaktni mapu externich identifikatoru."""
+
     ids: dict[str, str | None] = {"imdb": None, "tmdb": None, "tvdb": None}
     for guid in guids:
         if guid.startswith("imdb://"):

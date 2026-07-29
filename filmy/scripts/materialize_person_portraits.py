@@ -1,3 +1,5 @@
+"""CLI materializace person portrait assetu."""
+
 from __future__ import annotations
 
 import argparse
@@ -10,13 +12,16 @@ from filmy.integrations.tmdb import fetch_person_portrait, get_person_portrait_s
 
 
 def _emit(payload: dict[str, object]) -> None:
+    """Vypis jeden JSON zaznam o stavu stahovani portretu."""
     print(json.dumps(payload, ensure_ascii=False), flush=True)
 
 
 def _start_heartbeat_thread(state: dict[str, object], interval_seconds: float = 10.0) -> tuple[threading.Event, threading.Thread]:
+    """Spust heartbeat vlakno pro delsi beh stahovani portretu."""
     stop_event = threading.Event()
 
     def run() -> None:
+        """Pravidelne emituj heartbeat s poctem fetchu, chyb a missu."""
         while not stop_event.wait(interval_seconds):
             _emit(
                 {
@@ -36,6 +41,7 @@ def _start_heartbeat_thread(state: dict[str, object], interval_seconds: float = 
 
 
 def get_person_portrait_targets(limit: int | None = None, include_ready: bool = False) -> list[dict[str, object]]:
+    """Vrat relevantni osoby, kterym chybi portret nebo se ma prepsat."""
     seed_limit = None if limit is None else max(limit * 3, limit)
     people = _get_relevant_people_candidates(limit=seed_limit)
     items: list[dict[str, object]] = []
@@ -51,6 +57,7 @@ def get_person_portrait_targets(limit: int | None = None, include_ready: bool = 
 
 
 def get_person_portrait_pending_count() -> int:
+    """Spocitej, kolika relevantnim osobam jeste chybi portret."""
     people = _get_relevant_people_candidates(limit=None)
     pending = 0
     for person in people:
@@ -62,6 +69,7 @@ def get_person_portrait_pending_count() -> int:
 
 
 def materialize_person_portraits(limit: int | None = None, rewrite: bool = False) -> dict[str, object]:
+    """Stahni nebo obnov portrety relevantnich osob z TMDB."""
     targets = get_person_portrait_targets(limit=limit, include_ready=rewrite)
     start = perf_counter()
     fetched = 0
@@ -160,6 +168,7 @@ def materialize_person_portraits(limit: int | None = None, rewrite: bool = False
 
 
 def main() -> int:
+    """CLI vstup pro davkovou materializaci portretu osob."""
     parser = argparse.ArgumentParser(description="Materialize person portrait files.")
     parser.add_argument("--limit", type=int, default=None, help="Limit the number of people to process.")
     parser.add_argument("--rewrite", action="store_true", help="Rewrite portrait state even when it already exists.")

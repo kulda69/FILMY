@@ -1,5 +1,15 @@
+"""Lokalni knihovna, seznamy a watched/read model helpery."""
+
 from __future__ import annotations
-'Local-library DB operations extracted from the `filmy.db` facade.\n\nThe goal is to separate mutations and list-oriented read models from the very\nlarge legacy module while preserving the existing public API. Runtime imports\nback to `filmy.db` are deliberate here: they let us reuse stable internal\nhelpers first and only later decide which helpers deserve their own dedicated\nmodule.\n'
+
+"""Local-library DB operations extracted from the `filmy.db` facade.
+
+The goal is to separate mutations and list-oriented read models from the very
+large legacy module while preserving the existing public API. Runtime imports
+back to `filmy.db` are deliberate here: they let us reuse stable internal
+helpers first and only later decide which helpers deserve their own dedicated
+module.
+"""
 import importlib
 import threading
 import time
@@ -9,9 +19,12 @@ from typing import Any
 from filmy.runtime_postgres import archive_user_list_group, archive_user_list_item, clear_ai_suggestions_list_items as clear_ai_suggestions_list_items_postgres, create_user_list as create_user_list_postgres, delete_user_list as delete_user_list_postgres, delete_title_role_signals as delete_title_role_signals_postgres, fetch_all_watch_events, fetch_existing_watch_tconsts, fetch_active_user_list_items, fetch_continue_watching_catalog_rows, fetch_episode_series_map, fetch_hot_watchlist_page_rows, fetch_person_catalog_row, fetch_title_role_signals as fetch_title_role_signals_postgres, fetch_library_status_projection, fetch_library_status_snapshot, fetch_person_affinity_rating, fetch_series_episode_rows, fetch_title_card_rows, fetch_user_list, fetch_user_list_page_rows, fetch_user_list_item_counts, fetch_user_lists, delete_user_rating as delete_user_rating_postgres, fetch_latest_ratings_for_tconsts, insert_watch_events as insert_watch_events_postgres, list_in_progress_content_states, record_watched as record_watched_postgres, slug_exists, upsert_user_rating as upsert_user_rating_postgres, upsert_user_list_item, upsert_person_affinity, upsert_title_role_signal, update_content_state as update_content_state_postgres, update_user_list_description as update_user_list_description_postgres
 
 def _db():
+    """Vrat pozde nacitany modul `filmy.db` kvuli stabilni facade vrstve."""
     return importlib.import_module('filmy.db')
 
+
 def _invalidate_title_cache(db: Any, *tconsts: str | None) -> None:
+    """Invaliduj title presentation cache pro dotcene tituly nebo globalne."""
     seen: set[str] = set()
     for tconst in tconsts:
         cleaned = (tconst or '').strip()
@@ -37,90 +50,137 @@ TITLE_ROLE_SIGNAL_TYPE_VALUES = frozenset((option['value'] for option in TITLE_R
 TITLE_ROLE_SIGNAL_POLARITY_OPTIONS: tuple[dict[str, str], ...] = ({'value': 'positive', 'label': 'Pozitivní'}, {'value': 'negative', 'label': 'Negativní'}, {'value': 'mixed', 'label': 'Smíšené'})
 TITLE_ROLE_SIGNAL_POLARITY_VALUES = frozenset((option['value'] for option in TITLE_ROLE_SIGNAL_POLARITY_OPTIONS))
 
+
+class LocalLibraryReadModelSupport:
+    """Drzi sdilenou logiku pro cache a listove read modely lokalni knihovny."""
+
+    def get_cached_status(self) -> dict[str, Any] | None:
+        """Vrat cached snapshot lokalni knihovny, pokud jeste neexpirval."""
+        with _local_library_status_cache_lock:
+            if _local_library_status_cache is None or time.time() - _local_library_status_cached_at > _LOCAL_LIBRARY_STATUS_CACHE_TTL_SECONDS:
+                return None
+            return deepcopy(_local_library_status_cache)
+
+    def store_cached_status(self, value: dict[str, Any]) -> None:
+        """Uloz novy snapshot lokalni knihovny do kratke in-memory cache."""
+        global _local_library_status_cache, _local_library_status_cached_at
+        with _local_library_status_cache_lock:
+            _local_library_status_cache = deepcopy(value)
+            _local_library_status_cached_at = time.time()
+
+    def order_group_items_for_list(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Serad polozky skupiny pro stabilni zobrazeni v UI."""
+        ordered = list(items)
+        ordered.sort(key=lambda item: item.get('title') or item.get('parent_title') or item.get('tconst') or '')
+        ordered.sort(key=lambda item: item.get('added_at') or datetime.min, reverse=True)
+        ordered.sort(key=lambda item: (item.get('rank') is None, item.get('rank') if item.get('rank') is not None else 0))
+        return ordered
+
+    def load_episode_series_map(self, conn: Any, tconsts: list[str]) -> dict[str, str]:
+        """Nacti mapovani epizoda -> serial pro zadane tituly."""
+        if not tconsts:
+            return {}
+        return fetch_episode_series_map(tconsts)
+
+    def load_watched_display_tconsts(self, conn: Any) -> set[str]:
+        """Vrat mnozinu display tconstu, ktere jsou uz povazovane za zhlednute."""
+        watched_tconsts = sorted({str(item['tconst']) for item in fetch_all_watch_events() if item.get('tconst')})
+        if not watched_tconsts:
+            return set()
+        episode_series_map = self.load_episode_series_map(conn, watched_tconsts)
+        return {episode_series_map.get(tconst, tconst) for tconst in watched_tconsts}
+
+    def group_postgres_list_items(self, conn: Any, *, list_id: str, exclude_watched: bool = False) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+        """Seskup aktivni PG list polozky pod jeden display titul."""
+        list_row = fetch_user_list(list_id)
+        if list_row is None:
+            return (None, [])
+        active_items = [item for item in fetch_active_user_list_items() if item['list_id'] == list_id]
+        if not active_items:
+            return (list_row, [])
+        tconsts = [str(item['tconst']) for item in active_items if item.get('tconst')]
+        episode_series_map = self.load_episode_series_map(conn, tconsts)
+        watched_display_tconsts = self.load_watched_display_tconsts(conn) if exclude_watched else set()
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for item in active_items:
+            display_tconst = (episode_series_map.get(str(item['tconst'])) if item.get('tconst') else None) or item.get('tconst') or item.get('parent_tconst')
+            if not display_tconst:
+                continue
+            if exclude_watched and display_tconst in watched_display_tconsts:
+                continue
+            item_copy = dict(item)
+            item_copy['display_tconst'] = str(display_tconst)
+            grouped.setdefault(str(display_tconst), []).append(item_copy)
+        groups: list[dict[str, Any]] = []
+        for display_tconst, items in grouped.items():
+            ordered_items = self.order_group_items_for_list(items)
+            representative = ordered_items[0]
+            groups.append({'display_tconst': display_tconst, 'media_type': representative.get('media_type'), 'title': representative.get('title'), 'parent_title': representative.get('parent_title'), 'season_number': None, 'episode_number': None, 'rank': representative.get('rank'), 'added_at': representative.get('added_at'), 'notes': representative.get('notes'), 'list_name': list_row['name'], 'list_kind': list_row['list_kind']})
+        return (list_row, self.order_group_items_for_list(groups))
+
+    def load_group_cards(self, conn: Any, groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Dopln k listovym skupinam lehka kartova metadata titulu."""
+        if not groups:
+            return []
+        display_tconsts = [str(group['display_tconst']) for group in groups]
+        rows = fetch_title_card_rows(display_tconsts)
+        cards_by_tconst = {str(row[0]): {'title_type': row[1], 'year': row[2], 'resolved_title': row[3], 'poster_relative_path': row[4], 'poster_local_path': row[5]} for row in rows if row[4] or row[5]}
+        return [group | cards_by_tconst[group['display_tconst']] for group in groups if group['display_tconst'] in cards_by_tconst]
+
+    def get_group_items_for_list(self, conn: Any, *, list_id: str, display_tconst: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+        """Vrat konkretni aktivni polozky, ktere patri do jedne display skupiny."""
+        list_row = fetch_user_list(list_id)
+        if list_row is None:
+            return (None, [])
+        active_items = [item for item in fetch_active_user_list_items() if item['list_id'] == list_id]
+        tconsts = [str(item['tconst']) for item in active_items if item.get('tconst')]
+        episode_series_map = self.load_episode_series_map(conn, tconsts)
+        matching_items: list[dict[str, Any]] = []
+        for item in active_items:
+            item_display_tconst = (episode_series_map.get(str(item['tconst'])) if item.get('tconst') else None) or item.get('tconst') or item.get('parent_tconst')
+            if str(item_display_tconst) != str(display_tconst):
+                continue
+            matching_items.append(dict(item))
+        return (list_row, self.order_group_items_for_list(matching_items))
+
+
+_READ_MODELS = LocalLibraryReadModelSupport()
+
+
 def _get_cached_local_library_status() -> dict[str, Any] | None:
-    with _local_library_status_cache_lock:
-        if _local_library_status_cache is None or time.time() - _local_library_status_cached_at > _LOCAL_LIBRARY_STATUS_CACHE_TTL_SECONDS:
-            return None
-        return deepcopy(_local_library_status_cache)
+    """Kompatibilni wrapper pro kratkou cache lokalniho library snapshotu."""
+    return _READ_MODELS.get_cached_status()
 
 def _store_cached_local_library_status(value: dict[str, Any]) -> None:
-    global _local_library_status_cache, _local_library_status_cached_at
-    with _local_library_status_cache_lock:
-        _local_library_status_cache = deepcopy(value)
-        _local_library_status_cached_at = time.time()
+    """Kompatibilni wrapper pro ulozeni library snapshotu do cache."""
+    _READ_MODELS.store_cached_status(value)
 
 def _order_group_items_for_list(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    ordered = list(items)
-    ordered.sort(key=lambda item: item.get('title') or item.get('parent_title') or item.get('tconst') or '')
-    ordered.sort(key=lambda item: item.get('added_at') or datetime.min, reverse=True)
-    ordered.sort(key=lambda item: (item.get('rank') is None, item.get('rank') if item.get('rank') is not None else 0))
-    return ordered
+    """Kompatibilni wrapper pro razeni polozek jedne listove skupiny."""
+    return _READ_MODELS.order_group_items_for_list(items)
 
 def _load_episode_series_map(conn, tconsts: list[str]) -> dict[str, str]:
-    if not tconsts:
-        return {}
-    db = _db()
-    return fetch_episode_series_map(tconsts)
+    """Kompatibilni wrapper pro mapovani epizod na serialove display ID."""
+    return _READ_MODELS.load_episode_series_map(conn, tconsts)
 
 def _load_watched_display_tconsts(conn) -> set[str]:
-    watched_tconsts = sorted({str(item['tconst']) for item in fetch_all_watch_events() if item.get('tconst')})
-    if not watched_tconsts:
-        return set()
-    episode_series_map = _load_episode_series_map(conn, watched_tconsts)
-    return {episode_series_map.get(tconst, tconst) for tconst in watched_tconsts}
+    """Kompatibilni wrapper pro mnozinu jiz zhlednutych display titulu."""
+    return _READ_MODELS.load_watched_display_tconsts(conn)
 
 def _group_postgres_list_items(conn, *, list_id: str, exclude_watched: bool=False) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
-    list_row = fetch_user_list(list_id)
-    if list_row is None:
-        return (None, [])
-    active_items = [item for item in fetch_active_user_list_items() if item['list_id'] == list_id]
-    if not active_items:
-        return (list_row, [])
-    tconsts = [str(item['tconst']) for item in active_items if item.get('tconst')]
-    episode_series_map = _load_episode_series_map(conn, tconsts)
-    watched_display_tconsts = _load_watched_display_tconsts(conn) if exclude_watched else set()
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    for item in active_items:
-        display_tconst = (episode_series_map.get(str(item['tconst'])) if item.get('tconst') else None) or item.get('tconst') or item.get('parent_tconst')
-        if not display_tconst:
-            continue
-        if exclude_watched and display_tconst in watched_display_tconsts:
-            continue
-        item_copy = dict(item)
-        item_copy['display_tconst'] = str(display_tconst)
-        grouped.setdefault(str(display_tconst), []).append(item_copy)
-    groups: list[dict[str, Any]] = []
-    for display_tconst, items in grouped.items():
-        ordered_items = _order_group_items_for_list(items)
-        representative = ordered_items[0]
-        groups.append({'display_tconst': display_tconst, 'media_type': representative.get('media_type'), 'title': representative.get('title'), 'parent_title': representative.get('parent_title'), 'season_number': None, 'episode_number': None, 'rank': representative.get('rank'), 'added_at': representative.get('added_at'), 'notes': representative.get('notes'), 'list_name': list_row['name'], 'list_kind': list_row['list_kind']})
-    return (list_row, _order_group_items_for_list(groups))
+    """Kompatibilni wrapper pro seskupeni PG list polozek pod display titul."""
+    return _READ_MODELS.group_postgres_list_items(conn, list_id=list_id, exclude_watched=exclude_watched)
 
 def _load_group_cards(conn, groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if not groups:
-        return []
-    db = _db()
-    display_tconsts = [str(group['display_tconst']) for group in groups]
-    rows = fetch_title_card_rows(display_tconsts)
-    cards_by_tconst = {str(row[0]): {'title_type': row[1], 'year': row[2], 'resolved_title': row[3], 'poster_relative_path': row[4], 'poster_local_path': row[5]} for row in rows if row[4] or row[5]}
-    return [group | cards_by_tconst[group['display_tconst']] for group in groups if group['display_tconst'] in cards_by_tconst]
+    """Kompatibilni wrapper pro doplneni karet ke skupinam listu."""
+    return _READ_MODELS.load_group_cards(conn, groups)
 
 def _get_postgres_group_items_for_list(conn, *, list_id: str, display_tconst: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
-    list_row = fetch_user_list(list_id)
-    if list_row is None:
-        return (None, [])
-    active_items = [item for item in fetch_active_user_list_items() if item['list_id'] == list_id]
-    tconsts = [str(item['tconst']) for item in active_items if item.get('tconst')]
-    episode_series_map = _load_episode_series_map(conn, tconsts)
-    matching_items: list[dict[str, Any]] = []
-    for item in active_items:
-        item_display_tconst = (episode_series_map.get(str(item['tconst'])) if item.get('tconst') else None) or item.get('tconst') or item.get('parent_tconst')
-        if str(item_display_tconst) != str(display_tconst):
-            continue
-        matching_items.append(dict(item))
-    return (list_row, _order_group_items_for_list(matching_items))
+    """Kompatibilni wrapper pro nacteni konkretni display skupiny ze seznamu."""
+    return _READ_MODELS.get_group_items_for_list(conn, list_id=list_id, display_tconst=display_tconst)
 
 def update_content_state(tconst: str, interest_state: str) -> dict[str, Any]:
+    """Zmen interest/content state titulu a invaliduj jeho presentation cache."""
     db = _db()
     now = db._now_iso()
     result = update_content_state_postgres(tconst, interest_state, now)
@@ -128,6 +188,7 @@ def update_content_state(tconst: str, interest_state: str) -> dict[str, Any]:
     return result
 
 def set_watchlist_state(tconst: str, *, in_watchlist: bool, notes: str | None=None) -> dict[str, Any]:
+    """Pridej nebo odeber titul z hlavniho watchlistu."""
     db = _db()
     detail = db.get_content_detail(tconst)
     if detail is None:
@@ -143,6 +204,7 @@ def set_watchlist_state(tconst: str, *, in_watchlist: bool, notes: str | None=No
     return {'tconst': tconst, 'in_watchlist': in_watchlist, 'updated_at': now, 'library': db._get_library_summary_for_tconst(tconst)}
 
 def add_title_to_user_list(tconst: str, list_id: str, *, notes: str | None=None) -> dict[str, Any]:
+    """Pridej titul do konkretniho uzivatelskeho seznamu."""
     db = _db()
     detail = db.get_content_detail(tconst)
     if detail is None:
@@ -158,6 +220,7 @@ def add_title_to_user_list(tconst: str, list_id: str, *, notes: str | None=None)
     return {'tconst': tconst, 'list_id': list_id, 'updated_at': now, 'library': db._get_library_summary_for_tconst(tconst)}
 
 def set_user_rating(tconst: str, rating: int, *, liked_notes: str | None=None, disliked_notes: str | None=None) -> dict[str, Any]:
+    """Uloz lokalni rating titulu vcetne volitelnych slovnich poznamek."""
     db = _db()
     if rating < 1 or rating > 10:
         raise ValueError('Rating musí být mezi 1 a 10.')
@@ -175,6 +238,7 @@ def set_user_rating(tconst: str, rating: int, *, liked_notes: str | None=None, d
     return {'tconst': tconst, 'rating': rating, 'rated_at': now, 'library': db._get_library_summary_for_tconst(tconst)}
 
 def set_person_affinity_rating(nconst: str, rating: int) -> dict[str, Any]:
+    """Uloz lokalni oblibenost osoby v rozsahu 0..10."""
     db = _db()
     if rating < 0 or rating > 10:
         raise ValueError('Rating musí být mezi 0 a 10.')
@@ -266,6 +330,7 @@ def replace_title_role_signals(tconst: str, *, nconst: str | None=None, characte
     return {'tconst': cleaned_tconst, 'nconst': cleaned_nconst, 'character_name': cleaned_character_name, 'signal_types': list(cleaned_types), 'saved': saved, 'deleted_count': deleted_count}
 
 def delete_title_role_signals(tconst: str, *, nconst: str | None=None, character_name: str | None=None) -> dict[str, Any]:
+    """Smaz vsechny signaly role/postavy pro vybrany titul a identitu."""
     db = _db()
     cleaned_tconst = (tconst or '').strip()
     cleaned_nconst = (nconst or '').strip() or None
@@ -279,12 +344,14 @@ def delete_title_role_signals(tconst: str, *, nconst: str | None=None, character
     return {'tconst': cleaned_tconst, 'nconst': cleaned_nconst, 'character_name': cleaned_character_name, 'deleted_count': deleted_count}
 
 def get_title_role_signals(tconst: str) -> list[dict[str, Any]]:
+    """Vrat vsechny ulozene signaly role/postavy pro jeden titul."""
     cleaned_tconst = (tconst or '').strip()
     if not cleaned_tconst:
         return []
     return fetch_title_role_signals_postgres(cleaned_tconst)
 
 def clear_user_rating(tconst: str) -> dict[str, Any]:
+    """Smaz lokalni rating titulu a vrat aktualizovany library snapshot."""
     db = _db()
     detail = db.get_content_detail(tconst)
     if detail is None:
@@ -297,6 +364,7 @@ def clear_user_rating(tconst: str) -> dict[str, Any]:
     return {'tconst': tconst, 'rating': None, 'updated_at': now, 'library': db._get_library_summary_for_tconst(tconst)}
 
 def record_watch_event(tconst: str, *, watched_on: str | None=None, notes: str | None=None, add_to_watched_list: bool=False, archive_from_list_id: str | None=None, archive_display_tconst: str | None=None) -> dict[str, Any]:
+    """Zapis jeden watch event a pripadne archivuj souvisejici list polozku."""
     db = _db()
     detail = db.get_content_detail(tconst)
     if detail is None:
@@ -323,6 +391,7 @@ def record_watch_event(tconst: str, *, watched_on: str | None=None, notes: str |
     return {'id': action_result['event_id'], 'tconst': tconst, 'event_scope': event_scope, 'watched_on': effective_watched_on, 'created_at': now, 'archived_items': action_result['archived_items'], 'library': db._get_library_summary_for_tconst(tconst)}
 
 def record_watch_events_through_episode(episode_tconst: str, *, watched_on: str | None=None, notes: str | None=None) -> dict[str, Any]:
+    """Oznac jako zhlednute vsechny epizody serialu az po zadanou epizodu."""
     db = _db()
     detail = db.get_content_detail(episode_tconst)
     if detail is None or detail.get('kind') != 'episode':
@@ -348,6 +417,7 @@ def record_watch_events_through_episode(episode_tconst: str, *, watched_on: str 
     return {'series_tconst': series_tconst, 'target_episode_tconst': episode_tconst, 'watched_on': effective_watched_on, 'watched_count': len(watched_ids), 'watched_tconsts': watched_ids, 'library': db._get_library_summary_for_tconst(series_tconst)}
 
 def delete_group_from_user_list(list_id: str, display_tconst: str) -> dict[str, Any]:
+    """Archivuj celou display skupinu ze zvoleneho seznamu."""
     db = _db()
     now = db._now_iso()
     result = archive_user_list_group(list_id=list_id, display_tconst=display_tconst, now=now)
@@ -360,6 +430,7 @@ def delete_group_from_user_list(list_id: str, display_tconst: str) -> dict[str, 
     return {'list_id': list_id, 'display_tconst': display_tconst, 'updated_at': now, 'affected_rows': affected_rows}
 
 def move_group_between_user_lists(source_list_id: str, target_list_id: str, display_tconst: str) -> dict[str, Any]:
+    """Presun celou display skupinu z jednoho seznamu do druheho."""
     db = _db()
     if source_list_id == target_list_id:
         raise ValueError('Zdrojový a cílový seznam jsou stejné.')
@@ -380,6 +451,7 @@ def move_group_between_user_lists(source_list_id: str, target_list_id: str, disp
     return {'source_list_id': source_list_id, 'target_list_id': target_list_id, 'display_tconst': display_tconst, 'moved_rows': len(items), 'updated_at': now}
 
 def copy_group_to_user_list(source_list_id: str, target_list_id: str, display_tconst: str) -> dict[str, Any]:
+    """Zkopiruj celou display skupinu z jednoho seznamu do druheho."""
     db = _db()
     if source_list_id == target_list_id:
         raise ValueError('Zdrojový a cílový seznam jsou stejné.')
@@ -398,6 +470,7 @@ def copy_group_to_user_list(source_list_id: str, target_list_id: str, display_tc
     return {'source_list_id': source_list_id, 'target_list_id': target_list_id, 'display_tconst': display_tconst, 'copied_rows': len(items), 'updated_at': now}
 
 def create_user_list(name: str, description: str | None=None) -> dict[str, Any]:
+    """Vytvor novy uzivatelsky seznam s uniknim slugem."""
     db = _db()
     cleaned_name = (name or '').strip()
     if not cleaned_name:
@@ -414,6 +487,7 @@ def create_user_list(name: str, description: str | None=None) -> dict[str, Any]:
     return create_user_list_postgres(list_id=list_id, slug=slug, name=cleaned_name, description=cleaned_description, now=now)
 
 def update_user_list_description(list_id: str, description: str | None=None, ai_input_role: str | None=None) -> dict[str, Any]:
+    """Uprav popis seznamu a jeho volitelnou AI input roli."""
     db = _db()
     cleaned_description = (description or '').strip() or None
     cleaned_ai_input_role = (ai_input_role or '').strip() or None
@@ -431,6 +505,7 @@ def update_user_list_description(list_id: str, description: str | None=None, ai_
     return updated
 
 def delete_user_list(list_id: str) -> dict[str, Any]:
+    """Smaz vlastni uzivatelsky seznam."""
     row = fetch_user_list(list_id)
     if row is None:
         raise ValueError('Seznam nebyl nalezen.')
@@ -444,6 +519,7 @@ def delete_user_list(list_id: str) -> dict[str, Any]:
     return deleted
 
 def clear_ai_suggestions_list_items() -> dict[str, Any]:
+    """Vymaz vsechny aktivni polozky ze seznamu `AI navrhy`."""
     row = fetch_user_list('ai-suggestions')
     if row is None:
         raise ValueError('Seznam AI návrhy nebyl nalezen.')
@@ -458,28 +534,32 @@ def clear_ai_suggestions_list_items() -> dict[str, Any]:
     return cleared
 
 def get_recently_watched_page(limit: int=50, offset: int=0) -> dict[str, Any]:
+    """Vrat strankovany systemovy pohled `Recently Watched`."""
     db = _db()
     ui_config = db.get_ui_config()
     page = db._fetch_watch_view_page(limit, offset, cutoff_days=ui_config.recently_watched_days)
     return {'list': {'id': db.RECENTLY_WATCHED_VIEW_ID, 'slug': 'recently-watched', 'name': 'Recently Watched', 'list_kind': 'view', 'item_type': 'view', 'view_kind': 'recently_watched'}, 'total': page['total'], 'items': page['items'], 'limit': page['limit'], 'offset': page['offset']}
 
-def get_hot_watchlist_page(limit: int=50, offset: int=0) -> dict[str, Any]:
+def get_hot_watchlist_page(limit: int=50, offset: int=0, available_in_cz: bool=False) -> dict[str, Any]:
+    """Vrat strankovany systemovy pohled `Hot Watchlist`."""
     db = _db()
     ui_config = db.get_ui_config()
     hot_limit = ui_config.hot_watchlist_limit
-    total, rows = fetch_hot_watchlist_page_rows(hot_limit=hot_limit, limit=limit, offset=offset)
+    total, rows = fetch_hot_watchlist_page_rows(hot_limit=hot_limit, limit=limit, offset=offset, available_in_cz=available_in_cz)
     ratings_by_tconst = fetch_latest_ratings_for_tconsts([str(row[0]) for row in rows])
     items: list[dict[str, Any]] = []
     for row in rows:
         items.append({'tconst': row[0], 'media_type': row[1], 'title': row[15], 'parent_title': row[3], 'season_number': row[4], 'episode_number': row[5], 'rank': row[6], 'added_at': row[7], 'notes': row[8], 'list_name': row[9], 'list_kind': row[10], 'poster_url': db._poster_url_from_local_path(row[13] or row[14]), 'title_type': row[11], 'year': row[12], 'end_year': None, 'runtime_minutes': None, 'series_title': row[15], 'user_rating': ratings_by_tconst.get(str(row[0]), {}).get('rating')})
-    return {'list': {'id': db.HOT_WATCHLIST_VIEW_ID, 'slug': 'hot-watchlist', 'name': 'Hot Watchlist', 'list_kind': 'view', 'item_type': 'view', 'view_kind': 'hot_watchlist'}, 'total': total, 'items': items, 'limit': limit, 'offset': offset}
+    return {'list': {'id': db.HOT_WATCHLIST_VIEW_ID, 'slug': 'hot-watchlist', 'name': 'Hot Watchlist', 'list_kind': 'view', 'item_type': 'view', 'view_kind': 'hot_watchlist'}, 'total': total, 'items': items, 'limit': limit, 'offset': offset, 'filters': {'available_in_cz': available_in_cz}}
 
 def get_watched_page(limit: int=50, offset: int=0) -> dict[str, Any]:
+    """Vrat strankovany systemovy pohled `Watched`."""
     db = _db()
     page = db._fetch_watch_view_page(limit, offset, cutoff_days=None)
     return {'list': {'id': db.WATCHED_VIEW_ID, 'slug': 'watched', 'name': 'Watched', 'list_kind': 'view', 'item_type': 'view', 'view_kind': 'watched'}, 'total': page['total'], 'items': page['items'], 'limit': page['limit'], 'offset': page['offset']}
 
 def get_local_library_status() -> dict[str, Any]:
+    """Sloz agregovany snapshot poctu a viditelnych seznamu lokalni knihovny."""
     cached = _get_cached_local_library_status()
     if cached is not None:
         return cached
@@ -503,6 +583,7 @@ def get_local_library_status() -> dict[str, Any]:
     visible_lists.append({'id': db.RECENTLY_WATCHED_VIEW_ID, 'slug': 'recently-watched', 'name': 'Recently Watched', 'description': f'Local history from the last {ui_config.recently_watched_days} days.', 'list_kind': 'view', 'item_count': recently_watched_count, 'item_type': 'view', 'view_kind': 'recently_watched'})
 
     def sort_key(item: dict[str, Any]) -> tuple[int, str]:
+        """Udrz systemove pohledy v pevnem poradi pred ostatnimi seznamy."""
         if item['id'] == 'watchlist':
             return (0, item['name'].lower())
         if item.get('view_kind') == 'hot_watchlist':
@@ -517,6 +598,7 @@ def get_local_library_status() -> dict[str, Any]:
     return result
 
 def get_continue_watching_items(limit: int=5) -> list[dict[str, Any]]:
+    """Vrat lehky seznam titulu ve stavu `in_progress` pro homepage."""
     db = _db()
     states = list_in_progress_content_states(limit=limit)
     if not states:
@@ -532,17 +614,19 @@ def get_continue_watching_items(limit: int=5) -> list[dict[str, Any]]:
         items.append({'tconst': state['tconst'], 'interest_state': state['interest_state'], 'last_previewed_at': state['last_previewed_at'], 'last_watched_at': state['last_watched_at'], 'updated_at': state['updated_at'], **detail, 'poster_url': db._poster_url_from_local_path(detail['poster_relative_path'] or detail['poster_local_path'])})
     return items[:limit]
 
-def get_user_list_items_page(list_id: str, limit: int=50, offset: int=0) -> dict[str, Any]:
+def get_user_list_items_page(list_id: str, limit: int=50, offset: int=0, available_in_cz: bool=False) -> dict[str, Any]:
+    """Vrat strankovanou sadu polozek jednoho seznamu nebo systemoveho view."""
     db = _db()
-    list_row, total, rows = fetch_user_list_page_rows(list_id=list_id, limit=limit, offset=offset, exclude_watched=list_id == 'watchlist')
+    list_row, total, rows = fetch_user_list_page_rows(list_id=list_id, limit=limit, offset=offset, exclude_watched=list_id == 'watchlist', available_in_cz=available_in_cz)
     if list_row is None:
-        return {'list': None, 'total': 0, 'items': [], 'limit': limit, 'offset': offset}
+        return {'list': None, 'total': 0, 'items': [], 'limit': limit, 'offset': offset, 'filters': {'available_in_cz': available_in_cz}}
     ratings_by_tconst = fetch_latest_ratings_for_tconsts([str(row[0]) for row in rows])
     items: list[dict[str, Any]] = []
     for row in rows:
         item = {'tconst': row[0], 'media_type': row[1], 'title': row[15], 'parent_title': row[3], 'season_number': row[4], 'episode_number': row[5], 'rank': row[6], 'added_at': row[7], 'notes': row[8], 'list_name': row[9], 'list_kind': row[10], 'poster_url': db._poster_url_from_local_path(row[13] or row[14]), 'title_type': row[11], 'year': row[12], 'end_year': None, 'runtime_minutes': None, 'series_title': row[15], 'user_rating': ratings_by_tconst.get(str(row[0]), {}).get('rating')}
         items.append(item)
-    return {'list': list_row, 'total': total, 'items': items, 'limit': limit, 'offset': offset}
+    return {'list': list_row, 'total': total, 'items': items, 'limit': limit, 'offset': offset, 'filters': {'available_in_cz': available_in_cz}}
 
 def get_user_list_items(list_id: str, limit: int=12) -> list[dict[str, Any]]:
+    """Vrat zkracenou prvni stranku polozek seznamu bez dalsi metadata obalky."""
     return get_user_list_items_page(list_id, limit=limit, offset=0)['items']

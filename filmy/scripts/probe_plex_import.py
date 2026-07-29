@@ -1,3 +1,5 @@
+"""CLI probe pro read-only otestovani Plex import workflow."""
+
 from __future__ import annotations
 
 from filmy.integrations.plex import _debug_dump_json, build_import_probe
@@ -8,6 +10,8 @@ OUTPUT_PATH = DATA_DIR / "plex_probe.json"
 
 
 def main() -> int:
+    """Spusti read-only probe Plex import cesty."""
+
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     probe = build_import_probe()
     OUTPUT_PATH.write_text(_debug_dump_json(probe) + "\n", encoding="utf-8")

@@ -1,3 +1,5 @@
+"""CLI import jednoho AI recommendation JSON souboru."""
+
 from __future__ import annotations
 
 import argparse
@@ -8,6 +10,8 @@ from filmy.ai_recommendations import import_ai_recommendations_file
 
 
 def main() -> None:
+    """Spusti CLI import AI recommendation souboru."""
+
     parser = argparse.ArgumentParser(description="Import stable AI recommendation JSON into FILMY.")
     parser.add_argument("json_file", type=Path, help="Path to one filmy_output recommendation JSON file.")
     arguments = parser.parse_args()

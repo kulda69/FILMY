@@ -35,6 +35,8 @@ GRANTS_MIGRATION = PROJECT_ROOT / "migrations" / "postgresql" / "005_catalog_gra
 
 @dataclass(frozen=True)
 class RawSource:
+    """Popis jednoho IMDb TSV souboru a jeho cilove raw tabulky."""
+
     table_name: str
     path: Path
     columns: tuple[str, ...]
@@ -42,14 +44,20 @@ class RawSource:
 
     @property
     def stat_mtime(self) -> int:
+        """Vrati `mtime` zdrojoveho TSV souboru."""
+
         return int(self.path.stat().st_mtime)
 
     @property
     def stat_size(self) -> int:
+        """Vrati velikost zdrojoveho TSV souboru."""
+
         return self.path.stat().st_size
 
     @property
     def sha256(self) -> str:
+        """Spocita SHA-256 zdrojoveho TSV souboru."""
+
         digest = hashlib.sha256()
         with self.path.open("rb") as handle:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -104,6 +112,8 @@ RAW_SOURCES = (
 
 
 def _connect_admin() -> psycopg.Connection:
+    """Vytvori admin PostgreSQL spojeni pro rebuild katalogu."""
+
     config = _load_admin_config()
     return psycopg.connect(
         host=config.host,
@@ -116,6 +126,8 @@ def _connect_admin() -> psycopg.Connection:
 
 
 def _apply_catalog_schema() -> None:
+    """Aplikuje katalogove schema a grant migrace pred rebuildem."""
+
     config = _load_admin_config()
     check_bootstrap(config)
     _run_psql(config, TARGET_DATABASE, "-f", str(SCHEMA_MIGRATION))
@@ -123,6 +135,8 @@ def _apply_catalog_schema() -> None:
 
 
 def _copy_tsv_to_raw(cursor: psycopg.Cursor, source: RawSource) -> None:
+    """Nahraje jeden IMDb TSV soubor do odpovidajici raw tabulky."""
+
     column_sql = ", ".join(source.columns)
     cursor.execute(f"TRUNCATE raw.{source.table_name}")
     with cursor.copy(
@@ -138,6 +152,8 @@ def _copy_tsv_to_raw(cursor: psycopg.Cursor, source: RawSource) -> None:
 
 
 def _fetch_stored_manifest(cursor: psycopg.Cursor) -> dict[str, dict[str, object]]:
+    """Nacte ulozeny manifest zdrojovych TSV souboru z PostgreSQL."""
+
     cursor.execute(
         """
         SELECT source_key, source_path, source_mtime, source_size, source_sha256
@@ -161,6 +177,8 @@ def _detect_changed_sources(
     *,
     force: bool,
 ) -> tuple[list[RawSource], list[RawSource]]:
+    """Rozdeli IMDb zdroje na zmenene a nezmenene proti ulozenemu manifestu."""
+
     if force:
         return list(RAW_SOURCES), []
 
@@ -195,6 +213,8 @@ def _detect_changed_sources(
 
 
 def _rebuild_catalog(cursor: psycopg.Cursor) -> None:
+    """Prepocte katalogove tabulky a lookup vrstvy z raw IMDb dat."""
+
     cursor.execute("TRUNCATE app.person_lookup, app.title_lookup, app.title_alias_lookup, app.title_credits, app.catalog_people, app.title_aliases, app.catalog_episodes, app.catalog_titles")
 
     cursor.execute(
@@ -587,6 +607,8 @@ def _rebuild_catalog(cursor: psycopg.Cursor) -> None:
 
 
 def _collect_catalog_stats(cursor: psycopg.Cursor) -> dict[str, int]:
+    """Nasbira zakladni pocty z prestaveneho katalogu."""
+
     stats: dict[str, int] = {}
     for key, table_name in (
         ("titles", "app.catalog_titles"),
@@ -605,6 +627,8 @@ def rebuild_catalog_from_current_imdb(
     force: bool = False,
     progress: Callable[..., None] | None = None,
 ) -> dict[str, int]:
+    """Inkrementalne nahraje zmenene IMDb TSV a prestavi katalog v PostgreSQL."""
+
     missing = [str(source.path) for source in RAW_SOURCES if not source.path.exists()]
     if missing:
         missing_paths = ", ".join(missing)
@@ -656,12 +680,16 @@ def rebuild_catalog_from_current_imdb(
 
 
 def _now_iso() -> str:
+    """Vrati aktualni UTC cas jako ISO string."""
+
     from datetime import UTC, datetime
 
     return datetime.now(UTC).isoformat()
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
+    """Rozparsuje CLI argumenty pro PostgreSQL katalog rebuild."""
+
     parser = argparse.ArgumentParser(description="Incremental IMDb TSV sync + catalog rebuild for PostgreSQL.")
     parser.add_argument(
         "--force",
@@ -672,6 +700,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main() -> int:
+    """CLI vstup pro offline rebuild IMDb katalogu v PostgreSQL."""
+
     args = _parse_args(sys.argv[1:])
     try:
         last_message: str | None = None

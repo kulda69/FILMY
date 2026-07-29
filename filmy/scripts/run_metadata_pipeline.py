@@ -1,3 +1,5 @@
+"""CLI wrapper pro metadata pipeline supervisor."""
+
 from __future__ import annotations
 
 import argparse
@@ -21,11 +23,14 @@ from filmy.scripts.run_tmdb_backfill import get_counts as get_tmdb_counts
 
 
 def _emit(payload: dict[str, object]) -> None:
+    """Vypis jeden JSON zaznam o prubehu pipeline."""
     print(json.dumps(payload, ensure_ascii=False), flush=True)
 
 
 def _install_lifecycle_logging() -> None:
+    """Nastav signal handlery a zivotni log pro dlouhy beh pipeline."""
     def handle_signal(signum: int, _: object) -> None:
+        """Ukonci pipeline po signalu s jasnym auditnim zaznamem."""
         _emit({"phase": "signal", "signal": signal.Signals(signum).name})
         raise SystemExit(128 + signum)
 
@@ -36,9 +41,11 @@ def _install_lifecycle_logging() -> None:
 
 
 def _start_heartbeat_thread(state: dict[str, object], interval_seconds: float = 10.0) -> tuple[threading.Event, threading.Thread]:
+    """Spust heartbeat vlakno s prubeznym stavem pipeline."""
     stop_event = threading.Event()
 
     def run() -> None:
+        """Pravidelne emituj heartbeat podle aktualniho pipeline stavu."""
         while True:
             heartbeat_interval = float(state.get("heartbeat_interval_seconds") or interval_seconds)
             if stop_event.wait(heartbeat_interval):
@@ -63,6 +70,7 @@ def _start_heartbeat_thread(state: dict[str, object], interval_seconds: float = 
 
 
 def _get_signal_marker() -> int | None:
+    """Vrat mtime signal souboru pro detekci nove aktivity."""
     try:
         return METADATA_PIPELINE_SIGNAL_PATH.stat().st_mtime_ns
     except OSError:
@@ -70,10 +78,12 @@ def _get_signal_marker() -> int | None:
 
 
 def _signal_changed(previous_marker: int | None) -> bool:
+    """Zjisti, zda se od posledni kontroly zmenil signal aktivity."""
     return _get_signal_marker() != previous_marker
 
 
 def _read_new_activity_signal(previous_marker: int | None) -> tuple[dict[str, object] | None, int | None]:
+    """Nacti novy signal aktivity jen pokud se marker zmenil."""
     current_marker = _get_signal_marker()
     if current_marker == previous_marker:
         return None, previous_marker
@@ -81,6 +91,7 @@ def _read_new_activity_signal(previous_marker: int | None) -> tuple[dict[str, ob
 
 
 def main() -> int:
+    """Rid sekvencni TMDB a cache pipeline pro metadata na pozadi."""
     _install_lifecycle_logging()
     parser = argparse.ArgumentParser(description="Sequential TMDB enrichment and detail cache materialization.")
     parser.add_argument("--tmdb-batch-size", type=int, default=10)

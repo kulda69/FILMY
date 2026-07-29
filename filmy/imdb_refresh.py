@@ -1,3 +1,5 @@
+"""Prubezne obnovovani IMDb vstupnich souboru a navaznych checkpointu."""
+
 from __future__ import annotations
 
 import json
@@ -18,6 +20,8 @@ from filmy.paths import (
 
 
 def _process_alive(pid: int) -> bool:
+    """Over, ze proces s danym PID stale existuje."""
+
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -29,10 +33,14 @@ def _process_alive(pid: int) -> bool:
 
 
 def _now_iso() -> str:
+    """Vrat aktualni UTC cas bez mikrosekund pro status payloady."""
+
     return datetime.now(UTC).replace(microsecond=0).isoformat()
 
 
 def _read_pid() -> int | None:
+    """Nacti PID beziciho IMDb refresh jobu z pomocneho souboru."""
+
     try:
         raw = IMDB_REFRESH_PID_PATH.read_text(encoding="utf-8").strip()
         return int(raw)
@@ -41,11 +49,15 @@ def _read_pid() -> int | None:
 
 
 def is_imdb_refresh_running() -> bool:
+    """Vrat, zda je IMDb refresh job stale aktivni."""
+
     pid = _read_pid()
     return pid is not None and _process_alive(pid)
 
 
 def load_imdb_refresh_status() -> dict[str, Any]:
+    """Nacti posledni znamy stav IMDb refresh jobu a dopln live stav procesu."""
+
     base_status: dict[str, Any] = {
         "state": "idle",
         "stage": "idle",
@@ -83,6 +95,8 @@ def load_imdb_refresh_status() -> dict[str, Any]:
 
 
 def read_imdb_refresh_log_tail(limit: int = 40) -> list[str]:
+    """Vrat poslednich `limit` radku z logu IMDb refresh jobu."""
+
     if not IMDB_REFRESH_LOG_PATH.exists():
         return []
     try:
@@ -93,6 +107,8 @@ def read_imdb_refresh_log_tail(limit: int = 40) -> list[str]:
 
 
 def get_imdb_refresh_snapshot(log_limit: int = 40) -> dict[str, Any]:
+    """Sloz status i log tail do jednoho snapshotu pro UI kartu."""
+
     return {
         "status": load_imdb_refresh_status(),
         "log_lines": read_imdb_refresh_log_tail(limit=log_limit),
@@ -100,6 +116,8 @@ def get_imdb_refresh_snapshot(log_limit: int = 40) -> dict[str, Any]:
 
 
 def start_imdb_refresh_job() -> dict[str, Any]:
+    """Spust background proces pro novy IMDb refresh, pokud uz jeden nebezi."""
+
     current = load_imdb_refresh_status()
     if current.get("is_running"):
         return current

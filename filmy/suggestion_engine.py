@@ -1,3 +1,5 @@
+"""Heuristiky pro homepage a zanrove suggestion kandidaty."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -135,6 +137,8 @@ def match_traits_for_text(overview: str, active_traits: Sequence[dict[str, Any]]
 
 
 def _matched_traits(overview: str, active_traits: Sequence[dict[str, Any]]) -> list[str]:
+    """Najdi traits, jejichz klicova slova se objevila v overview."""
+
     normalized_overview = overview.casefold()
     if not normalized_overview:
         return []
@@ -150,6 +154,8 @@ def _matched_traits(overview: str, active_traits: Sequence[dict[str, Any]]) -> l
 
 
 def _trait_match_score(matched_traits: Sequence[str], active_traits: Sequence[dict[str, Any]]) -> float:
+    """Spocitej skore shody traits s vahou podle preference ranku."""
+
     if not matched_traits:
         return 0.0
     priority_lookup = {
@@ -162,6 +168,8 @@ def _trait_match_score(matched_traits: Sequence[str], active_traits: Sequence[di
 
 
 def _priority_weight(priority: Any) -> float:
+    """Preved preference rank na normalizovanou vahu 0..1."""
+
     if priority is None:
         return 0.0
     value = int(priority)
@@ -169,6 +177,8 @@ def _priority_weight(priority: Any) -> float:
 
 
 def _genre_alignment_score(genres: Sequence[str], genre_score_lookup: dict[str, float]) -> float:
+    """Vrat nejsilnejsi zanrovy signal pro dany titul."""
+
     if not genres:
         return 0.0
     scores = [float(genre_score_lookup.get(str(genre), 0.0)) for genre in genres if genre]
@@ -178,6 +188,8 @@ def _genre_alignment_score(genres: Sequence[str], genre_score_lookup: dict[str, 
 
 
 def _imdb_quality_score(average_rating: Any, num_votes: Any) -> float:
+    """Sloz jemny quality score z IMDb ratingu a poctu hlasu."""
+
     if average_rating is None:
         return 0.0
     rating_score = _clamp((float(average_rating) - 5.5) / 4.0, 0.0, 1.0)
@@ -187,6 +199,8 @@ def _imdb_quality_score(average_rating: Any, num_votes: Any) -> float:
 
 
 def _freshness_score(start_year: Any, release_date: Any, *, observed_at: datetime) -> float:
+    """Spocitej bonus za novost titulu podle data vydani nebo roku."""
+
     if release_date:
         try:
             released = datetime.fromisoformat(str(release_date)).replace(tzinfo=UTC)
@@ -209,10 +223,14 @@ def _freshness_score(start_year: Any, release_date: Any, *, observed_at: datetim
 
 
 def _actor_affinity_score(actor_affinity_rating: Any) -> float:
+    """Normalizuj souhrnny affinity signal hercu do rozsahu 0..1."""
+
     if actor_affinity_rating is None:
         return 0.0
     return _clamp((float(actor_affinity_rating) - 5.0) / 5.0, 0.0, 1.0)
 
 
 def _clamp(value: float, minimum: float, maximum: float) -> float:
+    """Omez cislo do zadaneho uzavreneho intervalu."""
+
     return max(minimum, min(maximum, value))

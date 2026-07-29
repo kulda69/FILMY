@@ -1,3 +1,5 @@
+"""Sdilene FastAPI/Jinja helpery, response modely a UI utility."""
+
 from __future__ import annotations
 
 import json
@@ -59,6 +61,246 @@ class WatchEventCreateRequest(BaseModel):
 
     watched_on: str | None = Field(default=None, description="ISO date YYYY-MM-DD.")
     notes: str | None = None
+
+
+class BreadcrumbNavigation:
+    """Spravce breadcrumb a return-to navigace pro cele HTML UI.
+
+    Tato trida drzi vsechna pravidla kolem bezpecnych internich URL,
+    serializace breadcrumb trailu do query parametru a skladani
+    navratovych targetu po formularovych akcich. Smyslem je mit
+    jednu logickou vrstvu pro navigaci misto roztristenych helperu,
+    ktere by se daly snadno rozjet do vice nekompatibilnich variant.
+    """
+
+    trail_param = _BREADCRUMB_TRAIL_PARAM
+    label_param = _BREADCRUMB_LABEL_PARAM
+    ts_param = _BREADCRUMB_TS_PARAM
+
+    @classmethod
+    def safe_back_target(cls, candidate: str | None) -> str | None:
+        """Vrat jen bezpecny interni relativni target, jinak `None`.
+
+        UI nikdy nesmi slepe nasledovat externi URL z formulare nebo
+        refereru. Povoluji se jen lokalni cesty zacinajici `/`, bez
+        schematu a bez hosta.
+        """
+        if not candidate:
+            return None
+        parsed = urlsplit(candidate)
+        if parsed.scheme or parsed.netloc:
+            return None
+        if not parsed.path.startswith("/"):
+            return None
+        return urlunsplit(("", "", parsed.path, parsed.query, parsed.fragment))
+
+    @classmethod
+    def request_back_target(cls, request: Request, return_to: str | None = None) -> str:
+        """Najdi nejlepsi rodicovsky target z explicitniho `return_to` nebo refereru."""
+        explicit = cls.safe_back_target(return_to)
+        if explicit:
+            return explicit
+
+        referer = request.headers.get("referer")
+        if referer:
+            parsed = urlsplit(referer)
+            if parsed.path.startswith("/"):
+                return urlunsplit(("", "", parsed.path, parsed.query, parsed.fragment))
+        return "/"
+
+    @classmethod
+    def sanitize_label(cls, label: str | None) -> str | None:
+        """Zkrat a ocisti zobrazovany breadcrumb label na bezpecny text."""
+        text = str(label or "").strip()
+        if not text:
+            return None
+        return text[:80]
+
+    @classmethod
+    def normalize_item(cls, url: str | None, label: str | None) -> dict[str, str] | None:
+        """Preved kandidat na validni breadcrumb polozku nebo `None`."""
+        safe_url = cls.safe_back_target(url)
+        safe_label = cls.sanitize_label(label)
+        if not safe_url or not safe_label:
+            return None
+        return {"url": safe_url, "label": safe_label}
+
+    @classmethod
+    def decode_trail(cls, value: str | None) -> list[dict[str, str]]:
+        """Dekoduj serialized breadcrumb trail z query parametru.
+
+        Vstup muze byt chybejici, rozbity nebo umyslne zkonstruovany
+        mimo appku. Proto se trail po JSON decode znovu sanitizuje,
+        deduplikuje a zkracuje na rozumnou delku.
+        """
+        if not value:
+            return []
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(payload, list):
+            return []
+
+        trail: list[dict[str, str]] = []
+        for entry in payload:
+            if not isinstance(entry, dict):
+                continue
+            item = cls.normalize_item(entry.get("url"), entry.get("label"))
+            if item is None:
+                continue
+            if trail and trail[-1] == item:
+                continue
+            trail.append(item)
+        return trail[:8]
+
+    @classmethod
+    def encode_trail(cls, trail: list[dict[str, str]]) -> str:
+        """Zakoduj breadcrumb trail do kompaktniho ASCII JSON tvaru."""
+        return json.dumps(trail, separators=(",", ":"), ensure_ascii=True)
+
+    @classmethod
+    def split_navigation_query(cls, target: str) -> tuple[list[dict[str, str]], str | None, list[tuple[str, str]]]:
+        """Rozdel query na breadcrumb cast a funkcni parametry stranky."""
+        parts = urlsplit(target)
+        functional_pairs: list[tuple[str, str]] = []
+        trail: list[dict[str, str]] = []
+        label: str | None = None
+        for key, value in parse_qsl(parts.query, keep_blank_values=True):
+            if key == cls.trail_param:
+                trail = cls.decode_trail(value)
+                continue
+            if key == cls.label_param:
+                label = cls.sanitize_label(value)
+                continue
+            if key == cls.ts_param:
+                continue
+            functional_pairs.append((key, value))
+        return trail, label, functional_pairs
+
+    @classmethod
+    def strip_navigation_params(cls, target: str) -> str:
+        """Odstran breadcrumb parametry a ponech jen funkcni URL."""
+        parts = urlsplit(target)
+        _, _, functional_pairs = cls.split_navigation_query(target)
+        return urlunsplit(("", "", parts.path, urlencode(functional_pairs), parts.fragment))
+
+    @classmethod
+    def strip_ephemeral_params(cls, target: str) -> str:
+        """Odstran jen cache-busting timestamp, ostatni query zachovej."""
+        safe_target = cls.safe_back_target(target) or "/"
+        parts = urlsplit(safe_target)
+        query_pairs = [
+            (key, value)
+            for key, value in parse_qsl(parts.query, keep_blank_values=True)
+            if key != cls.ts_param
+        ]
+        return urlunsplit(("", "", parts.path, urlencode(query_pairs), parts.fragment))
+
+    @classmethod
+    def breadcrumb_items_from_target(cls, target: str | None) -> list[dict[str, str]]:
+        """Vypocti viditelny breadcrumb trail z encoded targetu."""
+        safe_target = cls.safe_back_target(target)
+        if not safe_target:
+            return []
+
+        trail, label, _ = cls.split_navigation_query(safe_target)
+        if label:
+            current_item = cls.normalize_item(cls.strip_ephemeral_params(safe_target), label)
+            if current_item and (not trail or trail[-1] != current_item):
+                trail.append(current_item)
+        return trail
+
+    @classmethod
+    def build_target(
+        cls,
+        path: str,
+        *,
+        trail: list[dict[str, str]] | None = None,
+        label: str | None = None,
+        season: int | None = None,
+        fragment: str | None = None,
+    ) -> str:
+        """Sloz interni target obohaceny o breadcrumb kontext.
+
+        Funkcni query parametry zustavaji zachovane. Navigacni metadata
+        se pred pridanim vzdy nejdriv ocisti, aby se pri opakovanem
+        prochazeni appky nevrstvila zastarala data.
+        """
+        safe_path = cls.safe_back_target(path) or "/"
+        parts = urlsplit(safe_path)
+        query_pairs = list(parse_qsl(parts.query, keep_blank_values=True))
+        query_pairs = [
+            (key, value)
+            for key, value in query_pairs
+            if key not in {cls.trail_param, cls.label_param, cls.ts_param}
+        ]
+        if season is not None:
+            query_pairs = [(key, value) for key, value in query_pairs if key != "season"]
+            query_pairs.append(("season", str(season)))
+        clean_trail = [item for item in (trail or []) if cls.normalize_item(item.get("url"), item.get("label"))]
+        if clean_trail:
+            query_pairs.append((cls.trail_param, cls.encode_trail(clean_trail)))
+        safe_label = cls.sanitize_label(label)
+        if safe_label:
+            query_pairs.append((cls.label_param, safe_label))
+        return urlunsplit(("", "", parts.path, urlencode(query_pairs), fragment if fragment is not None else parts.fragment))
+
+    @classmethod
+    def strip_return_to_param(cls, target: str) -> str:
+        """Odstran technicky parametr `return_to` z aktualni URL."""
+        safe_target = cls.safe_back_target(target) or "/"
+        parts = urlsplit(safe_target)
+        query_pairs = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True) if key != "return_to"]
+        return urlunsplit(("", "", parts.path, urlencode(query_pairs), parts.fragment))
+
+    @classmethod
+    def build_context(
+        cls,
+        request: Request,
+        current_label: str,
+        *,
+        return_to: str | None = None,
+        default_trail: list[dict[str, str]] | None = None,
+    ) -> dict[str, object]:
+        """Spocitej `back_url`, breadcrumb trail a nove `page_return_to`.
+
+        Tato metoda je hlavni vstup pro routy. Vezme aktualni request,
+        pripadny parent target a rozhodne, jak ma vypadat navrat po
+        formularove akci nebo dalsim drill-down kroku.
+        """
+        current_target = str(request.url.path if not request.url.query else f"{request.url.path}?{request.url.query}")
+        current_trail, current_embedded_label, _ = cls.split_navigation_query(current_target)
+        parent_target = cls.request_back_target(request, return_to)
+
+        if return_to:
+            breadcrumb_items = cls.breadcrumb_items_from_target(parent_target)
+        elif current_embedded_label or current_trail:
+            breadcrumb_items = current_trail
+        else:
+            breadcrumb_items = cls.breadcrumb_items_from_target(parent_target)
+
+        if not breadcrumb_items and default_trail:
+            breadcrumb_items = [item for item in default_trail if cls.normalize_item(item.get("url"), item.get("label"))]
+
+        functional_current = cls.strip_navigation_params(current_target)
+        functional_current = cls.strip_return_to_param(functional_current)
+        page_return_to = cls.build_target(functional_current, trail=breadcrumb_items, label=current_label)
+        back_url = breadcrumb_items[-1]["url"] if breadcrumb_items else parent_target
+        return {"back_url": back_url, "breadcrumb_items": breadcrumb_items, "page_return_to": page_return_to}
+
+    @classmethod
+    def detail_return_target(
+        cls,
+        path: str,
+        parent_return_to: str,
+        *,
+        season: int | None = None,
+        fragment: str | None = None,
+    ) -> str:
+        """Sloz detail target, ktery zachova parent breadcrumb trail."""
+        breadcrumb_items = cls.breadcrumb_items_from_target(parent_return_to)
+        return cls.build_target(path, trail=breadcrumb_items, season=season, fragment=fragment)
 
 
 def launch_homepage_warmup(tconsts: list[str]) -> None:
@@ -221,10 +463,14 @@ def launch_person_presentation_warmup(main_cast: list[dict[str, object]], limit:
 
 
 def count_missing_portraits(main_cast: list[dict[str, object]]) -> int:
+    """Spocita, kolik lidi v main cast payloadu nema portrait."""
+
     return sum(1 for person in main_cast if not person.get("has_portrait"))
 
 
 def search_result_people_line(people: list[dict[str, object]] | None, limit: int = 4) -> str | None:
+    """Slozi kratkou carkovou linku jmen pro search result kartu."""
+
     names = [str(person.get("name") or "").strip() for person in (people or []) if str(person.get("name") or "").strip()]
     if not names:
         return None
@@ -315,6 +561,8 @@ def present_person_search_result_card(
 
 
 def signal_metadata_pipeline(reason: str, *, target_tconst: str | None = None) -> None:
+    """Best-effort probudi background metadata pipeline po uzivatelske akci."""
+
     try:
         signal_background_activity(reason, target_tconst=target_tconst)
     except OSError:
@@ -323,6 +571,8 @@ def signal_metadata_pipeline(reason: str, *, target_tconst: str | None = None) -
 
 
 def alias_bucket(alias: dict[str, object]) -> str | None:
+    """Zaradi alias do preferovane jazykove skupiny pro zobrazeni."""
+
     language = str(alias.get("language") or "").strip().lower()
     region = str(alias.get("region") or "").strip().upper()
     if language == "en" or region in {"US", "GB", "CA", "IE", "AU", "NZ", "IN"}:
@@ -374,6 +624,7 @@ def present_title_aliases(presentation: dict[str, object]) -> list[dict[str, obj
 
 
 def present_episode_seasons(episodes: list[object]) -> list[int]:
+    """Vrat serazeny seznam unikatnich season cisel z episode payloadu."""
     seasons: list[int] = []
     seen: set[int] = set()
     for episode in episodes:
@@ -388,6 +639,7 @@ def present_episode_seasons(episodes: list[object]) -> list[int]:
 
 
 def present_title_episodes(episodes: list[object]) -> list[dict[str, object]]:
+    """Preved interni episode tuple payload na citelne dict polozky pro sablonu."""
     items: list[dict[str, object]] = []
     for episode in episodes:
         if not isinstance(episode, (list, tuple)) or len(episode) < 5:
@@ -406,7 +658,7 @@ def present_title_episodes(episodes: list[object]) -> list[dict[str, object]]:
     return items
 
 
-def selected_panel_page(selected_list: dict[str, object] | None, limit: int, offset: int = 0) -> dict[str, object]:
+def selected_panel_page(selected_list: dict[str, object] | None, limit: int, offset: int = 0, available_in_cz: bool=False) -> dict[str, object]:
     """Resolve the selected homepage panel into the correct backing page source.
 
     The right-hand homepage panel can point either to a real user list or to derived
@@ -416,18 +668,20 @@ def selected_panel_page(selected_list: dict[str, object] | None, limit: int, off
     if selected_list is None:
         return {"items": [], "total": 0, "limit": limit, "offset": offset, "list": None}
     if selected_list.get("item_type") == "view" and selected_list.get("view_kind") == "hot_watchlist":
-        return get_hot_watchlist_page(limit=limit, offset=offset)
+        return get_hot_watchlist_page(limit=limit, offset=offset, available_in_cz=available_in_cz)
     if selected_list.get("item_type") == "view" and selected_list.get("view_kind") == "watched":
         return get_watched_page(limit=limit, offset=offset)
     if selected_list.get("item_type") == "view" and selected_list.get("view_kind") == "recently_watched":
         return get_recently_watched_page(limit=limit, offset=offset)
-    return get_user_list_items_page(str(selected_list["id"]), limit=limit, offset=offset)
+    return get_user_list_items_page(str(selected_list["id"]), limit=limit, offset=offset, available_in_cz=available_in_cz)
 
 
 def card_action_move_targets(
     visible_lists: list[dict[str, object]],
     selected_list: dict[str, object] | None,
 ) -> list[dict[str, object]]:
+    """Vrati seznamy, do kterych lze presunout kartu mimo aktualni panel."""
+
     selected_id = selected_list.get("id") if selected_list else None
     return [
         item
@@ -462,118 +716,53 @@ def apply_html_cache_headers(response: RedirectResponse | object) -> object:
 
 
 def safe_back_target(candidate: str | None) -> str | None:
-    if not candidate:
-        return None
-    parsed = urlsplit(candidate)
-    if parsed.scheme or parsed.netloc:
-        return None
-    if not parsed.path.startswith("/"):
-        return None
-    return urlunsplit(("", "", parsed.path, parsed.query, parsed.fragment))
+    """Zpetne kompatibilni wrapper nad breadcrumb navigaci."""
+    return BreadcrumbNavigation.safe_back_target(candidate)
 
 
 def request_back_target(request: Request, return_to: str | None = None) -> str:
-    explicit = safe_back_target(return_to)
-    if explicit:
-        return explicit
-
-    referer = request.headers.get("referer")
-    if referer:
-        parsed = urlsplit(referer)
-        if parsed.path.startswith("/"):
-            return urlunsplit(("", "", parsed.path, parsed.query, parsed.fragment))
-    return "/"
+    """Zpetne kompatibilni wrapper pro vypocet rodicovskeho targetu."""
+    return BreadcrumbNavigation.request_back_target(request, return_to)
 
 
 def sanitize_breadcrumb_label(label: str | None) -> str | None:
-    text = str(label or "").strip()
-    if not text:
-        return None
-    return text[:80]
+    """Zpetne kompatibilni wrapper pro sanitizaci breadcrumb labelu."""
+    return BreadcrumbNavigation.sanitize_label(label)
 
 
 def normalize_breadcrumb_item(url: str | None, label: str | None) -> dict[str, str] | None:
-    safe_url = safe_back_target(url)
-    safe_label = sanitize_breadcrumb_label(label)
-    if not safe_url or not safe_label:
-        return None
-    return {"url": safe_url, "label": safe_label}
+    """Zpetne kompatibilni wrapper pro validni breadcrumb polozku."""
+    return BreadcrumbNavigation.normalize_item(url, label)
 
 
 def decode_breadcrumb_trail(value: str | None) -> list[dict[str, str]]:
-    """Decode and sanitize the serialized breadcrumb trail embedded in query params."""
-    if not value:
-        return []
-    try:
-        payload = json.loads(value)
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(payload, list):
-        return []
-
-    trail: list[dict[str, str]] = []
-    for entry in payload:
-        if not isinstance(entry, dict):
-            continue
-        item = normalize_breadcrumb_item(entry.get("url"), entry.get("label"))
-        if item is None:
-            continue
-        if trail and trail[-1] == item:
-            continue
-        trail.append(item)
-    return trail[:8]
+    """Zpetne kompatibilni wrapper pro decode breadcrumb trailu."""
+    return BreadcrumbNavigation.decode_trail(value)
 
 
 def encode_breadcrumb_trail(trail: list[dict[str, str]]) -> str:
-    return json.dumps(trail, separators=(",", ":"), ensure_ascii=True)
+    """Zpetne kompatibilni wrapper pro encode breadcrumb trailu."""
+    return BreadcrumbNavigation.encode_trail(trail)
 
 
 def split_navigation_query(target: str) -> tuple[list[dict[str, str]], str | None, list[tuple[str, str]]]:
-    parts = urlsplit(target)
-    functional_pairs: list[tuple[str, str]] = []
-    trail: list[dict[str, str]] = []
-    label: str | None = None
-    for key, value in parse_qsl(parts.query, keep_blank_values=True):
-        if key == _BREADCRUMB_TRAIL_PARAM:
-            trail = decode_breadcrumb_trail(value)
-            continue
-        if key == _BREADCRUMB_LABEL_PARAM:
-            label = sanitize_breadcrumb_label(value)
-            continue
-        if key == _BREADCRUMB_TS_PARAM:
-            continue
-        functional_pairs.append((key, value))
-    return trail, label, functional_pairs
+    """Zpetne kompatibilni wrapper pro rozdeleni navigacni query."""
+    return BreadcrumbNavigation.split_navigation_query(target)
 
 
 def strip_navigation_params(target: str) -> str:
-    parts = urlsplit(target)
-    _, _, functional_pairs = split_navigation_query(target)
-    return urlunsplit(("", "", parts.path, urlencode(functional_pairs), parts.fragment))
+    """Zpetne kompatibilni wrapper pro odstraneni breadcrumb parametru."""
+    return BreadcrumbNavigation.strip_navigation_params(target)
 
 
 def strip_ephemeral_params(target: str) -> str:
-    safe_target = safe_back_target(target) or "/"
-    parts = urlsplit(safe_target)
-    query_pairs = [
-        (key, value)
-        for key, value in parse_qsl(parts.query, keep_blank_values=True)
-        if key != _BREADCRUMB_TS_PARAM
-    ]
-    return urlunsplit(("", "", parts.path, urlencode(query_pairs), parts.fragment))
+    """Zpetne kompatibilni wrapper pro odstraneni jen efemernich parametru."""
+    return BreadcrumbNavigation.strip_ephemeral_params(target)
 
 
 def breadcrumb_items_from_target(target: str | None) -> list[dict[str, str]]:
-    safe_target = safe_back_target(target)
-    if not safe_target:
-        return []
-
-    trail, label, _ = split_navigation_query(safe_target)
-    if label:
-        current_item = normalize_breadcrumb_item(strip_ephemeral_params(safe_target), label)
-        if current_item and (not trail or trail[-1] != current_item):
-            trail.append(current_item)
-    return trail
+    """Zpetne kompatibilni wrapper pro vypocet breadcrumb polozek."""
+    return BreadcrumbNavigation.breadcrumb_items_from_target(target)
 
 
 def build_breadcrumb_target(
@@ -584,30 +773,14 @@ def build_breadcrumb_target(
     season: int | None = None,
     fragment: str | None = None,
 ) -> str:
-    """Build one internal navigation target enriched with breadcrumb context.
-
-    Breadcrumb state is stored in query parameters so any page can reconstruct a multi-step
-    navigation trail without server-side session state. This helper preserves the functional
-    query, removes stale breadcrumb params, and optionally injects a season or fragment.
-    """
-    safe_path = safe_back_target(path) or "/"
-    parts = urlsplit(safe_path)
-    query_pairs = list(parse_qsl(parts.query, keep_blank_values=True))
-    query_pairs = [
-        (key, value)
-        for key, value in query_pairs
-        if key not in {_BREADCRUMB_TRAIL_PARAM, _BREADCRUMB_LABEL_PARAM, _BREADCRUMB_TS_PARAM}
-    ]
-    if season is not None:
-        query_pairs = [(key, value) for key, value in query_pairs if key != "season"]
-        query_pairs.append(("season", str(season)))
-    clean_trail = [item for item in (trail or []) if normalize_breadcrumb_item(item.get("url"), item.get("label"))]
-    if clean_trail:
-        query_pairs.append((_BREADCRUMB_TRAIL_PARAM, encode_breadcrumb_trail(clean_trail)))
-    safe_label = sanitize_breadcrumb_label(label)
-    if safe_label:
-        query_pairs.append((_BREADCRUMB_LABEL_PARAM, safe_label))
-    return urlunsplit(("", "", parts.path, urlencode(query_pairs), fragment if fragment is not None else parts.fragment))
+    """Zpetne kompatibilni wrapper pro skladani breadcrumb-aware targetu."""
+    return BreadcrumbNavigation.build_target(
+        path,
+        trail=trail,
+        label=label,
+        season=season,
+        fragment=fragment,
+    )
 
 
 def build_breadcrumb_context(
@@ -617,60 +790,33 @@ def build_breadcrumb_context(
     return_to: str | None = None,
     default_trail: list[dict[str, str]] | None = None,
 ) -> dict[str, object]:
-    """Compute `back_url`, visible breadcrumb items, and a reusable `return_to` target.
-
-    The app uses explicit breadcrumb-aware return targets instead of depending on browser
-    history. That keeps navigation stable even after form posts, rating changes, or page
-    reloads from nested detail screens.
-    """
-    current_target = str(request.url.path if not request.url.query else f"{request.url.path}?{request.url.query}")
-    current_trail, current_embedded_label, _ = split_navigation_query(current_target)
-    parent_target = request_back_target(request, return_to)
-
-    if return_to:
-        breadcrumb_items = breadcrumb_items_from_target(parent_target)
-    elif current_embedded_label or current_trail:
-        breadcrumb_items = current_trail
-    else:
-        breadcrumb_items = breadcrumb_items_from_target(parent_target)
-
-    if not breadcrumb_items and default_trail:
-        breadcrumb_items = [item for item in default_trail if normalize_breadcrumb_item(item.get("url"), item.get("label"))]
-
-    functional_current = strip_navigation_params(current_target)
-    functional_current = strip_return_to_param(functional_current)
-    page_return_to = build_breadcrumb_target(
-        functional_current,
-        trail=breadcrumb_items,
-        label=current_label,
+    """Zpetne kompatibilni wrapper pro kompletni breadcrumb kontext stranky."""
+    return BreadcrumbNavigation.build_context(
+        request,
+        current_label,
+        return_to=return_to,
+        default_trail=default_trail,
     )
-    back_url = breadcrumb_items[-1]["url"] if breadcrumb_items else parent_target
-    return {
-        "back_url": back_url,
-        "breadcrumb_items": breadcrumb_items,
-        "page_return_to": page_return_to,
-    }
 
 
 def strip_return_to_param(target: str) -> str:
-    safe_target = safe_back_target(target) or "/"
-    parts = urlsplit(safe_target)
-    query_pairs = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True) if key != "return_to"]
-    return urlunsplit(("", "", parts.path, urlencode(query_pairs), parts.fragment))
+    """Zpetne kompatibilni wrapper pro odstraneni `return_to` parametru."""
+    return BreadcrumbNavigation.strip_return_to_param(target)
 
 
 def detail_return_target(path: str, parent_return_to: str, *, season: int | None = None, fragment: str | None = None) -> str:
-    """Build a title/person detail return target while preserving the parent breadcrumb trail."""
-    breadcrumb_items = breadcrumb_items_from_target(parent_return_to)
-    return build_breadcrumb_target(
+    """Zpetne kompatibilni wrapper pro detail target se zachovanym trail."""
+    return BreadcrumbNavigation.detail_return_target(
         path,
-        trail=breadcrumb_items,
+        parent_return_to,
         season=season,
         fragment=fragment,
     )
 
 
 def tmdb_asset_url(detail: dict[str, object] | None, asset_kind: str) -> str | None:
+    """Najde lokalni URL konkretniho TMDB assetu v detail payloadu."""
+
     tmdb = (detail or {}).get("tmdb") or {}
     assets = tmdb.get("assets") or []
     for asset in assets:
@@ -688,6 +834,8 @@ def tmdb_asset_url(detail: dict[str, object] | None, asset_kind: str) -> str | N
 
 
 def group_tmdb_providers(detail: dict[str, object] | None) -> list[dict[str, object]]:
+    """Seskupi TMDB providery podle typu nabidky pro sablonu detailu."""
+
     type_labels = {
         "flatrate": "Stream",
         "free": "Free",

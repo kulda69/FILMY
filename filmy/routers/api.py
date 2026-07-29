@@ -1,6 +1,11 @@
+"""JSON API router pro verejne i admin endpointy FILMY."""
+
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from pydantic import BaseModel, ConfigDict
 from starlette.responses import PlainTextResponse
 
 from filmy.app_shared import (
@@ -62,8 +67,185 @@ from filmy.scripts.rebuild_catalog_postgresql import rebuild_catalog_from_curren
 router = APIRouter()
 
 
-@router.get("/api")
+class ApiFlexibleModel(BaseModel):
+    """Zakladni API model s povolenymi dalsimi poli.
+
+    Vetsina stavajicich payloadu ma stabilni vrchni kontrakt, ale uvnitr
+    jeste muze nest jine technicke nebo domenove polozky. Tento bazovy model
+    dovoli FastAPI validovat zname casti bez toho, aby se pri kazde mensi
+    evoluci musel okamzite modelovat cely vnitrni strom.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+
+class ApiRootResponse(ApiFlexibleModel):
+    """Zakladni heartbeat payload root API endpointu."""
+
+    message: str
+    database: str
+    assets_path: str
+    catalog_titles: int
+    catalog_episodes: int
+
+
+class CatalogStatsResponse(ApiFlexibleModel):
+    """Zakladni pocty katalogu pouzivane jako read-only metrika."""
+
+    titles: int
+    episodes: int
+
+
+class ItemsWithLimitResponse(ApiFlexibleModel):
+    """Obecny wrapper pro endpointy s kolekci a limitem."""
+
+    items: list[dict[str, Any]]
+    limit: int
+
+
+class ItemsWithLimitAndFlagResponse(ItemsWithLimitResponse):
+    """Wrapper pro endpointy s kolekci, limitem a bool filtrem."""
+
+    active_only: bool
+
+
+class ItemsOnlyResponse(ApiFlexibleModel):
+    """Jednoduchy wrapper pro endpointy vracejici jen kolekci polozek."""
+
+    items: list[dict[str, Any]]
+
+
+class WatchHistoryResponse(ItemsWithLimitResponse):
+    """Payload historie sledovani vratit jako kolekci plus aktivni filtr."""
+
+    source: str | None = None
+
+
+class AiContextResponse(ApiFlexibleModel):
+    """Stabilni AI kontext kontrakt pro navazujici projekt."""
+
+    contract_version: int
+    rating_scales: dict[str, Any]
+    title_role_signal_definitions: dict[str, Any]
+    favorite_genres: list[dict[str, Any]]
+    favorite_traits: list[dict[str, Any]]
+    score_signal_notes: dict[str, Any]
+    usage_notes: list[Any]
+
+
+class AiTasteSeedResponse(ApiFlexibleModel):
+    """AI taste seed payload se zdrojovym seznamem a polozkami."""
+
+    source_list: dict[str, Any]
+    limit: int
+    items: list[dict[str, Any]]
+
+
+class AiTasteInputsResponse(ApiFlexibleModel):
+    """AI vstupni skupiny podle role seznamu."""
+
+    contract_version: int
+    limit_per_list: int
+    included_roles: list[str]
+    excluded_roles: list[str]
+    groups: dict[str, Any]
+    excluded_sources: list[dict[str, Any]] | list[Any]
+
+
+class AiRatedTitlesResponse(ApiFlexibleModel):
+    """AI payload pro lokalne hodnocene tituly."""
+
+    filters: dict[str, Any]
+    limit: int
+    items: list[dict[str, Any]]
+
+
+class AiNotedTitlesResponse(ApiFlexibleModel):
+    """AI payload pro tituly se slovnimi poznamkami."""
+
+    filters: dict[str, Any]
+    limit: int
+    items: list[dict[str, Any]]
+
+
+class AiWatchedTitlesResponse(ApiFlexibleModel):
+    """AI blacklist payload pro videne nebo jinak vyloucene tituly."""
+
+    contract_version: int
+    filters: dict[str, Any]
+    item_count: int
+    source_counts: dict[str, int]
+    items: list[dict[str, Any]]
+
+
+class AiScoringExplainerResponse(ApiFlexibleModel):
+    """Vysvetleni lokalni scoring semantiky pro AI projekt."""
+
+    contract_version: int
+    score_scope: str
+    signals: dict[str, Any]
+    known_limitations: list[str]
+
+
+class AdminRebuildResponse(ApiFlexibleModel):
+    """Top-level kontrakt pro vynuceny rebuild katalogu."""
+
+    status: str
+    stats: dict[str, Any]
+
+
+class ContentStateMutationResponse(ApiFlexibleModel):
+    """Stabilni top-level payload po zmene content state."""
+
+    tconst: str
+    interest_state: str
+    updated_at: Any
+
+
+class LibraryContentMutationResponse(ApiFlexibleModel):
+    """Top-level payload pro watchlist, rating a watch akce nad titulem."""
+
+    tconst: str
+    updated_at: Any
+    library: dict[str, Any]
+
+
+class ImportPreviewResponse(ApiFlexibleModel):
+    """Souhrn vytvoreneho importniho preview batchu."""
+
+    batch_id: str
+    source: str
+    filename: str
+    rows_total: int
+    rows_resolved: int
+    rows_unresolved: int
+
+
+class ImportBatchResponse(ApiFlexibleModel):
+    """Detail jednoho importniho batchu vcetne preview radku."""
+
+    id: str
+    source: str
+    filename: str
+    checksum: str
+    status: str
+    created_at: Any
+    rows: list[dict[str, Any]]
+
+
+class ImportCommitResponse(ApiFlexibleModel):
+    """Souhrn commitu importniho batchu."""
+
+    batch_id: str
+    committed: int
+    status: str
+    skipped: int | None = None
+
+
+@router.get("/api", response_model=ApiRootResponse)
 async def api_root():
+    """Vrat zakladni heartbeat a orientacni stav katalogu."""
+
     stats = get_catalog_stats()
     return {
         "message": "Filmy API běží",
@@ -74,18 +256,24 @@ async def api_root():
     }
 
 
-@router.get("/api/catalog/stats")
+@router.get("/api/catalog/stats", response_model=CatalogStatsResponse)
 async def catalog_stats():
+    """Vrat souhrnne pocty titulovych a epizodnich zaznamu v katalogu."""
+
     return get_catalog_stats()
 
 
-@router.get("/api/admin/imdb/manifest")
+@router.get("/api/admin/imdb/manifest", response_model=ItemsOnlyResponse)
 async def admin_imdb_manifest():
+    """Vrat ulozeny manifest posledniho IMDb importu."""
+
     return {"items": get_imdb_manifest()}
 
 
 @router.get("/api/admin/imdb/lists/inspect")
 async def admin_imdb_lists_inspect(export_dir: str = Query(default="imdb_lists")):
+    """Prohledni lokalni adresar s IMDb exporty bez zmeny databaze."""
+
     try:
         return inspect_imdb_lists(export_dir)
     except ValueError as exc:
@@ -94,6 +282,8 @@ async def admin_imdb_lists_inspect(export_dir: str = Query(default="imdb_lists")
 
 @router.post("/api/admin/imdb/lists/sync")
 async def admin_imdb_lists_sync(export_dir: str = Query(default="imdb_lists")):
+    """Importuj IMDb watchlisty a favorite people z lokalniho exportu."""
+
     try:
         result = sync_imdb_lists(export_dir)
     except ValueError as exc:
@@ -104,22 +294,28 @@ async def admin_imdb_lists_sync(export_dir: str = Query(default="imdb_lists")):
 
 @router.get("/api/admin/imdb/lists/status")
 async def admin_imdb_lists_status():
+    """Vrat souhrnny stav poslednich IMDb syncu."""
+
     return get_imdb_lists_status()
 
 
-@router.get("/api/admin/imdb/watchlist")
+@router.get("/api/admin/imdb/watchlist", response_model=ItemsWithLimitAndFlagResponse)
 async def admin_imdb_watchlist(
     limit: int = Query(default=100, ge=1, le=1000),
     active_only: bool = Query(default=True),
 ):
+    """Vrat watchlist importovany z IMDb jako read-only administrativni prehled."""
+
     return {"items": get_imdb_watchlist(limit=limit, active_only=active_only), "limit": limit, "active_only": active_only}
 
 
-@router.get("/api/admin/imdb/favorite-people")
+@router.get("/api/admin/imdb/favorite-people", response_model=ItemsWithLimitAndFlagResponse)
 async def admin_imdb_favorite_people(
     limit: int = Query(default=100, ge=1, le=1000),
     active_only: bool = Query(default=True),
 ):
+    """Vrat favorite people importovane z IMDb jako read-only prehled."""
+
     return {
         "items": get_imdb_favorite_people(limit=limit, active_only=active_only),
         "limit": limit,
@@ -129,16 +325,22 @@ async def admin_imdb_favorite_people(
 
 @router.get("/api/admin/library/status")
 async def admin_library_status():
+    """Vrat souhrnny stav lokalni knihovny a uzivatelskych seznamu."""
+
     return get_local_library_status()
 
 
 @router.get("/api/admin/background/status")
 async def admin_background_status():
+    """Vrat runtime stav background supervisoru a souvisejicich jobu."""
+
     return background_supervisor.status()
 
 
 @router.get("/api/admin/plex/inspect")
 async def admin_plex_inspect():
+    """Prohledni Plex zdroj bez zapisove synchronizace."""
+
     return inspect_plex_source()
 
 
@@ -147,6 +349,8 @@ async def admin_plex_sync(
     section_limit: int | None = Query(default=None, ge=1, le=20),
     item_limit_per_section: int | None = Query(default=None, ge=1, le=10000),
 ):
+    """Synchronizuj cast Plex knihovny do lokalnich runtime tabulek."""
+
     try:
         result = sync_plex_source(section_limit=section_limit, item_limit_per_section=item_limit_per_section)
     except ValueError as exc:
@@ -157,15 +361,19 @@ async def admin_plex_sync(
 
 @router.get("/api/admin/plex/status")
 async def admin_plex_status():
+    """Vrat souhrnny stav poslednich Plex syncu."""
+
     return get_plex_status()
 
 
-@router.get("/api/catalog/search")
+@router.get("/api/catalog/search", response_model=ItemsWithLimitResponse)
 async def catalog_search(
     q: str | None = Query(default=None, min_length=1),
     title_type: str | None = Query(default=None, pattern="^(movie|tvMovie|tvSeries|tvMiniSeries)$"),
     limit: int = Query(default=20, ge=1, le=100),
 ):
+    """Vyhledej tituly v lokalnim katalogu."""
+
     return {"items": search_catalog(query=q, title_type=title_type, limit=limit), "limit": limit}
 
 
@@ -174,6 +382,8 @@ async def catalog_describe(
     q: str = Query(min_length=1),
     title_type: str | None = Query(default=None, pattern="^(movie|tvMovie|tvSeries|tvMiniSeries)$"),
 ):
+    """Najdi nejvhodnejsi titul a vrat jeho textovy datovy popis."""
+
     item = describe_title_by_query(query=q, title_type=title_type)
     if item is None:
         raise HTTPException(status_code=404, detail="Titul nebyl nalezen.")
@@ -186,6 +396,8 @@ async def catalog_lookup(
     title_type: str | None = Query(default=None, pattern="^(movie|tvMovie|tvSeries|tvMiniSeries)$"),
     candidates_limit: int = Query(default=5, ge=1, le=20),
 ):
+    """Proved title lookup s kandidaty a vybranym vysledkem."""
+
     item = lookup_title_by_query(query=q, title_type=title_type, candidates_limit=candidates_limit)
     if item is None:
         raise HTTPException(status_code=404, detail="Titul nebyl nalezen.")
@@ -197,6 +409,8 @@ async def catalog_lookup_text(
     q: str = Query(min_length=1),
     title_type: str | None = Query(default=None, pattern="^(movie|tvMovie|tvSeries|tvMiniSeries)$"),
 ):
+    """Vrat textovou prezentaci nejlepsiho nalezeneho titulu."""
+
     item = lookup_title_by_query(query=q, title_type=title_type, candidates_limit=1)
     if item is None:
         raise HTTPException(status_code=404, detail="Titul nebyl nalezen.")
@@ -211,6 +425,8 @@ async def catalog_person_lookup(
     q: str = Query(min_length=1),
     candidates_limit: int = Query(default=5, ge=1, le=20),
 ):
+    """Proved person lookup s kandidaty a vybranym vysledkem."""
+
     item = lookup_person_by_query(query=q, candidates_limit=candidates_limit)
     if item is None:
         raise HTTPException(status_code=404, detail="Osoba nebyla nalezena.")
@@ -219,6 +435,8 @@ async def catalog_person_lookup(
 
 @router.get("/api/catalog/person/lookup/text", response_class=PlainTextResponse)
 async def catalog_person_lookup_text(q: str = Query(min_length=1)):
+    """Vrat textovou prezentaci nejlepsi nalezene osoby."""
+
     item = describe_person_by_query(q)
     if item is None:
         raise HTTPException(status_code=404, detail="Osoba nebyla nalezena.")
@@ -228,8 +446,10 @@ async def catalog_person_lookup_text(q: str = Query(min_length=1)):
     return str(presentation["display_text"])
 
 
-@router.post("/api/admin/imdb/rebuild")
+@router.post("/api/admin/imdb/rebuild", response_model=AdminRebuildResponse)
 async def admin_imdb_rebuild():
+    """Spust vynuceny rebuild katalogu z aktualnich IMDb TSV zdroju."""
+
     result = {"status": "ok", "stats": rebuild_catalog_from_current_imdb(force=True)}
     signal_metadata_pipeline("admin_imdb_rebuild")
     return result
@@ -237,6 +457,8 @@ async def admin_imdb_rebuild():
 
 @router.get("/api/admin/content/{tconst}")
 async def admin_content_detail(tconst: str):
+    """Vrat surovy slozeny detail titulu z lokalniho katalogu a knihovny."""
+
     detail = get_content_detail(tconst)
     if detail is None:
         raise HTTPException(status_code=404, detail="Titul nebyl nalezen.")
@@ -245,17 +467,21 @@ async def admin_content_detail(tconst: str):
 
 @router.get("/api/catalog/presentation/{tconst}")
 async def catalog_presentation(tconst: str):
+    """Vrat render-ready prezentaci titulu pro HTML i textove vrstvy."""
+
     item = get_title_presentation(tconst)
     if item is None:
         raise HTTPException(status_code=404, detail="Titul nebyl nalezen.")
     return item
 
 
-@router.post("/api/admin/content/{tconst}/state")
+@router.post("/api/admin/content/{tconst}/state", response_model=ContentStateMutationResponse)
 async def admin_update_content_state(
     tconst: str,
     interest_state: str = Query(pattern="^(previewed|in_progress|watched)$"),
 ):
+    """Zmen lokalni interest state titulu."""
+
     detail = get_content_detail(tconst)
     if detail is None:
         raise HTTPException(status_code=404, detail="Titul nebyl nalezen.")
@@ -264,8 +490,10 @@ async def admin_update_content_state(
     return result
 
 
-@router.post("/api/library/content/{tconst}/watchlist")
+@router.post("/api/library/content/{tconst}/watchlist", response_model=LibraryContentMutationResponse)
 async def library_update_watchlist(tconst: str, payload: WatchlistUpdateRequest):
+    """Uprav watchlist stav jednoho titulu."""
+
     try:
         result = set_watchlist_state(tconst, in_watchlist=payload.in_watchlist, notes=payload.notes)
     except ValueError as exc:
@@ -274,8 +502,10 @@ async def library_update_watchlist(tconst: str, payload: WatchlistUpdateRequest)
     return result
 
 
-@router.post("/api/library/content/{tconst}/rating")
+@router.post("/api/library/content/{tconst}/rating", response_model=LibraryContentMutationResponse)
 async def library_set_rating(tconst: str, payload: RatingUpdateRequest):
+    """Uloz lokalni rating titulu vcetne volitelnych poznamek."""
+
     try:
         result = set_user_rating(
             tconst,
@@ -291,7 +521,7 @@ async def library_set_rating(tconst: str, payload: RatingUpdateRequest):
     return result
 
 
-@router.get("/api/ai/taste-seed")
+@router.get("/api/ai/taste-seed", response_model=AiTasteSeedResponse)
 async def ai_taste_seed(
     source_list: str = Query(default="kouknout-znovu"),
     limit: int = Query(default=50, ge=1, le=200),
@@ -301,7 +531,7 @@ async def ai_taste_seed(
     return get_ai_taste_seed(source_list=source_list, limit=limit)
 
 
-@router.get("/api/ai/taste-inputs")
+@router.get("/api/ai/taste-inputs", response_model=AiTasteInputsResponse)
 async def ai_taste_inputs(
     limit_per_list: int = Query(default=25, ge=1, le=100),
 ):
@@ -310,7 +540,7 @@ async def ai_taste_inputs(
     return get_ai_taste_inputs(limit_per_list=limit_per_list)
 
 
-@router.get("/api/ai/rated-titles")
+@router.get("/api/ai/rated-titles", response_model=AiRatedTitlesResponse)
 async def ai_rated_titles(
     min_user_rating: int = Query(default=8, ge=1, le=10),
     limit: int = Query(default=50, ge=1, le=200),
@@ -325,7 +555,7 @@ async def ai_rated_titles(
     )
 
 
-@router.get("/api/ai/noted-titles")
+@router.get("/api/ai/noted-titles", response_model=AiNotedTitlesResponse)
 async def ai_noted_titles(
     notes: str = Query(default="any", pattern="^(any|liked|disliked)$"),
     min_user_rating: int | None = Query(default=None, ge=1, le=10),
@@ -336,7 +566,7 @@ async def ai_noted_titles(
     return get_ai_noted_titles(notes=notes, min_user_rating=min_user_rating, limit=limit)
 
 
-@router.get("/api/ai/watched-titles")
+@router.get("/api/ai/watched-titles", response_model=AiWatchedTitlesResponse)
 async def ai_watched_titles(
     include_rated: bool = Query(default=True),
     include_negative: bool = Query(default=True),
@@ -346,22 +576,24 @@ async def ai_watched_titles(
     return get_ai_watched_titles(include_rated=include_rated, include_negative=include_negative)
 
 
-@router.get("/api/ai/context")
+@router.get("/api/ai/context", response_model=AiContextResponse)
 async def ai_context():
     """Read stable preference context for a separate AI recommendation workflow."""
 
     return get_ai_context()
 
 
-@router.get("/api/ai/scoring-explainer")
+@router.get("/api/ai/scoring-explainer", response_model=AiScoringExplainerResponse)
 async def ai_scoring_explainer():
     """Read local scoring semantics for a separate AI recommendation workflow."""
 
     return get_ai_scoring_explainer()
 
 
-@router.delete("/api/library/content/{tconst}/rating")
+@router.delete("/api/library/content/{tconst}/rating", response_model=LibraryContentMutationResponse)
 async def library_clear_rating(tconst: str):
+    """Smaz lokalni rating titulu."""
+
     try:
         result = clear_user_rating(tconst)
     except ValueError as exc:
@@ -370,8 +602,10 @@ async def library_clear_rating(tconst: str):
     return result
 
 
-@router.post("/api/library/content/{tconst}/watch")
+@router.post("/api/library/content/{tconst}/watch", response_model=LibraryContentMutationResponse)
 async def library_record_watch(tconst: str, payload: WatchEventCreateRequest):
+    """Zapis jednu watch udalost pro titul."""
+
     try:
         result = record_watch_event(tconst, watched_on=payload.watched_on, notes=payload.notes)
     except ValueError as exc:
@@ -382,6 +616,8 @@ async def library_record_watch(tconst: str, payload: WatchEventCreateRequest):
 
 @router.post("/api/admin/tmdb/sync/{tconst}")
 async def admin_tmdb_sync(tconst: str, locale: str = Query(default="en-US")):
+    """Dopln TMDB detail a providery jednoho titulu podle IMDb ID."""
+
     try:
         return sync_title_from_imdb(tconst, locale=locale)
     except TmdbConfigError as exc:
@@ -395,6 +631,8 @@ async def admin_tmdb_fetch_assets(
     tconst: str,
     fetch_reason: str = Query(pattern="^(previewed|in_progress|watched)$"),
 ):
+    """Stahni chybejici lokalni TMDB assety pro titul."""
+
     try:
         return fetch_assets_for_title(tconst, fetch_reason=fetch_reason)
     except TmdbConfigError as exc:
@@ -403,13 +641,17 @@ async def admin_tmdb_fetch_assets(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-@router.get("/api/admin/tmdb/library/targets")
+@router.get("/api/admin/tmdb/library/targets", response_model=ItemsWithLimitResponse)
 async def admin_tmdb_library_targets(limit: int | None = Query(default=None, ge=1, le=5000)):
+    """Vrat kandidaty z lokalni knihovny pro dalsi TMDB enrichment."""
+
     return {"items": get_enrichment_targets(limit=limit), "limit": limit}
 
 
 @router.post("/api/admin/tmdb/library/enrich")
 async def admin_tmdb_library_enrich(limit: int | None = Query(default=None, ge=1, le=5000)):
+    """Spust davkovy TMDB enrichment nad prioritnimi kandidaty z knihovny."""
+
     try:
         return enrich_library_from_tmdb(limit=limit)
     except TmdbConfigError as exc:
@@ -428,25 +670,31 @@ async def admin_materialize_title_details(
     return materialize_title_detail_cache(limit=limit, rewrite=rewrite)
 
 
-@router.post("/api/admin/import/netflix/preview")
+@router.post("/api/admin/import/netflix/preview", response_model=ImportPreviewResponse)
 async def admin_import_netflix_preview(
     file: UploadFile = File(...),
     max_rows: int | None = Query(default=None, ge=1, le=10000),
 ):
+    """Vytvor importni preview z nahraneho Netflix exportu."""
+
     content = await file.read()
     return create_import_preview("netflix", file.filename or "netflix.csv", content, max_rows=max_rows)
 
 
-@router.get("/api/admin/import/{batch_id}")
+@router.get("/api/admin/import/{batch_id}", response_model=ImportBatchResponse)
 async def admin_import_batch(batch_id: str):
+    """Vrat detail drive vytvoreneho importniho preview batchu."""
+
     batch = get_import_batch(batch_id)
     if batch is None:
         raise HTTPException(status_code=404, detail="Import batch nebyl nalezen.")
     return batch
 
 
-@router.post("/api/admin/import/commit/{batch_id}")
+@router.post("/api/admin/import/commit/{batch_id}", response_model=ImportCommitResponse)
 async def admin_import_commit(batch_id: str):
+    """Potvrd importni batch a zapis jeho zmeny do runtime tabulek."""
+
     try:
         result = commit_import_batch(batch_id)
     except ValueError as exc:
@@ -455,9 +703,11 @@ async def admin_import_commit(batch_id: str):
     return result
 
 
-@router.get("/api/admin/history")
+@router.get("/api/admin/history", response_model=WatchHistoryResponse)
 async def admin_watch_history(
     limit: int = Query(default=100, ge=1, le=1000),
     source: str | None = Query(default=None),
 ):
+    """Vrat posledni watch udalosti s volitelnym filtrem podle zdroje."""
+
     return {"items": get_watch_history(limit=limit, source=source), "limit": limit, "source": source}

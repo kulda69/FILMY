@@ -24,7 +24,7 @@ Pokud uz je repozitar na stroji stazeny:
 cd /cesta/k/FILMY
 git pull --ff-only
 uv sync
-uv run filmy-upgrade-database
+.venv/bin/python -m filmy.scripts.upgrade_database
 ```
 
 ## Lokalni konfigurace
@@ -54,11 +54,18 @@ Po nasazeni na server se databaze uz nema rucne prenaset z vyvojoveho stroje.
 Po kazdem `git pull` spust databazovy upgrade:
 
 ```bash
-uv run filmy-upgrade-database
+.venv/bin/python -m filmy.scripts.upgrade_database
 ```
 
 Runner si v PostgreSQL vede tabulku `app.database_upgrades`, takze opakovane
 spusteni ma byt bezpecne a provede jen chybejici verziovane kroky.
+
+Poznamka:
+
+- v repozitari je sice definovany CLI entrypoint `filmy-upgrade-database`, ale
+  pri aktualnim `uv sync` se `project.scripts` na `mac-mini` neinstaluji,
+  proto je dnes overena a funkcni varianta primo
+  `.venv/bin/python -m filmy.scripts.upgrade_database`
 
 ## Data
 
@@ -190,7 +197,7 @@ sudo rm /Library/LaunchDaemons/cz.kulda.caddy.plist
 cd /cesta/k/FILMY
 git pull --ff-only
 uv sync
-uv run filmy-upgrade-database
+.venv/bin/python -m filmy.scripts.upgrade_database
 .venv/bin/pytest
 .venv/bin/python main.py
 ```

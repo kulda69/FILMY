@@ -1,3 +1,5 @@
+"""PostgreSQL read/write helpery pro runtime vrstvu FILMY."""
+
 from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
@@ -19,6 +21,171 @@ class RuntimePostgresConfig:
     database: str
     user: str
     password: str
+
+
+class ImportBatchStore:
+    """Zapouzdrena storage vrstva pro importni preview a commit batchu.
+
+    Tento blok uz mel vlastni mini-domenu: jedna sada funkci vytvari batch,
+    uklada radky preview, nacita je zpet a nakonec vola serverovy commit.
+    Prevod do tridy dava smysl hlavne proto, ze drzi pohromade jeden
+    transakcni workflow a umoznuje rozsirit ho pozdeji bez dalsiho
+    rozleptavani `runtime_postgres.py` novymi volnymi funkcemi.
+    """
+
+    def create_batch_record(
+        self,
+        *,
+        batch_id: str,
+        source: str,
+        filename: str,
+        checksum: str,
+        status: str,
+        created_at: str,
+    ) -> None:
+        """Vloz hlavicku jednoho importniho batchu."""
+
+        with _connect() as conn, conn.cursor() as cursor:
+            cursor.execute(
+                '\n            INSERT INTO app.import_batches (id, source, filename, checksum, status, created_at)\n            VALUES (%s, %s, %s, %s, %s, %s::timestamp)\n            ',
+                (batch_id, source, filename, checksum, status, created_at),
+            )
+            conn.commit()
+
+    def insert_rows(self, rows: list[dict[str, Any]]) -> None:
+        """Vloz preview radky patriici k uz vytvorenemu batchi."""
+
+        if not rows:
+            return
+        with _connect() as conn, conn.cursor() as cursor:
+            cursor.executemany(
+                '\n            INSERT INTO app.import_rows (\n                id,\n                batch_id,\n                source,\n                row_number,\n                raw_json,\n                parsed_title,\n                parsed_year,\n                parsed_watched_on,\n                parsed_season_number,\n                parsed_episode_number,\n                parsed_imdb_id,\n                parsed_tmdb_id,\n                resolution_status,\n                resolved_tconst,\n                resolution_confidence,\n                resolution_note\n            )\n            VALUES (\n                %s, %s, %s, %s, %s, %s, %s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s\n            )\n            ',
+                [
+                    (
+                        row['id'],
+                        row['batch_id'],
+                        row['source'],
+                        row['row_number'],
+                        row['raw_json'],
+                        row.get('parsed_title'),
+                        row.get('parsed_year'),
+                        row.get('parsed_watched_on'),
+                        row.get('parsed_season_number'),
+                        row.get('parsed_episode_number'),
+                        row.get('parsed_imdb_id'),
+                        row.get('parsed_tmdb_id'),
+                        row['resolution_status'],
+                        row.get('resolved_tconst'),
+                        row.get('resolution_confidence'),
+                        row.get('resolution_note'),
+                    )
+                    for row in rows
+                ],
+            )
+            conn.commit()
+
+    def fetch_batch_record(self, batch_id: str) -> dict[str, Any] | None:
+        """Nacti hlavicku jednoho importniho batchu."""
+
+        with _connect() as conn, conn.cursor() as cursor:
+            cursor.execute(
+                '\n            SELECT id, source, filename, checksum, status, created_at\n            FROM app.import_batches\n            WHERE id = %s\n            ',
+                (batch_id,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            'id': row[0],
+            'source': row[1],
+            'filename': row[2],
+            'checksum': row[3],
+            'status': row[4],
+            'created_at': _parse_optional_timestamp(row[5]),
+        }
+
+    def fetch_batch_rows(self, batch_id: str, *, limit: int=100) -> list[dict[str, Any]]:
+        """Nacti preview radky pro zobrazeni detailu batchu."""
+
+        with _connect() as conn, conn.cursor() as cursor:
+            cursor.execute(
+                '\n            SELECT\n                row_number,\n                parsed_title,\n                parsed_year,\n                parsed_watched_on,\n                parsed_season_number,\n                parsed_episode_number,\n                parsed_imdb_id,\n                parsed_tmdb_id,\n                resolution_status,\n                resolved_tconst,\n                resolution_confidence,\n                resolution_note\n            FROM app.import_rows\n            WHERE batch_id = %s\n            ORDER BY row_number\n            LIMIT %s\n            ',
+                (batch_id, limit),
+            )
+            rows = cursor.fetchall()
+        return [
+            {
+                'row_number': row[0],
+                'parsed_title': row[1],
+                'parsed_year': row[2],
+                'parsed_watched_on': _parse_optional_date(row[3]),
+                'parsed_season_number': row[4],
+                'parsed_episode_number': row[5],
+                'parsed_imdb_id': row[6],
+                'parsed_tmdb_id': row[7],
+                'resolution_status': row[8],
+                'resolved_tconst': row[9],
+                'resolution_confidence': row[10],
+                'resolution_note': row[11],
+            }
+            for row in rows
+        ]
+
+    def fetch_resolved_rows(self, batch_id: str) -> list[dict[str, Any]]:
+        """Nacti jen vyresene importni radky pripravene ke commitu."""
+
+        with _connect() as conn, conn.cursor() as cursor:
+            cursor.execute(
+                "\n            SELECT id, source, parsed_watched_on, resolved_tconst, parsed_season_number, parsed_episode_number\n            FROM app.import_rows\n            WHERE batch_id = %s AND resolution_status = 'resolved' AND resolved_tconst IS NOT NULL\n            ORDER BY row_number\n            ",
+                (batch_id,),
+            )
+            rows = cursor.fetchall()
+        return [
+            {
+                'id': row[0],
+                'source': row[1],
+                'parsed_watched_on': _parse_optional_date(row[2]),
+                'resolved_tconst': row[3],
+                'parsed_season_number': row[4],
+                'parsed_episode_number': row[5],
+            }
+            for row in rows
+        ]
+
+    def commit_batch(self, *, batch_id: str, committed_at: str) -> dict[str, Any]:
+        """Potvrd batch pres serverovou PostgreSQL funkci."""
+
+        with _connect() as conn, conn.cursor() as cursor:
+            cursor.execute(
+                '\n            SELECT inserted_events, skipped_events, batch_status\n            FROM app.commit_import_batch(%s, %s::timestamp)\n            ',
+                (batch_id, committed_at),
+            )
+            row = cursor.fetchone()
+            conn.commit()
+        if row is None:
+            raise RuntimeError(f'PostgreSQL commit_import_batch({batch_id}) nevratil vysledek.')
+        return {
+            'inserted_events': int(row[0] or 0),
+            'skipped_events': int(row[1] or 0),
+            'batch_status': str(row[2] or 'committed'),
+        }
+
+    def fetch_existing_commits(self, batch_id: str, import_row_ids: list[str]) -> set[str]:
+        """Vrat uz jednou zapsane import row id pro dany batch."""
+
+        clean_ids = [str(item).strip() for item in import_row_ids if str(item).strip()]
+        if not clean_ids:
+            return set()
+        with _connect() as conn, conn.cursor() as cursor:
+            cursor.execute(
+                '\n            SELECT import_row_id\n            FROM app.watch_events\n            WHERE batch_id = %s AND import_row_id = ANY(%s)\n            ',
+                (batch_id, clean_ids),
+            )
+            rows = cursor.fetchall()
+        return {str(row[0]) for row in rows if row[0] is not None}
+
+
+_import_batch_store = ImportBatchStore()
 
 def content_state_uses_postgres(ui_config: UiConfig | None=None) -> bool:
     """Return whether content-state reads/writes use PostgreSQL."""
@@ -285,10 +452,17 @@ def fetch_watch_view_page_rows(*, limit: int, offset: int, cutoff_days: int | No
         rows = cursor.fetchall()
     return (total, rows)
 
-def fetch_hot_watchlist_page_rows(*, hot_limit: int, limit: int, offset: int) -> tuple[int, list[tuple[Any, ...]]]:
+def fetch_hot_watchlist_page_rows(*, hot_limit: int, limit: int, offset: int, available_in_cz: bool=False) -> tuple[int, list[tuple[Any, ...]]]:
     """Read grouped hot-watchlist rows directly from PostgreSQL."""
-    total_sql = "\n        WITH watched_titles AS (\n            SELECT display_tconst\n            FROM app.watched_display_rollup\n            WHERE display_tconst IS NOT NULL\n        ),\n        ranked_items AS (\n            SELECT\n                i.display_tconst,\n                row_number() OVER (\n                    PARTITION BY i.display_tconst\n                    ORDER BY i.added_at DESC NULLS LAST, i.updated_at DESC, COALESCE(i.title, i.parent_title, i.tconst)\n                ) AS group_row\n            FROM app.active_user_list_display_items AS i\n            WHERE i.list_id = 'watchlist'\n        )\n        SELECT COUNT(*)\n        FROM (\n            SELECT DISTINCT r.display_tconst\n            FROM ranked_items AS r\n            JOIN app.catalog_title_cards AS c ON c.tconst = r.display_tconst\n            LEFT JOIN watched_titles AS wt ON wt.display_tconst = r.display_tconst\n            WHERE r.group_row = 1\n              AND r.display_tconst IS NOT NULL\n              AND COALESCE(c.poster_relative_path, c.poster_local_path) IS NOT NULL\n              AND wt.display_tconst IS NULL\n            LIMIT %s\n        ) AS grouped\n    "
-    rows_sql = "\n        WITH watched_titles AS (\n            SELECT display_tconst\n            FROM app.watched_display_rollup\n            WHERE display_tconst IS NOT NULL\n        ),\n        ranked_items AS (\n            SELECT\n                i.display_tconst,\n                i.media_type,\n                i.title,\n                i.parent_title,\n                i.rank,\n                i.added_at,\n                i.notes,\n                row_number() OVER (\n                    PARTITION BY i.display_tconst\n                    ORDER BY i.added_at DESC NULLS LAST, i.updated_at DESC, COALESCE(i.title, i.parent_title, i.tconst)\n                ) AS group_row\n            FROM app.active_user_list_display_items AS i\n            WHERE i.list_id = 'watchlist'\n        ),\n        grouped_items AS (\n            SELECT\n                r.display_tconst,\n                r.media_type,\n                r.title,\n                r.parent_title,\n                NULL AS season_number,\n                NULL AS episode_number,\n                r.rank,\n                r.added_at,\n                r.notes\n            FROM ranked_items AS r\n            JOIN app.catalog_title_cards AS c ON c.tconst = r.display_tconst\n            LEFT JOIN watched_titles AS wt ON wt.display_tconst = r.display_tconst\n            WHERE r.group_row = 1\n              AND r.display_tconst IS NOT NULL\n              AND COALESCE(c.poster_relative_path, c.poster_local_path) IS NOT NULL\n              AND wt.display_tconst IS NULL\n            ORDER BY r.added_at DESC NULLS LAST, COALESCE(r.title, r.parent_title, r.display_tconst)\n            LIMIT %s\n        )\n        SELECT\n            g.display_tconst,\n            g.media_type,\n            g.title,\n            g.parent_title,\n            g.season_number,\n            g.episode_number,\n            g.rank,\n            g.added_at,\n            g.notes,\n            'Hot Watchlist' AS name,\n            'view' AS list_kind,\n            c.title_type,\n            c.start_year,\n            c.poster_relative_path,\n            c.poster_local_path,\n            c.primary_title\n        FROM grouped_items AS g\n        JOIN app.catalog_title_cards AS c ON c.tconst = g.display_tconst\n        ORDER BY g.added_at DESC NULLS LAST, COALESCE(g.title, g.parent_title, g.display_tconst)\n        LIMIT %s OFFSET %s\n    "
+    availability_cte = ''
+    availability_join = ''
+    availability_filter = ''
+    if available_in_cz:
+        availability_cte = "\n        ,\n        available_titles AS (\n            SELECT DISTINCT tconst\n            FROM app.tmdb_watch_providers\n            WHERE country_code = 'CZ'\n        )"
+        availability_join = '\n            JOIN available_titles AS at ON at.tconst = r.display_tconst'
+        availability_filter = '\n              AND at.tconst IS NOT NULL'
+    total_sql = f"\n        WITH watched_titles AS (\n            SELECT display_tconst\n            FROM app.watched_display_rollup\n            WHERE display_tconst IS NOT NULL\n        ),\n        ranked_items AS (\n            SELECT\n                i.display_tconst,\n                row_number() OVER (\n                    PARTITION BY i.display_tconst\n                    ORDER BY i.added_at DESC NULLS LAST, i.updated_at DESC, COALESCE(i.title, i.parent_title, i.tconst)\n                ) AS group_row\n            FROM app.active_user_list_display_items AS i\n            WHERE i.list_id = 'watchlist'\n        ){availability_cte}\n        SELECT COUNT(*)\n        FROM (\n            SELECT DISTINCT r.display_tconst\n            FROM ranked_items AS r\n            JOIN app.catalog_title_cards AS c ON c.tconst = r.display_tconst\n            LEFT JOIN watched_titles AS wt ON wt.display_tconst = r.display_tconst{availability_join}\n            WHERE r.group_row = 1\n              AND r.display_tconst IS NOT NULL\n              AND COALESCE(c.poster_relative_path, c.poster_local_path) IS NOT NULL\n              AND wt.display_tconst IS NULL{availability_filter}\n            LIMIT %s\n        ) AS grouped\n    "
+    rows_sql = f"\n        WITH watched_titles AS (\n            SELECT display_tconst\n            FROM app.watched_display_rollup\n            WHERE display_tconst IS NOT NULL\n        ),\n        ranked_items AS (\n            SELECT\n                i.display_tconst,\n                i.media_type,\n                i.title,\n                i.parent_title,\n                i.rank,\n                i.added_at,\n                i.notes,\n                row_number() OVER (\n                    PARTITION BY i.display_tconst\n                    ORDER BY i.added_at DESC NULLS LAST, i.updated_at DESC, COALESCE(i.title, i.parent_title, i.tconst)\n                ) AS group_row\n            FROM app.active_user_list_display_items AS i\n            WHERE i.list_id = 'watchlist'\n        ){availability_cte},\n        grouped_items AS (\n            SELECT\n                r.display_tconst,\n                r.media_type,\n                r.title,\n                r.parent_title,\n                NULL AS season_number,\n                NULL AS episode_number,\n                r.rank,\n                r.added_at,\n                r.notes\n            FROM ranked_items AS r\n            JOIN app.catalog_title_cards AS c ON c.tconst = r.display_tconst\n            LEFT JOIN watched_titles AS wt ON wt.display_tconst = r.display_tconst{availability_join}\n            WHERE r.group_row = 1\n              AND r.display_tconst IS NOT NULL\n              AND COALESCE(c.poster_relative_path, c.poster_local_path) IS NOT NULL\n              AND wt.display_tconst IS NULL{availability_filter}\n            ORDER BY r.added_at DESC NULLS LAST, COALESCE(r.title, r.parent_title, r.display_tconst)\n            LIMIT %s\n        )\n        SELECT\n            g.display_tconst,\n            g.media_type,\n            g.title,\n            g.parent_title,\n            g.season_number,\n            g.episode_number,\n            g.rank,\n            g.added_at,\n            g.notes,\n            'Hot Watchlist' AS name,\n            'view' AS list_kind,\n            c.title_type,\n            c.start_year,\n            c.poster_relative_path,\n            c.poster_local_path,\n            c.primary_title\n        FROM grouped_items AS g\n        JOIN app.catalog_title_cards AS c ON c.tconst = g.display_tconst\n        ORDER BY g.added_at DESC NULLS LAST, COALESCE(g.title, g.parent_title, g.display_tconst)\n        LIMIT %s OFFSET %s\n    "
     with _connect() as conn, conn.cursor() as cursor:
         cursor.execute(total_sql, (hot_limit,))
         total = int(cursor.fetchone()[0] or 0)
@@ -663,7 +837,7 @@ def fetch_user_list(list_id: str) -> dict[str, Any] | None:
         return None
     return {'id': row[0], 'slug': row[1], 'name': row[2], 'description': row[3], 'list_kind': row[4], 'ai_input_role': row[5]}
 
-def fetch_user_list_page_rows(*, list_id: str, limit: int, offset: int, exclude_watched: bool) -> tuple[dict[str, Any] | None, int, list[tuple[Any, ...]]]:
+def fetch_user_list_page_rows(*, list_id: str, limit: int, offset: int, exclude_watched: bool, available_in_cz: bool=False) -> tuple[dict[str, Any] | None, int, list[tuple[Any, ...]]]:
     """Read one grouped user-list page directly from PostgreSQL.
 
     The normal path gets page rows and the filtered total in one scan. A small
@@ -677,13 +851,20 @@ def fetch_user_list_page_rows(*, list_id: str, limit: int, offset: int, exclude_
         watched_cte = '\n            ,\n            watched_titles AS (\n                SELECT display_tconst\n                FROM app.watched_display_rollup\n                WHERE display_tconst IS NOT NULL\n            )\n        '
         watched_join = 'LEFT JOIN watched_titles AS wt ON wt.display_tconst = r.display_tconst'
         watched_filter = 'AND wt.display_tconst IS NULL'
+    availability_cte = ''
+    availability_join = ''
+    availability_filter = ''
+    if available_in_cz:
+        availability_cte = '\n            ,\n            available_titles AS (\n                SELECT DISTINCT tconst\n                FROM app.tmdb_watch_providers\n                WHERE country_code = \'CZ\'\n            )\n        '
+        availability_join = 'JOIN available_titles AS at ON at.tconst = r.display_tconst'
+        availability_filter = 'AND at.tconst IS NOT NULL'
     with _connect() as conn, conn.cursor() as cursor:
         cursor.execute('\n            SELECT id, slug, name, description, list_kind, ai_input_role\n            FROM app.user_lists\n            WHERE id = %s\n            ', (list_id,))
         list_row = cursor.fetchone()
         if list_row is None:
             return (None, 0, [])
-        count_sql = f'\n            WITH ranked_items AS (\n                SELECT\n                    i.display_tconst,\n                    row_number() OVER (\n                        PARTITION BY i.display_tconst\n                        ORDER BY i.rank NULLS LAST, i.added_at DESC NULLS LAST, COALESCE(i.title, i.parent_title, i.tconst)\n                    ) AS group_row\n                FROM app.active_user_list_display_items AS i\n                WHERE i.list_id = %s\n            )\n            {watched_cte}\n            SELECT COUNT(*)\n            FROM ranked_items AS r\n            JOIN app.catalog_title_cards AS c ON c.tconst = r.display_tconst\n            {watched_join}\n            WHERE r.group_row = 1\n              AND r.display_tconst IS NOT NULL\n              AND COALESCE(c.poster_relative_path, c.poster_local_path) IS NOT NULL\n              {watched_filter}\n        '
-        rows_sql = f'\n            WITH ranked_items AS (\n                SELECT\n                    i.display_tconst,\n                    i.media_type,\n                    i.title,\n                    i.parent_title,\n                    i.rank,\n                    i.added_at,\n                    i.notes,\n                    i.list_name,\n                    i.list_kind,\n                    row_number() OVER (\n                        PARTITION BY i.display_tconst\n                        ORDER BY i.rank NULLS LAST, i.added_at DESC NULLS LAST, COALESCE(i.title, i.parent_title, i.tconst)\n                    ) AS group_row\n                FROM app.active_user_list_display_items AS i\n                WHERE i.list_id = %s\n            )\n            {watched_cte}\n            SELECT\n                r.display_tconst,\n                r.media_type,\n                r.title,\n                r.parent_title,\n                NULL AS season_number,\n                NULL AS episode_number,\n                r.rank,\n                r.added_at,\n                r.notes,\n                r.list_name,\n                r.list_kind,\n                c.title_type,\n                c.start_year,\n                c.poster_relative_path,\n                c.poster_local_path,\n                c.primary_title,\n                COUNT(*) OVER () AS filtered_total\n            FROM ranked_items AS r\n            JOIN app.catalog_title_cards AS c ON c.tconst = r.display_tconst\n            {watched_join}\n            WHERE r.group_row = 1\n              AND r.display_tconst IS NOT NULL\n              AND COALESCE(c.poster_relative_path, c.poster_local_path) IS NOT NULL\n              {watched_filter}\n            ORDER BY r.rank NULLS LAST, r.added_at DESC NULLS LAST, COALESCE(r.title, r.parent_title, r.display_tconst)\n            LIMIT %s OFFSET %s\n        '
+        count_sql = f'\n            WITH ranked_items AS (\n                SELECT\n                    i.display_tconst,\n                    row_number() OVER (\n                        PARTITION BY i.display_tconst\n                        ORDER BY i.rank NULLS LAST, i.added_at DESC NULLS LAST, COALESCE(i.title, i.parent_title, i.tconst)\n                    ) AS group_row\n                FROM app.active_user_list_display_items AS i\n                WHERE i.list_id = %s\n            )\n            {watched_cte}{availability_cte}\n            SELECT COUNT(*)\n            FROM ranked_items AS r\n            JOIN app.catalog_title_cards AS c ON c.tconst = r.display_tconst\n            {watched_join}\n            {availability_join}\n            WHERE r.group_row = 1\n              AND r.display_tconst IS NOT NULL\n              AND COALESCE(c.poster_relative_path, c.poster_local_path) IS NOT NULL\n              {watched_filter}\n              {availability_filter}\n        '
+        rows_sql = f'\n            WITH ranked_items AS (\n                SELECT\n                    i.display_tconst,\n                    i.media_type,\n                    i.title,\n                    i.parent_title,\n                    i.rank,\n                    i.added_at,\n                    i.notes,\n                    i.list_name,\n                    i.list_kind,\n                    row_number() OVER (\n                        PARTITION BY i.display_tconst\n                        ORDER BY i.rank NULLS LAST, i.added_at DESC NULLS LAST, COALESCE(i.title, i.parent_title, i.tconst)\n                    ) AS group_row\n                FROM app.active_user_list_display_items AS i\n                WHERE i.list_id = %s\n            )\n            {watched_cte}{availability_cte}\n            SELECT\n                r.display_tconst,\n                r.media_type,\n                r.title,\n                r.parent_title,\n                NULL AS season_number,\n                NULL AS episode_number,\n                r.rank,\n                r.added_at,\n                r.notes,\n                r.list_name,\n                r.list_kind,\n                c.title_type,\n                c.start_year,\n                c.poster_relative_path,\n                c.poster_local_path,\n                c.primary_title,\n                COUNT(*) OVER () AS filtered_total\n            FROM ranked_items AS r\n            JOIN app.catalog_title_cards AS c ON c.tconst = r.display_tconst\n            {watched_join}\n            {availability_join}\n            WHERE r.group_row = 1\n              AND r.display_tconst IS NOT NULL\n              AND COALESCE(c.poster_relative_path, c.poster_local_path) IS NOT NULL\n              {watched_filter}\n              {availability_filter}\n            ORDER BY r.rank NULLS LAST, r.added_at DESC NULLS LAST, COALESCE(r.title, r.parent_title, r.display_tconst)\n            LIMIT %s OFFSET %s\n        '
         cursor.execute(rows_sql, (list_id, limit, offset))
         rows = cursor.fetchall()
         if rows:
@@ -883,6 +1064,8 @@ def fetch_latest_ai_recommendation_for_title(tconst: str) -> dict[str, Any] | No
     return {'candidate_id': row[0], 'run_id': row[1], 'source_filename': row[2], 'intent': row[3], 'imported_at': _parse_optional_timestamp(row[4]), 'title': row[5], 'year': row[6], 'imdb_id': row[7], 'tmdb_id': row[8], 'media_type': row[9], 'confidence': row[10], 'status': row[11], 'priority': row[12], 'fit_reasons': json.loads(row[13] or '[]'), 'risk_reasons': json.loads(row[14] or '[]'), 'source_signal_refs': json.loads(row[15] or '[]'), 'notes': row[16]}
 
 def _ai_recommendation_list_notes(recommendation: dict[str, Any]) -> str:
+    """Slozi text poznamky pro seznamovou polozku z AI doporuceni."""
+
     lines = [f"AI import: confidence={recommendation.get('confidence') or 'unknown'}, status={recommendation.get('status') or 'unknown'}"]
     fit_reasons = [str(item) for item in recommendation.get('fit_reasons') or [] if str(item).strip()]
     risk_reasons = [str(item) for item in recommendation.get('risk_reasons') or [] if str(item).strip()]
@@ -1051,60 +1234,38 @@ def fetch_search_recall_match(*, entity_type: str, query_key: str, query_text_fo
 
 def create_import_batch_record(*, batch_id: str, source: str, filename: str, checksum: str, status: str, created_at: str) -> None:
     """Insert one import batch row into PostgreSQL."""
-    with _connect() as conn, conn.cursor() as cursor:
-        cursor.execute('\n            INSERT INTO app.import_batches (id, source, filename, checksum, status, created_at)\n            VALUES (%s, %s, %s, %s, %s, %s::timestamp)\n            ', (batch_id, source, filename, checksum, status, created_at))
-        conn.commit()
+    _import_batch_store.create_batch_record(
+        batch_id=batch_id,
+        source=source,
+        filename=filename,
+        checksum=checksum,
+        status=status,
+        created_at=created_at,
+    )
 
 def insert_import_rows(rows: list[dict[str, Any]]) -> None:
     """Insert previewed import rows into PostgreSQL."""
-    if not rows:
-        return
-    with _connect() as conn, conn.cursor() as cursor:
-        cursor.executemany('\n            INSERT INTO app.import_rows (\n                id,\n                batch_id,\n                source,\n                row_number,\n                raw_json,\n                parsed_title,\n                parsed_year,\n                parsed_watched_on,\n                parsed_season_number,\n                parsed_episode_number,\n                parsed_imdb_id,\n                parsed_tmdb_id,\n                resolution_status,\n                resolved_tconst,\n                resolution_confidence,\n                resolution_note\n            )\n            VALUES (\n                %s, %s, %s, %s, %s, %s, %s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s\n            )\n            ', [(row['id'], row['batch_id'], row['source'], row['row_number'], row['raw_json'], row.get('parsed_title'), row.get('parsed_year'), row.get('parsed_watched_on'), row.get('parsed_season_number'), row.get('parsed_episode_number'), row.get('parsed_imdb_id'), row.get('parsed_tmdb_id'), row['resolution_status'], row.get('resolved_tconst'), row.get('resolution_confidence'), row.get('resolution_note')) for row in rows])
-        conn.commit()
+    _import_batch_store.insert_rows(rows)
 
 def fetch_import_batch_record(batch_id: str) -> dict[str, Any] | None:
     """Read one import batch row from PostgreSQL."""
-    with _connect() as conn, conn.cursor() as cursor:
-        cursor.execute('\n            SELECT id, source, filename, checksum, status, created_at\n            FROM app.import_batches\n            WHERE id = %s\n            ', (batch_id,))
-        row = cursor.fetchone()
-    if row is None:
-        return None
-    return {'id': row[0], 'source': row[1], 'filename': row[2], 'checksum': row[3], 'status': row[4], 'created_at': _parse_optional_timestamp(row[5])}
+    return _import_batch_store.fetch_batch_record(batch_id)
 
 def fetch_import_batch_rows(batch_id: str, *, limit: int=100) -> list[dict[str, Any]]:
     """Read preview rows for one import batch from PostgreSQL."""
-    with _connect() as conn, conn.cursor() as cursor:
-        cursor.execute('\n            SELECT\n                row_number,\n                parsed_title,\n                parsed_year,\n                parsed_watched_on,\n                parsed_season_number,\n                parsed_episode_number,\n                parsed_imdb_id,\n                parsed_tmdb_id,\n                resolution_status,\n                resolved_tconst,\n                resolution_confidence,\n                resolution_note\n            FROM app.import_rows\n            WHERE batch_id = %s\n            ORDER BY row_number\n            LIMIT %s\n            ', (batch_id, limit))
-        rows = cursor.fetchall()
-    return [{'row_number': row[0], 'parsed_title': row[1], 'parsed_year': row[2], 'parsed_watched_on': _parse_optional_date(row[3]), 'parsed_season_number': row[4], 'parsed_episode_number': row[5], 'parsed_imdb_id': row[6], 'parsed_tmdb_id': row[7], 'resolution_status': row[8], 'resolved_tconst': row[9], 'resolution_confidence': row[10], 'resolution_note': row[11]} for row in rows]
+    return _import_batch_store.fetch_batch_rows(batch_id, limit=limit)
 
 def fetch_resolved_import_rows(batch_id: str) -> list[dict[str, Any]]:
     """Read resolved import rows for commit from PostgreSQL."""
-    with _connect() as conn, conn.cursor() as cursor:
-        cursor.execute("\n            SELECT id, source, parsed_watched_on, resolved_tconst, parsed_season_number, parsed_episode_number\n            FROM app.import_rows\n            WHERE batch_id = %s AND resolution_status = 'resolved' AND resolved_tconst IS NOT NULL\n            ORDER BY row_number\n            ", (batch_id,))
-        rows = cursor.fetchall()
-    return [{'id': row[0], 'source': row[1], 'parsed_watched_on': _parse_optional_date(row[2]), 'resolved_tconst': row[3], 'parsed_season_number': row[4], 'parsed_episode_number': row[5]} for row in rows]
+    return _import_batch_store.fetch_resolved_rows(batch_id)
 
 def commit_import_batch(*, batch_id: str, committed_at: str) -> dict[str, Any]:
     """Commit one resolved import batch through the server-side PostgreSQL function."""
-    with _connect() as conn, conn.cursor() as cursor:
-        cursor.execute('\n            SELECT inserted_events, skipped_events, batch_status\n            FROM app.commit_import_batch(%s, %s::timestamp)\n            ', (batch_id, committed_at))
-        row = cursor.fetchone()
-        conn.commit()
-    if row is None:
-        raise RuntimeError(f'PostgreSQL commit_import_batch({batch_id}) nevratil vysledek.')
-    return {'inserted_events': int(row[0] or 0), 'skipped_events': int(row[1] or 0), 'batch_status': str(row[2] or 'committed')}
+    return _import_batch_store.commit_batch(batch_id=batch_id, committed_at=committed_at)
 
 def fetch_existing_import_commits(batch_id: str, import_row_ids: list[str]) -> set[str]:
     """Return which import row ids already produced watch events in PostgreSQL."""
-    clean_ids = [str(item).strip() for item in import_row_ids if str(item).strip()]
-    if not clean_ids:
-        return set()
-    with _connect() as conn, conn.cursor() as cursor:
-        cursor.execute('\n            SELECT import_row_id\n            FROM app.watch_events\n            WHERE batch_id = %s AND import_row_id = ANY(%s)\n            ', (batch_id, clean_ids))
-        rows = cursor.fetchall()
-    return {str(row[0]) for row in rows if row[0] is not None}
+    return _import_batch_store.fetch_existing_commits(batch_id, import_row_ids)
 
 def upsert_tmdb_mapping_record(*, tconst: str, tmdb_media_type: str, tmdb_id: int, matched_by: str, sync_status: str, matched_at: str, last_error: str | None) -> None:
     """Upsert one TMDB mapping row in PostgreSQL."""
@@ -1217,18 +1378,28 @@ def record_local_seed_meta(*, seed_name: str, seeded_at: str, note: str | None) 
         conn.commit()
 
 def _row_to_user_rating(row: tuple[Any, ...] | list[Any]) -> dict[str, Any]:
+    """Prevede SQL radek user ratingu na slovnikovy payload."""
+
     return {'canonical_key': row[0], 'tconst': row[1], 'rating': row[2], 'liked_notes': row[3], 'disliked_notes': row[4], 'rated_at': _parse_optional_timestamp(row[5]), 'updated_at': _parse_optional_timestamp(row[6])}
 
 def _row_to_watch_event(row: tuple[Any, ...] | list[Any]) -> dict[str, Any]:
+    """Prevede SQL radek watch eventu na slovnikovy payload."""
+
     return {'id': row[0], 'tconst': row[1], 'event_scope': row[2], 'watched_on': row[3], 'source': row[4], 'batch_id': row[5], 'import_row_id': row[6], 'rating': row[7], 'notes': row[8], 'created_at': _parse_optional_timestamp(row[9])}
 
 def _row_to_content_state(row: tuple[Any, ...] | list[Any]) -> dict[str, Any]:
+    """Prevede SQL radek content state na slovnikovy payload."""
+
     return {'tconst': row[0], 'interest_state': row[1], 'last_previewed_at': _parse_optional_timestamp(row[2]), 'last_watched_at': _parse_optional_timestamp(row[3]), 'updated_at': _parse_optional_timestamp(row[4])}
 
 def _row_to_title_role_signal(row: tuple[Any, ...] | list[Any]) -> dict[str, Any]:
+    """Prevede SQL radek title role signalu na slovnikovy payload."""
+
     return {'signal_key': row[0], 'tconst': row[1], 'nconst': row[2], 'character_name': row[3], 'signal_type': row[4], 'polarity': row[5], 'strength': row[6], 'notes': row[7], 'source_origin': row[8], 'source_ref': row[9], 'created_at': _parse_optional_timestamp(row[10]), 'updated_at': _parse_optional_timestamp(row[11])}
 
 def _parse_optional_timestamp(value: str) -> datetime | None:
+    """Prevede optional timestamp payload na `datetime` nebo `None`."""
+
     if value is None:
         return None
     if isinstance(value, datetime):
@@ -1239,21 +1410,29 @@ def _parse_optional_timestamp(value: str) -> datetime | None:
     return datetime.fromisoformat(stripped)
 
 def _parse_optional_date(value: Any) -> str | None:
+    """Prevede optional datumovy payload na retezec nebo `None`."""
+
     if value is None:
         return None
     return str(value)
 
 def _loads_json_or_none(value: str | None) -> Any:
+    """Nacte JSON payload nebo vrati `None`."""
+
     if value is None:
         return None
     return json.loads(value)
 
 def _connect() -> psycopg.Connection:
+    """Vytvori runtime psycopg spojeni pro aplikačni DB roli."""
+
     config = _load_runtime_postgres_config()
     return psycopg.connect(host=config.host, port=config.port, dbname=config.database, user=config.user, password=config.password, connect_timeout=10)
 
 @lru_cache(maxsize=1)
 def _load_runtime_postgres_config() -> RuntimePostgresConfig:
+    """Nacte a cachuje runtime PostgreSQL konfiguraci z `.env`."""
+
     values = dict(dotenv_values(ENV_PATH, interpolate=False))
     password = values.get('POSTGRES_APP_PASSWORD') or ''
     if not password:

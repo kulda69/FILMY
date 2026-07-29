@@ -756,3 +756,30 @@ end-to-end. Kritické poučení pro příště:
 - po reinstalaci Tailscale vždy znovu ověřit hostname a IP node
 - `Caddy` provozovat přes systémový `LaunchDaemon`, ne ručně v Terminálu
 - když URL nefunguje z jiného zařízení, nejdřív ověřit klientský Tailscale stav, ne hned znovu rozbírat server
+
+## Follow-up: FILMY deploy a TMDB badge
+
+Při dotažení samotného deploye `FILMY` na `mac-mini` se ukázaly ještě tři
+praktické provozní opravy mimo Tailscale:
+
+- startup guard pro PostgreSQL katalog nesměl na serveru s hotovým PG katalogem
+  zbytečně vyžadovat lokální `imdb/*.tsv`
+- TMDB asset existence nesměla po přesunu mezi stroji spoléhat jen na staré
+  absolutní `local_path`, ale musela umět dopočítat aktuální cestu i z
+  `relative_path`
+- serverový DB upgrade runner nesměl při každém upgradu znovu přehrávat
+  `001_bootstrap.sql` nad už existující databází
+
+Další poznatek z live nasazení:
+
+- na tomto stroji je ověřený funkční upgrade příkaz
+  `.venv/bin/python -m filmy.scripts.upgrade_database`
+- varianta `uv run filmy-upgrade-database` tu zatím není spolehlivá, protože
+  `uv sync` neinstaluje `project.scripts` entrypointy
+
+Finální výsledek:
+
+- po `git pull`, `uv sync`, `.venv/bin/python -m filmy.scripts.upgrade_database`
+  a restartu `cz.kulda.filmy` se na `mac-mini` vše zobrazuje normálně
+- badge `TMDB fetching in background`, který se ukazoval i po přenosu
+  `data/assets`, zmizel

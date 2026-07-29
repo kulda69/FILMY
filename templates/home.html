@@ -170,6 +170,27 @@
                                 {% if selected_list and selected_list.description %}
                                 <div class="small text-secondary">{{ selected_list.description }}</div>
                                 {% endif %}
+                                {% if selected_list and (selected_list.item_type == "list" or selected_list.view_kind == "hot_watchlist") %}
+                                <form action="" method="get" class="d-flex flex-wrap align-items-center gap-2 mt-2">
+                                    <input type="hidden" name="list_id" value="{{ selected_list.id }}">
+                                    <div class="form-check form-switch m-0">
+                                        <input
+                                            class="form-check-input"
+                                            type="checkbox"
+                                            role="switch"
+                                            id="home-available-in-cz"
+                                            name="available_in_cz"
+                                            value="1"
+                                            {% if selected_list_filters and selected_list_filters.available_in_cz %}checked{% endif %}
+                                            onchange="this.form.submit()"
+                                        >
+                                        <label class="form-check-label small text-secondary" for="home-available-in-cz">Jen dostupné v ČR</label>
+                                    </div>
+                                    <noscript>
+                                        <button type="submit" class="btn btn-sm btn-outline-light">Použít</button>
+                                    </noscript>
+                                </form>
+                                {% endif %}
                             </div>
                             {% if selected_list_has_more and selected_list_show_all_url %}
                             <a class="link-light small text-decoration-none ms-auto" href="{{ selected_list_show_all_url }}">Show all »</a>

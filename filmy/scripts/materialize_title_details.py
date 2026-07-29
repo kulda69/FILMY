@@ -1,3 +1,5 @@
+"""CLI materializace title detail cache souboru."""
+
 from __future__ import annotations
 
 import argparse
@@ -10,13 +12,16 @@ from filmy.db import _title_detail_cache_path, get_title_detail_cache_targets, g
 
 
 def _emit(payload: dict[str, object]) -> None:
+    """Vypis jeden JSON zaznam o stavu materializace."""
     print(json.dumps(payload, ensure_ascii=False), flush=True)
 
 
 def _start_heartbeat_thread(state: dict[str, object], interval_seconds: float = 10.0) -> tuple[threading.Event, threading.Thread]:
+    """Spust heartbeat vlakno pro dlouhy beh cache materializace."""
     stop_event = threading.Event()
 
     def run() -> None:
+        """Pravidelne emituj heartbeat s poctem zapsanych a preskocenych polozek."""
         while not stop_event.wait(interval_seconds):
             _emit(
                 {
@@ -35,10 +40,12 @@ def _start_heartbeat_thread(state: dict[str, object], interval_seconds: float = 
 
 
 def _iter_target_titles(limit: int | None, rewrite: bool) -> list[dict[str, object]]:
+    """Vrat tituly vhodne pro aktualni davku cache materializace."""
     return get_title_detail_cache_targets(limit=limit, include_ready=rewrite)
 
 
 def materialize_title_detail_cache(limit: int | None = None, rewrite: bool = False) -> dict[str, object]:
+    """Materializuj title detail cache soubory pro vybrane tituly."""
     targets = _iter_target_titles(limit=limit, rewrite=rewrite)
     start = perf_counter()
     written = 0
@@ -147,6 +154,7 @@ def materialize_title_detail_cache(limit: int | None = None, rewrite: bool = Fal
 
 
 def main() -> int:
+    """CLI vstup pro davkovou materializaci title detail cache."""
     parser = argparse.ArgumentParser(description="Materialize cached title detail files.")
     parser.add_argument("--limit", type=int, default=None, help="Limit the number of titles to process.")
     parser.add_argument("--rewrite", action="store_true", help="Rewrite cache files even when they already exist.")

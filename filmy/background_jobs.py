@@ -1,3 +1,5 @@
+"""Jednoduchy background job supervisor a pomocne provozni utility."""
+
 from __future__ import annotations
 
 import json
@@ -26,6 +28,7 @@ def signal_background_activity(reason: str, *, target_tconst: str | None = None)
 
 
 def read_background_activity_signal() -> dict[str, Any] | None:
+    """Nacti posledni signal pro metadata pipeline, pokud existuje."""
     try:
         raw = METADATA_PIPELINE_SIGNAL_PATH.read_text(encoding="utf-8").strip()
     except OSError:
@@ -72,6 +75,7 @@ class BackgroundJobSupervisor:
     """Starts, monitors and restarts long-running helper jobs."""
 
     def __init__(self) -> None:
+        """Priprav konfiguraci supervisoru a pocatecni runtime stav."""
         self._supervisor_log_path = DATA_DIR / "background_supervisor.log"
         self._jobs: dict[str, RunningJob] = {
             spec.name: RunningJob(spec=spec)
@@ -111,6 +115,7 @@ class BackgroundJobSupervisor:
         self._homepage_snapshot_refreshing: bool = False
 
     def start(self) -> None:
+        """Spust supervisor vlakno a vsechny definovane workery."""
         with self._lock:
             if self._thread is not None:
                 return
@@ -127,6 +132,7 @@ class BackgroundJobSupervisor:
                 self._stop_existing_pid(job.spec)
 
     def stop(self) -> None:
+        """Bezpecne ukonci supervisor i vsechny bezici workery."""
         with self._lock:
             thread = self._thread
             self._thread = None
@@ -137,6 +143,7 @@ class BackgroundJobSupervisor:
             self._stop_job(job, reason="shutdown")
 
     def status(self) -> dict[str, Any]:
+        """Vrat podrobny runtime stav vsech spravovanych jobu."""
         with self._lock:
             jobs: list[dict[str, Any]] = []
             now = time.time()
@@ -162,6 +169,7 @@ class BackgroundJobSupervisor:
         return {"enabled": True, "jobs": jobs}
 
     def homepage_snapshot(self) -> dict[str, Any]:
+        """Vrat zkraceny snapshot pro homepage kartu background aktivity."""
         now = time.time()
         with self._lock:
             if (
@@ -205,6 +213,7 @@ class BackgroundJobSupervisor:
         }
 
     def _refresh_homepage_snapshot(self) -> None:
+        """Asynchronne prepocitej cache snapshot pro homepage."""
         status = self.status()
         tmdb_total: int | None = None
         tmdb_complete: int | None = None
@@ -242,12 +251,14 @@ class BackgroundJobSupervisor:
             self._homepage_snapshot_refreshing = False
 
     def _run(self) -> None:
+        """Prubezne kontroluj a restartuj spravovane procesy."""
         while not self._stop_event.wait(10.0):
             with self._lock:
                 for job in self._jobs.values():
                     self._check_job(job)
 
     def _check_job(self, job: RunningJob) -> None:
+        """Vyhodnot stav jednoho jobu a pripadne ho restartuj."""
         process = job.process
         now = time.time()
         if process is None:
@@ -274,6 +285,7 @@ class BackgroundJobSupervisor:
             self._start_job(job, reason="restart_after_stale")
 
     def _is_stale(self, job: RunningJob, now: float) -> bool:
+        """Vyhodnot, zda job dlouho neaktualizoval svuj log."""
         if not job.spec.log_path.exists():
             return False
         try:
@@ -283,6 +295,7 @@ class BackgroundJobSupervisor:
         return (now - log_mtime) > job.spec.stale_after_seconds
 
     def _start_job(self, job: RunningJob, *, reason: str) -> None:
+        """Spust jeden worker proces a zapis jeho PID i auditni udalost."""
         job.spec.log_path.parent.mkdir(parents=True, exist_ok=True)
         job.spec.pid_path.parent.mkdir(parents=True, exist_ok=True)
         self._stop_existing_pid(job.spec)
@@ -309,6 +322,7 @@ class BackgroundJobSupervisor:
         self._write_supervisor_event(job.spec.name, "started", {"pid": process.pid, "reason": reason})
 
     def _stop_job(self, job: RunningJob, *, reason: str) -> None:
+        """Ukonci jeden worker proces vcetne cele process group."""
         process = job.process
         if process is None:
             return
@@ -335,6 +349,7 @@ class BackgroundJobSupervisor:
         self._write_supervisor_event(job.spec.name, "stopped", {"reason": reason, "exit_code": process.returncode})
 
     def _close_log_handle(self, job: RunningJob) -> None:
+        """Bezpecne flushni a zavri otevreny log handle workeru."""
         if job.log_handle is None:
             return
         try:
@@ -346,6 +361,7 @@ class BackgroundJobSupervisor:
             job.log_handle = None
 
     def _write_supervisor_event(self, job_name: str, event: str, payload: dict[str, Any]) -> None:
+        """Pripoj auditni JSON zaznam do supervisor logu."""
         self._supervisor_log_path.parent.mkdir(parents=True, exist_ok=True)
         record = {
             "ts": time.time(),
@@ -357,9 +373,11 @@ class BackgroundJobSupervisor:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def _tmdb_target_counts(self) -> tuple[int, int]:
+        """Vrat aktualni globalni pocet TMDB enrichment targetu."""
         return get_tmdb_target_counts()
 
     def _stop_existing_pid(self, spec: JobSpec) -> None:
+        """Uklid zbyly starsi proces podle PID souboru pred novym startem."""
         if not spec.pid_path.exists():
             return
         try:

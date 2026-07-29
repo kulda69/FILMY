@@ -1,5 +1,92 @@
 # Historie projektu
 
+## 2026-07-29 - Technicke navazani po cleanupu a smoke pred commitem
+
+- Navazani na posledni cleanup checkpoint probehlo bez dalsich oprav kodu: nejdriv proslo staticke overeni `python3 -m py_compile` nad hlavni FastAPI/router/DB vrstvou.
+- Cileny testovaci rez `uv run pytest tests/test_home_ai_suggestions.py tests/test_user_lists_postgres_overlay.py` skoncil `19 passed`; jedina hlaska byl znamy `StarletteDeprecationWarning` kolem `fastapi.testclient`.
+- Pokus o zvednuti dalsi lokalni instance pres `.venv/bin/python main.py` ukazal, ze port `127.0.0.1:8019` uz byl obsazeny, takze smoke pokracoval nad bezici lokalni instanci misto slepeho druheho startu.
+- HTTP smoke nad `127.0.0.1:8019` vratil `200` pro `/` (`~0.79 s`), `/titles/tt0133093` (`~1.22 s`), `/titles/tt0133093/main-cast` (`~0.79 s`), `/lists/watchlist` (`~1.22 s`) a `/api/ai/context` (`~1.26 s`); v odpovedich byly pritomne ocekavane markery pro `Main cast`, watchlist flow a AI context payload.
+- Prakticky dalsi krok se tim nemení: pred commitem porad chybi uz jen kratke realne pouziti appky primo Jirim a az potom ma navazat horky ukol vztahu mezi listy / `Watched`.
+
+## 2026-07-28 - Dalsi audit dlouhych souboru, nova `ImportBatchStore` class a dalsi FastAPI response modely
+
+- Repo-wide audit dlouhych Python souboru ukazal, ze dalsi nejvetsi kandidati po docstringovem cleanupu jsou hlavne `filmy/runtime_postgres.py`, `filmy/app_shared.py` a `filmy/routers/api.py`; naopak `db.py`, `db_lookup.py` a `db_legacy.py` jsou sice stale dlouhe, ale uz ted slouzi spis jako facade nebo tematicka seskupeni nez jako jeden nerozlisitelny monolit.
+- V `filmy/runtime_postgres.py` pribyla skutecna Python trida `ImportBatchStore`, ktera soustredila importni preview/commit storage workflow (`create_import_batch_record`, `insert_import_rows`, `fetch_import_batch_record`, `fetch_import_batch_rows`, `fetch_resolved_import_rows`, `commit_import_batch`, `fetch_existing_import_commits`). Puvodni funkce zustaly zachovane jako tenke wrappery, aby se nerozbily existujici volaci body ani testovaci patch points.
+- V `filmy/routers/api.py` pribyly dalsi explicitni `response_model` kontrakty i mimo puvodni AI endpointy: IMDb manifest, rebuild katalogu, content-state mutation, knihovni watchlist/rating/watch write endpointy a import preview/batch/commit workflow. FastAPI vrstva tak ma o neco pevnejsi OpenAPI a validacni hranice i v casti admin/write API.
+- Overeni: `python3 -m py_compile filmy/runtime_postgres.py filmy/routers/api.py` proslo.
+
+## 2026-07-28 - Repo-wide docstringovy cleanup dokoncen v celem `filmy/`
+
+- Repo-wide audit nad `filmy/**/*.py` je po posledni davce na `0` chybejicich docstringu. Krome velkych DB facade modulu byly dotazene i modulove docstringy v routerech, integracich, AI/helper modulech a malych CLI skriptech.
+- Posledni zbytky byly hlavne technicke: modulove docstringy kvuli poradi s `from __future__ import annotations`, helpery v `app_shared.py` a `runtime_postgres.py`, starsi `legacy/trakt_export.py` a rebuild skript `scripts/rebuild_catalog_postgresql.py`.
+- Overeni: opakovane `python3 -m py_compile` nad dotcenymi soubory proslo a repo-wide AST kontrola nad `filmy/**/*.py` ukazala `TOTAL_FILES_WITH_MISSING=0`.
+
+## 2026-07-28 - Docstringovy cleanup `db.py`
+
+- `filmy/db.py` je po samostatnem rezu na `0` chybejicich docstringu. Dopsana je centralni facade, kompatibilni wrappery nad rozrezanymi moduly `db_lookup`, `db_presentation`, `db_library`, `db_ai`, `db_tmdb`, `db_legacy` i spodni shared helper vrstva pro import preview, fingerprinty, local identity, Trakt diff utility a dalsi male runtime helpery.
+- V tomhle modulu jsem zamerne nepridaval dalsi novou Python class jen kvuli dokumentacnimu cleanupu. Vetsina zbytku uz byla tenka facade nebo nizkourovnove utility; dalsi class obalka by tady spis zvysila hluk nez citelnost.
+- Overeni: `python3 -m py_compile filmy/db.py` proslo. Po tehle davce je hlavni DB facade vrstva docstringove srovnana a dalsi krok je zbyvajici repo-wide audit dlouhych souboru, dalsich smysluplnych `class` a explicitni FastAPI review.
+
+## 2026-07-28 - Docstringovy cleanup `db_legacy.py`
+
+- `filmy/db_legacy.py` je po samostatnem rezu na `0` chybejicich docstringu. Dopsane jsou verejne legacy facade pro Trakt exporty, IMDb CSV seznamy a Plex bootstrap sync, ale i interni `_sync_trakt_*`, `_sync_imdb_*`, `_sync_plex_*` bloky a kompatibilni wrapper `_PgCompatConnection`.
+- V tomhle modulu jsem zamerne nepridaval dalsi novou Python class. Prirodzena class hranice uz existovala v `_PgCompatConnection` a dalsi service obalka by spis umelo prebalovala procedurani legacy logiku bez realneho zjednoduseni.
+- Overeni: `python3 -m py_compile filmy/db_legacy.py` proslo. Po tehle davce je nejvetsim zbylym docstringovym dluhem hlavne centralni facade `filmy/db.py`.
+
+## 2026-07-28 - Dalsi repo-wide cleanup: background skripty a LocalLibraryReadModelSupport
+
+- Operacni a background vrstva uz nema slepa mista v dokumentaci: na 0 chybejicich docstringu byly dotažene moduly `filmy/background_jobs.py`, `filmy/genre_scoring.py`, `filmy/scripts/run_imdb_refresh.py`, `filmy/scripts/run_metadata_pipeline.py`, `filmy/scripts/run_tmdb_backfill.py`, `filmy/scripts/materialize_title_details.py`, `filmy/scripts/materialize_person_details.py` a `filmy/scripts/materialize_person_portraits.py`.
+- V `filmy/db_library.py` pribyla realna Python trida `LocalLibraryReadModelSupport`, ktera soustredila kratkou in-memory cache pro library status a opakovanou logiku kolem listovych read modelu (`episode -> series`, watched display seskupeni, group cards a detail skupin). Puvodni funkce zustaly zachovane jako tenke wrappery, aby se nerozbil zbytek aplikace ani testovaci patch points.
+- `filmy/db_library.py` soucasne dostalo podrobnejsi docstringy i na verejnou fasadu; po teto davce je docstringove kompletni. Nejvetsi zbytek cleanupu tak zustava hlavne v `filmy/db.py`, `filmy/db_lookup.py`, `filmy/db_tmdb.py`, `filmy/db_legacy.py` a `filmy/db_presentation.py`.
+
+## 2026-07-28 - Docstringovy cleanup `db_lookup.py`
+
+- `filmy/db_lookup.py` je po samostatnem rezu na `0` chybejicich docstringu. Dopsane jsou nejen verejne facade funkce `lookup_*` a `describe_*`, ale i engine metody, kandidatni prevody, recall helpery, confidence pravidla, SQL lookup helpery a similarity utility.
+- V tomhle modulu uz predtim existovaly smysluplne realne Python tridy `TitleLookupEngine` a `PersonLookupEngine`, takze dalsi trida by byla umele vrstveni bez jasneho prinosu. Cleanup se proto omezil na dokumentaci a citelnost, ne na dalsi prebalovani logiky.
+- Overeni: `python3 -m py_compile filmy/db_lookup.py` proslo. Po teto davce mezi nejvetsimi docstringovymi dluhy zustavaji hlavne `filmy/db.py`, `filmy/db_tmdb.py`, `filmy/db_legacy.py` a `filmy/db_presentation.py`.
+
+## 2026-07-28 - Docstringovy cleanup `db_tmdb.py`
+
+- `filmy/db_tmdb.py` je po samostatnem rezu na `0` chybejicich docstringu. Dopsane jsou verejne facade funkce kolem TMDB mapovani a assetu, completion helpery, target-selection helpery, cache targety i utility pro lokalni asset cesty a URL.
+- Stejne jako u `db_lookup.py` jsem tam nepridaval dalsi umelou tridu navic. Modul uz mel vhodne hranice v existujicich datovych tridach `TmdbTargetItem`, `TitleDetailCacheTarget` a `PersonDetailCacheTarget`; dalsi cleanup byl proto ciste o citelnosti a dokumentaci.
+- Overeni: `python3 -m py_compile filmy/db_tmdb.py` proslo. Po teto davce zustavaji jako nejvetsi docstringove dluhy hlavne `filmy/db.py`, `filmy/db_legacy.py` a `filmy/db_presentation.py`.
+
+## 2026-07-28 - Docstringovy cleanup `db_presentation.py`
+
+- `filmy/db_presentation.py` je po samostatnem rezu na `0` chybejicich docstringu. Dopsane jsou render helpery, cesty k disk cache, portrait/biography utility, cache-status helpery, load/store helpery, source-fingerprint logika i TMDB cache-signature utility.
+- V tomhle modulu uz predtim byly spravne zvolene realne Python builder tridy `TitlePresentationBuilder` a `PersonPresentationBuilder`, takze dalsi trida by jen umela vrstvila logiku bez jasneho zisku. Cleanup byl proto zamerne dokumentacni.
+- Overeni: `python3 -m py_compile filmy/db_presentation.py` proslo. Po teto davce zustava jako nejvetsi zbytek hlavne `filmy/db_legacy.py` a hlavni facade `filmy/db.py`.
+
+## 2026-07-28 - Repo-wide docstring cleanup a nova TmdbClient class
+
+- V `filmy/integrations/tmdb.py` pribyla skutecna servisni trida `TmdbClient`, ktera centralizuje TMDB rate-limit, konfiguracni cache, retry politiku, enrichment orchestrace a praci s lokalnimi metadata soubory. Verejne funkce zustaly zachovane jako tenke wrappery, aby se nerozbil zbytek aplikace ani testovaci patch points.
+- Doplneny chybejici docstringy v dalsi sade modulu, ktere uz ted nevyzaduji dohledavani implicitni znalosti z chatu: `filmy/routers/api.py`, `filmy/routers/ui.py`, `filmy/db_ai.py`, `filmy/config.py`, `filmy/db_people.py`, `filmy/imdb_refresh.py`, `filmy/ai_recommendations.py`, `filmy/suggestion_engine.py`, `filmy/markdown.py` a `filmy/integrations/plex.py`.
+- Prubezny audit po teto davce potvrdil, ze nejtezsi zbytek uz neni v routerech ani integracich, ale hlavne v rozsahlych DB facade modulech (`db.py`, `db_lookup.py`, `db_tmdb.py`, `db_legacy.py`, `db_library.py`, `db_presentation.py`) a v nekolika operacnich skriptech. Dalsi cleanup proto ma jit po techto blocich inkrementalne.
+
+## 2026-07-28 - FastAPI cleanup: mensi web routery, response modely a breadcrumb class
+
+- `filmy/routers/web.py` uz neni monoliticky router. Zustal jako skladaci vstupni bod a konkretni HTML routy se rozdelily do mensich modulu `web_home.py`, `web_search.py`, `web_lists.py`, `web_suggestions.py`, `web_system.py` a `web_titles.py`.
+- Kvuli bezpecnemu refaktoru a zachovani starych testu zustal v `filmy.routers.web` zpetne kompatibilni patchovaci povrch pro monkeypatch a route smoke testy; nove moduly jej vedome pouzivaji jako compatibility vrstvu.
+- `filmy/routers/api.py` dostal prvni skutecne `response_model` kontrakty pro root API, katalogove wrappery a hlavni AI endpointy (`/api/ai/context`, `taste-seed`, `taste-inputs`, `rated-titles`, `noted-titles`, `watched-titles`, `scoring-explainer`), aby FastAPI vrstva mela lepsi validaci a OpenAPI popis bez slepeho modelovani vsech internich admin payloadu.
+- V `filmy/app_shared.py` pribyla realna Python trida `BreadcrumbNavigation`, ktera soustredila vicekrokovou breadcrumb/return-to logiku. Puvodni helper funkce zustaly jako tenke wrappery kvuli kompatibilite, ale logika uz ma jedno centralni misto a podrobne docstringy.
+- Zaroven byly dopsane dalsi docstringy v novych router modulech, API response modelech a v navigacni vrstve, aby refaktor nezanechal dalsi bezejmenne helpery.
+- Overeni: `python3 -m compileall filmy/app_shared.py filmy/routers filmy/routers/api.py` proslo. Cileny pytest `tests/test_home_ai_suggestions.py tests/test_title_detail_ai_recommendation.py tests/test_search_lookup.py tests/test_ui_import_ai_suggestions.py tests/test_api_ai_context.py` skoncil `19 passed`.
+
+## 2026-07-28 - Pokracovani rozrezani `filmy/db.py` o TMDB a presentation bloky
+
+- V ramci uklidu `filmy/db.py` byly dopsane dalsi tematicke rezy: TMDB vrstva je nove soustredena v `filmy/db_tmdb.py`, zatimco drive rozdelene AI, lookup a presentation/cache bloky uz bezne ziji v `filmy/db_ai.py`, `filmy/db_lookup.py` a `filmy/db_presentation.py`.
+- `filmy.db` zustava zamerne jen jako stabilni fasada: verejne funkce i vybrane interni helpery dal existuji jako wrappery, aby se nemusel hromadne menit zbytek aplikace a aby testy mohly porad patchovat symboly pres `filmy.db`.
+- Behem TMDB rezu se ukazalo, ze novy modul nesmi obchazet patchovaci povrch a sahat natvrdo na vlastni importy z `runtime_postgres`; finalni verze proto vraci cteni i zapis TMDB helperu zpet pres symboly v `filmy.db`, i kdyz implementace zije v `db_tmdb.py`.
+- Zaroven byl srovnany navratovy tvar `get_person_detail_cache_targets()`, aby zustal kompatibilni se skripty materializace person detail cache.
+- Overeni: `python3 -m compileall filmy/db.py filmy/db_tmdb.py filmy/db_people.py` proslo a cileny pytest `tests/test_tmdb_target_selection.py tests/test_tmdb_postgres_overlay.py tests/test_title_detail_ai_recommendation.py` skoncil `8 passed`.
+
+## 2026-07-28 - Builder tridy v presentation vrstve a pravidlo pro pouzivani `class`
+
+- V `filmy/db_presentation.py` pribyly skutecne Python builder tridy `TitlePresentationBuilder` a `PersonPresentationBuilder`, protoze skladani title/person presentation uz bylo vicekrokove a drzelo sdileny kontext, ktery prestaval byt citelny jako dlouhe volne funkce.
+- `get_title_presentation()`, `get_title_people_panel()`, `_fetch_person_cache_source_detail()` a `_get_title_presentation_cached()` zustaly kompatibilni navenek, ale vnitrne uz pouzivaji builder tridy misto dalsiho rustu proceduralnich helperu.
+- Soucasne bylo do `AGENTS.md` zapsane trvale pravidlo: kdyz v Pythonu dava smysl skutecna `class` jako nosic vicekrokove logiky nebo sdileneho kontextu, ma se pouzit i bez explicitniho vyzadani od Jiriho; zaroven pro takove tridy a jejich dulezite metody maji byt psane podrobne docstringy cesky bez hacku a carek.
+- Overeni: `python3 -m compileall filmy/db_presentation.py filmy/db_lookup.py filmy/db.py filmy/db_people.py` proslo a cileny pytest `tests/test_title_detail_ai_recommendation.py tests/test_search_lookup.py tests/test_tmdb_postgres_overlay.py` skoncil `7 passed`.
+
 ## 2026-07-13 - Analýza serverové logiky PostgreSQL
 
 - Vznikl návrh [POSTGRESQL_SERVER_SIDE_PLAN.md](POSTGRESQL_SERVER_SIDE_PLAN.md) pro cílený přesun logiky z `filmy/runtime_postgres.py` na PostgreSQL.
@@ -219,6 +306,21 @@ Související rozhodnutí: [AI taste bridge je datový kontrakt, ne náhrada lok
 - `API_ENDPOINTY.md` byl aktualizovaný jako kontrakt pro navazující projekt.
 - Ověření: cílený API test prošel, `compileall` prošel a živý helper smoke v aktuální DB vrátil `item_count=1952`.
 
+-## 2026-07-28 - Pokracovani rozrezani `filmy/db.py` o TMDB a presentation bloky
+-
+- V ramci uklidu `filmy/db.py` byly dopsane dalsi tematiche rezy: TMDB vrstva je nove soustredena v `filmy/db_tmdb.py`, zatimco drive rozdelene AI, lookup a presentation/cache bloky uz bezne ziji v `filmy/db_ai.py`, `filmy/db_lookup.py` a `filmy/db_presentation.py`.
+- `filmy.db` zustava zamerne jen jako stabilni fasada: verejne funkce i vybrane interni helpery dal existuji jako wrappery, aby se nemusel hromadne menit zbytek aplikace a aby testy mohly porad patchovat symboly pres `filmy.db`.
+- Behem TMDB rezu se ukazalo, ze novy modul nesmi obchazet patchovaci povrch a sahat natvrdo na vlastni importy z `runtime_postgres`; finalni verze proto vraci cteni i zapis TMDB helperu zpet pres symboly v `filmy.db`, i kdyz implementace zije v `db_tmdb.py`.
+- Zaroven byl srovnany navratovy tvar `get_person_detail_cache_targets()`, aby zustal kompatibilni se skripty materializace person detail cache.
+- Overeni: `python3 -m compileall filmy/db.py filmy/db_tmdb.py filmy/db_people.py` proslo a cileny pytest `tests/test_tmdb_target_selection.py tests/test_tmdb_postgres_overlay.py tests/test_title_detail_ai_recommendation.py` skoncil `8 passed`.
+-
+## 2026-07-23 - Návrh title session a dokumentační základ budoucího manualu
+
+- Na základě nového rozboru vztahů mezi seznamy vznikl pracovní návrh, že akce nad titulem nemají vždy okamžitě spouštět všechny doménové důsledky.
+- Důvod je vícekrokový workflow: Jiří může při práci s jedním titulem zadat rating, odskočit na detail herce a po návratu ještě dělat `Move to` nebo `Copy to`.
+- Vznikl technický návrh [LIST_ACTIONS_AND_TITLE_SESSION.md](LIST_ACTIONS_AND_TITLE_SESSION.md), který zavádí pracovní pojmy `title session`, `pending actions` a `finalize`.
+- Současně vznikl lidsky psaný výklad [MANUAL_TITLE_WORKFLOW_DRAFT.md](MANUAL_TITLE_WORKFLOW_DRAFT.md), který je určený hlavně pro Jiřího a může být později základem napovědy nebo celého manuálu programu.
+
 ## 2026-07-22 - Oprava deploy cesty pro Mac mini LaunchAgent
 
 - Šablona `deploy/cz.kulda.filmy.plist` byla opravena z chybné cesty `/Volumes/kulda/apps/FILMY` na skutečnou cestu `/Users/kulda/apps/FILMY`.
@@ -237,6 +339,14 @@ Související rozhodnutí: [AI taste bridge je datový kontrakt, ne náhrada lok
   - `FILMY`: `https://kulda-mini.taildce711.ts.net:8019`
   - druhá appka: `https://kulda-mini.taildce711.ts.net:8020`
 - Otevřená poznámka: z tohoto Macu zatím Jiří nepotvrdil reálné načtení těch URL v prohlížeči; zatím je potvrzený shell/curl průchod na samotném `mac-mini`. Pokud mají být odkazy považované za hotově dosažitelné i z jiného zařízení, je potřeba ještě samostatný klientský smoke mimo `mac-mini`.
+
+## 2026-07-23 - Dokonceni serveroveho deploye FILMY na Mac mini
+
+- Pri prvnim realnem pouziti noveho serveroveho upgrade runneru se ukazaly dve kompatibilitni opravy: PostgreSQL bootstrap/check musi tolerovat `pg_database_owner` jako legitimniho vlastnika schematu `public` a bezny serverovy upgrade nad existujici DB nema znovu prehravat `001_bootstrap.sql`, kdyz uz schema `app` existuje.
+- Obe opravy byly dopsane jako follow-up commity (`f1a33c9`, `65d811d`) a po `git pull` na `mac-mini` probehl databazovy upgrade uspesne az do `Database upgrade OK.`.
+- Prakticky overena serverova varianta upgradu na tomto stroji je `.venv/bin/python -m filmy.scripts.upgrade_database`; zkratka `uv run filmy-upgrade-database` tu zatim neni spolehliva, protoze `uv sync` neinstaluje `project.scripts` entrypointy.
+- Soucasne byl opraven startup guard pro PostgreSQL katalog bez lokalnich `imdb/*.tsv` a TMDB asset read vrstva byla udelana prenositelna mezi stroji i pri starych absolutnich `local_path`.
+- Po restartu `cz.kulda.filmy` se na `mac-mini` vse zobrazuje normalne a problematicky badge `TMDB fetching in background` zmizel.
 
 ## 2026-07-20 - Vyčištění položek v AI návrzích
 

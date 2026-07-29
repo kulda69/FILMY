@@ -61,7 +61,7 @@ def test_home_replaces_continue_watching_with_ai_suggestions() -> None:
         patch(
             "filmy.routers.web.selected_panel_page",
             return_value={"items": [], "total": 0, "limit": 50, "offset": 0, "list": None},
-        ),
+        ) as selected_panel_mock,
         patch("filmy.routers.web.get_user_list_items_page", return_value=ai_page) as list_page_mock,
         patch("filmy.routers.web.get_favorite_traits", return_value=[]),
         patch("filmy.routers.web.get_latest_genre_scores", return_value=None),
@@ -77,6 +77,7 @@ def test_home_replaces_continue_watching_with_ai_suggestions() -> None:
     assert "AI fit reason" not in response.text
     assert "Continue Watching" not in response.text
     list_page_mock.assert_called_once_with("ai-suggestions", limit=24)
+    selected_panel_mock.assert_called_once_with(library_status["visible_lists"][0], limit=50, available_in_cz=False)
 
 
 def test_ai_suggestions_list_detail_shows_clear_button() -> None:
@@ -139,6 +140,87 @@ def test_regular_list_detail_does_not_show_clear_button() -> None:
     assert response.status_code == 200
     assert 'action="/ui/lists/clear-ai-suggestions"' not in response.text
     assert "Vyčistit" not in response.text
+
+
+def test_list_detail_available_in_cz_filter_roundtrips_query_param() -> None:
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    list_page = {
+        "list": {
+            "id": "watchlist",
+            "slug": "watchlist",
+            "name": "Watchlist",
+            "description": "To watch",
+            "list_kind": "watchlist",
+            "ai_input_role": "interested_planned",
+        },
+        "total": 0,
+        "limit": 50,
+        "offset": 0,
+        "items": [],
+        "filters": {"available_in_cz": True},
+    }
+
+    with (
+        patch("filmy.routers.web.get_user_list_items_page", return_value=list_page) as list_page_mock,
+        patch("filmy.routers.web.get_local_library_status", return_value={"visible_lists": []}),
+    ):
+        response = client.get("/lists/watchlist?available_in_cz=1")
+
+    assert response.status_code == 200
+    list_page_mock.assert_called_once_with("watchlist", limit=50, offset=0, available_in_cz=True)
+    assert 'name="available_in_cz"' in response.text
+    assert 'checked' in response.text
+
+
+def test_home_selected_panel_available_in_cz_filter_roundtrips_query_param() -> None:
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    library_status = {
+        "counts": {"lists": 1},
+        "visible_lists": [
+            {
+                "id": "watchlist",
+                "slug": "watchlist",
+                "name": "Watchlist",
+                "description": "To watch",
+                "list_kind": "watchlist",
+                "item_count": 2,
+                "item_type": "list",
+                "ai_input_role": "interested_planned",
+            }
+        ],
+    }
+    selected_page = {
+        "list": library_status["visible_lists"][0],
+        "total": 2,
+        "limit": 50,
+        "offset": 0,
+        "items": [],
+        "filters": {"available_in_cz": True},
+    }
+    ai_page = {"list": {"id": "ai-suggestions"}, "total": 0, "limit": 24, "offset": 0, "items": []}
+
+    with (
+        patch("filmy.routers.web.get_local_library_status", return_value=library_status),
+        patch("filmy.routers.web.selected_panel_page", return_value=selected_page) as selected_panel_mock,
+        patch("filmy.routers.web.get_user_list_items_page", return_value=ai_page),
+        patch("filmy.routers.web.get_favorite_traits", return_value=[]),
+        patch("filmy.routers.web.get_latest_genre_scores", return_value=None),
+        patch("filmy.routers.web.background_supervisor.homepage_snapshot", return_value={}),
+        patch("filmy.routers.web.launch_homepage_warmup"),
+    ):
+        response = client.get("/?list_id=watchlist&available_in_cz=1")
+
+    assert response.status_code == 200
+    selected_panel_mock.assert_called_once_with(library_status["visible_lists"][0], limit=50, available_in_cz=True)
+    assert 'name="available_in_cz"' in response.text
+    assert 'value="watchlist"' in response.text
+    assert 'checked' in response.text
 
 
 def test_clear_ai_suggestions_route_redirects_back() -> None:

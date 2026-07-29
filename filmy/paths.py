@@ -1,3 +1,5 @@
+"""Centralni filesystem cesty pouzivane napric projektem FILMY."""
+
 from __future__ import annotations
 
 from pathlib import Path

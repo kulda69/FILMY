@@ -57,15 +57,34 @@
                     {% if selected_list.description %}
                     <div class="small text-secondary">{{ selected_list.description }}</div>
                     {% endif %}
-                    <div class="text-secondary small">
-                        {{ selected_list_total }} položek
-                        {% if selected_list_total_pages > 1 %}
-                        · stránka {{ selected_list_page }} z {{ selected_list_total_pages }}
-                        {% endif %}
-                    </div>
-                </div>
-                <a class="btn btn-outline-light btn-sm" href="/">Back home</a>
-            </div>
+	                    <div class="text-secondary small">
+	                        {{ selected_list_total }} položek
+	                        {% if selected_list_total_pages > 1 %}
+	                        · stránka {{ selected_list_page }} z {{ selected_list_total_pages }}
+	                        {% endif %}
+	                    </div>
+                        <form action="" method="get" class="d-flex flex-wrap align-items-center gap-2 mt-2">
+                            <input type="hidden" name="page" value="1">
+                            <div class="form-check form-switch m-0">
+                                <input
+                                    class="form-check-input"
+                                    type="checkbox"
+                                    role="switch"
+                                    id="available-in-cz"
+                                    name="available_in_cz"
+                                    value="1"
+                                    {% if selected_list_filters and selected_list_filters.available_in_cz %}checked{% endif %}
+                                    onchange="this.form.submit()"
+                                >
+                                <label class="form-check-label small text-secondary" for="available-in-cz">Jen dostupné v ČR</label>
+                            </div>
+                            <noscript>
+                                <button type="submit" class="btn btn-sm btn-outline-light">Použít</button>
+                            </noscript>
+                        </form>
+	                </div>
+	                <a class="btn btn-outline-light btn-sm" href="/">Back home</a>
+	            </div>
 
             {% if selected_list_items %}
             <div class="row row-cols-2 row-cols-md-4 g-3">

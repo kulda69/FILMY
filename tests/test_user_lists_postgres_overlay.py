@@ -167,6 +167,7 @@ class UserListsPostgresOverlayTests(unittest.TestCase):
         self.assertEqual(result["total"], 1)
         self.assertEqual(result["items"][0]["title"], "Alpha")
         self.assertEqual(result["items"][0]["user_rating"], 8)
+        self.assertEqual(result["filters"], {"available_in_cz": False})
 
     def test_record_watch_event_archives_watchlist_in_postgres_mode(self) -> None:
         fake_db = SimpleNamespace(

@@ -1,3 +1,5 @@
+"""CLI status probe pro background job supervisor."""
+
 from __future__ import annotations
 
 import argparse
@@ -31,6 +33,7 @@ ARCHIVAL_JOB_SPECS = [
 
 
 def _read_last_line(path: Path) -> str | None:
+    """Vrat posledni radek logu, pokud je dostupny."""
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
@@ -41,6 +44,7 @@ def _read_last_line(path: Path) -> str | None:
 
 
 def _process_alive(pid: int) -> bool:
+    """Over, zda proces s danym PID stale existuje."""
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -52,6 +56,7 @@ def _process_alive(pid: int) -> bool:
 
 
 def _describe_job(spec: dict[str, Path | str]) -> dict[str, object]:
+    """Sloz lidsky i strojove citelny stav jednoho jobu."""
     pid_file = spec["pid_file"]
     log_file = spec["log_file"]
     job: dict[str, object] = {
@@ -82,6 +87,7 @@ def _describe_job(spec: dict[str, Path | str]) -> dict[str, object]:
 
 
 def main() -> int:
+    """Vypis stav aktivnich a archivnich background jobu."""
     parser = argparse.ArgumentParser(description="Show status of background FILMY jobs.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     args = parser.parse_args()

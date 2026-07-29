@@ -1,12 +1,11 @@
-from __future__ import annotations
+"""Legacy importy a read modely vyclenene z `filmy.db`.
 
-"""Historical import and legacy-source operations extracted from `filmy.db`.
-
-This module groups public read/sync functions for Trakt, IMDb CSV exports and
-Plex bootstrap sync. The implementation still delegates to shared helpers in
-`filmy.db`, which keeps the refactor low-risk while reducing the size and
-responsibility surface of the facade module.
+Modul sdruzuje Trakt exporty, IMDb CSV seznamy a Plex bootstrap sync.
+Vetsina nizsi logiky porad zustava ve sdilenych helperech `filmy.db`,
+aby se facade dal zmensovat inkrementalne bez riskantniho prepisu.
 """
+
+from __future__ import annotations
 
 import importlib
 import json
@@ -17,6 +16,8 @@ from filmy.runtime_postgres import _connect as _pg_connect
 
 
 def _db():
+    """Vrati aktualni modul `filmy.db` bez cyklickeho importu pri startu."""
+
     return importlib.import_module("filmy.db")
 
 
@@ -24,32 +25,48 @@ class _PgCompatConnection:
     """Lehká kompatibilní vrstva, aby legacy SQL s `?` fungovalo i nad psycopg."""
 
     def __init__(self, raw_connection: Any) -> None:
+        """Zabali psycopg spojeni a pripravi kurzor s duckdb-like API."""
+
         self._raw_connection = raw_connection
         self._cursor = raw_connection.cursor()
 
     @staticmethod
     def _translate_sql(sql: str) -> str:
+        """Prevede legacy placeholdery `?` na psycopg styl `%s`."""
+
         return sql.replace("?", "%s")
 
     def execute(self, sql: str, params: list[Any] | tuple[Any, ...] | None = None) -> "_PgCompatConnection":
+        """Spusti jeden SQL prikaz a vrati sebe pro retezeni volani."""
+
         self._cursor.execute(self._translate_sql(sql), tuple(params or ()))
         return self
 
     def executemany(self, sql: str, seq_of_params: list[list[Any]] | list[tuple[Any, ...]]) -> "_PgCompatConnection":
+        """Spusti vicenasobny SQL prikaz nad posloupnosti parametru."""
+
         self._cursor.executemany(self._translate_sql(sql), seq_of_params)
         return self
 
     def fetchone(self) -> Any:
+        """Vrati jeden radek z posledniho dotazu."""
+
         return self._cursor.fetchone()
 
     def fetchall(self) -> list[Any]:
+        """Vrati vsechny radky z posledniho dotazu."""
+
         return self._cursor.fetchall()
 
     def close(self) -> None:
+        """Uzavre vnitrni kurzor kompatibilni obalky."""
+
         self._cursor.close()
 
 
 def inspect_trakt_export(export_dir: str = "trakt-export") -> dict[str, Any]:
+    """Projde Trakt export adresar a vrati jeho strukturovany popis."""
+
     db = _db()
     export_path = db._resolve_export_path(export_dir)
     files = [db._describe_trakt_file(path) for path in sorted(export_path.glob("*.json"))]
@@ -77,6 +94,8 @@ def inspect_trakt_export(export_dir: str = "trakt-export") -> dict[str, Any]:
 
 
 def sync_trakt_export(export_dir: str = "trakt-export") -> dict[str, Any]:
+    """Importuje Trakt export do legacy tabulek a navaznych snapshotu."""
+
     db = _db()
     inspection = inspect_trakt_export(export_dir)
     if inspection["file_count"] == 0:
@@ -165,6 +184,8 @@ def sync_trakt_export(export_dir: str = "trakt-export") -> dict[str, Any]:
 
 
 def get_trakt_sync_runs(limit: int = 20) -> list[dict[str, Any]]:
+    """Vrati posledni bezhy synchronizace Trakt exportu."""
+
     db = _db()
     with _pg_connect() as raw_conn:
         conn = _PgCompatConnection(raw_conn)
@@ -192,6 +213,8 @@ def get_trakt_sync_runs(limit: int = 20) -> list[dict[str, Any]]:
 
 
 def get_trakt_sync_run(sync_run_id: str) -> dict[str, Any] | None:
+    """Vrati detail jednoho Trakt sync behu vcetne souboru."""
+
     db = _db()
     with _pg_connect() as raw_conn:
         conn = _PgCompatConnection(raw_conn)
@@ -242,6 +265,8 @@ def get_trakt_sync_changes(
     previous_sync_id: str | None = None,
     limit: int = 100,
 ) -> dict[str, Any]:
+    """Porovna dva Trakt sync snapshoty a vrati rozdily."""
+
     db = _db()
     with _pg_connect() as raw_conn:
         conn = _PgCompatConnection(raw_conn)
@@ -445,6 +470,8 @@ def get_trakt_sync_changes(
 
 
 def get_trakt_ratings(limit: int = 100, active_only: bool = True) -> list[dict[str, Any]]:
+    """Vrati Trakt ratingy z legacy uloziste."""
+
     db = _db()
     sql = """
         SELECT source_key, media_type, trakt_id, imdb_id, tmdb_id, tconst, parent_title, title,
@@ -480,6 +507,8 @@ def get_trakt_ratings(limit: int = 100, active_only: bool = True) -> list[dict[s
 
 
 def get_trakt_list_overview(include_items: bool = False, active_only: bool = True) -> dict[str, Any]:
+    """Vrati prehled Trakt seznamu a volitelne i jejich polozky."""
+
     db = _db()
     with _pg_connect() as raw_conn:
         conn = _PgCompatConnection(raw_conn)
@@ -554,6 +583,8 @@ def get_trakt_list_overview(include_items: bool = False, active_only: bool = Tru
 
 
 def get_trakt_collection(limit: int = 100, active_only: bool = True) -> list[dict[str, Any]]:
+    """Vrati importovanou Trakt collection."""
+
     db = _db()
     with _pg_connect() as raw_conn:
         conn = _PgCompatConnection(raw_conn)
@@ -591,6 +622,8 @@ def get_trakt_collection(limit: int = 100, active_only: bool = True) -> list[dic
 
 
 def get_trakt_status() -> dict[str, Any]:
+    """Vrati souhrnny stav posledniho Trakt importu a aktivnich dat."""
+
     db = _db()
     with _pg_connect() as raw_conn:
         conn = _PgCompatConnection(raw_conn)
@@ -651,6 +684,8 @@ def get_trakt_status() -> dict[str, Any]:
 
 
 def inspect_imdb_lists(export_dir: str = "imdb_lists") -> dict[str, Any]:
+    """Projde adresar s IMDb CSV seznamy a vrati jejich souhrn."""
+
     db = _db()
     export_path = db._resolve_export_path(export_dir)
     files: list[dict[str, Any]] = []
@@ -679,6 +714,8 @@ def inspect_imdb_lists(export_dir: str = "imdb_lists") -> dict[str, Any]:
 
 
 def sync_imdb_lists(export_dir: str = "imdb_lists") -> dict[str, Any]:
+    """Importuje IMDb watchlist a oblibene osoby do legacy tabulek."""
+
     db = _db()
     inspection = inspect_imdb_lists(export_dir)
     if inspection["file_count"] == 0:
@@ -734,6 +771,8 @@ def sync_imdb_lists(export_dir: str = "imdb_lists") -> dict[str, Any]:
 
 
 def get_imdb_lists_status() -> dict[str, Any]:
+    """Vrati stav posledni synchronizace IMDb seznamu."""
+
     db = _db()
     with _pg_connect() as conn, conn.cursor() as cursor:
         cursor.execute(
@@ -772,6 +811,8 @@ def get_imdb_lists_status() -> dict[str, Any]:
 
 
 def get_imdb_watchlist(limit: int = 100, active_only: bool = True) -> list[dict[str, Any]]:
+    """Vrati polozky IMDb watchlistu z legacy importu."""
+
     with _pg_connect() as conn, conn.cursor() as cursor:
         cursor.execute(
             """
@@ -809,6 +850,8 @@ def get_imdb_watchlist(limit: int = 100, active_only: bool = True) -> list[dict[
 
 
 def get_imdb_favorite_people(limit: int = 100, active_only: bool = True) -> list[dict[str, Any]]:
+    """Vrati oblibene osoby z IMDb exportu."""
+
     with _pg_connect() as conn, conn.cursor() as cursor:
         cursor.execute(
             """
@@ -836,6 +879,8 @@ def get_imdb_favorite_people(limit: int = 100, active_only: bool = True) -> list
 
 
 def inspect_plex_source() -> dict[str, Any]:
+    """Vrati popis dostupneho Plex serveru a jeho importovatelnych sekci."""
+
     db = _db()
     server = db.get_primary_server()
     if server is None:
@@ -858,6 +903,8 @@ def inspect_plex_source() -> dict[str, Any]:
 
 
 def sync_plex_source(section_limit: int | None = None, item_limit_per_section: int | None = None) -> dict[str, Any]:
+    """Nacte Plex knihovnu do legacy tabulek a lokalnich read modelu."""
+
     db = _db()
     plex_server = db.get_primary_server()
     inspection = inspect_plex_source()
@@ -973,6 +1020,8 @@ def sync_plex_source(section_limit: int | None = None, item_limit_per_section: i
 
 
 def get_plex_status() -> dict[str, Any]:
+    """Vrati stav posledniho Plex sync behu a mapovacich statistik."""
+
     db = _db()
     with _pg_connect() as raw_conn:
         conn = _PgCompatConnection(raw_conn)
@@ -1042,6 +1091,8 @@ def _upsert_plex_library_item(
     section: dict[str, Any],
     snapshot: dict[str, Any],
 ) -> None:
+    """Upsertne jeden Plex snapshot do legacy tabulky knihovny."""
+
     db = _db()
     ids = snapshot.get("ids") or {}
     imdb_id = ids.get("imdb")
@@ -1146,6 +1197,8 @@ def _sync_plex_item_to_local_library(
     snapshot: dict[str, Any],
     now: str,
 ) -> bool:
+    """Promitne Plex polozku do lokalniho uzivatelskeho seznamu."""
+
     db = _db()
     ids = snapshot.get("ids") or {}
     imdb_id = ids.get("imdb")
@@ -1180,6 +1233,8 @@ def _sync_plex_item_to_local_library(
 
 
 def _sync_plex_watch_state(conn, snapshot: dict[str, Any]) -> bool:
+    """Zapise Plex watched stav jako lokalni watch event, kdyz jde sparovat titul."""
+
     db = _db()
     ids = snapshot.get("ids") or {}
     imdb_id = ids.get("imdb")
@@ -1210,6 +1265,8 @@ def _sync_plex_watch_state(conn, snapshot: dict[str, Any]) -> bool:
 
 
 def _sync_plex_content_state(conn, snapshot: dict[str, Any], now: str) -> bool:
+    """Propise Plex watched nebo in-progress stav do `app.content_state`."""
+
     db = _db()
     ids = snapshot.get("ids") or {}
     imdb_id = ids.get("imdb")
@@ -1244,6 +1301,8 @@ def _sync_plex_content_state(conn, snapshot: dict[str, Any], now: str) -> bool:
 
 
 def _sync_trakt_history(conn, sync_run_id: str, files: list[dict[str, Any]]) -> dict[str, int]:
+    """Nacte Trakt historii sledovani a synchronizuje i `app.watch_events`."""
+
     db = _db()
     imported = 0
     watch_events_synced = 0
@@ -1328,6 +1387,8 @@ def _sync_trakt_history(conn, sync_run_id: str, files: list[dict[str, Any]]) -> 
 
 
 def _sync_trakt_ratings(conn, sync_run_id: str, files: list[dict[str, Any]]) -> dict[str, int]:
+    """Nacte Trakt ratingy do legacy tabulek a snapshotu."""
+
     db = _db()
     imported = 0
     for file_info in files:
@@ -1396,6 +1457,8 @@ def _sync_trakt_lists(
     custom_list_files: list[dict[str, Any]],
     watchlist_files: list[dict[str, Any]],
 ) -> dict[str, int]:
+    """Nacte Trakt custom listy a watchlist do legacy read modelu."""
+
     db = _db()
     imported_lists = 0
     imported_items = 0
@@ -1589,6 +1652,8 @@ def _sync_trakt_lists(
 
 
 def _sync_trakt_collection(conn, sync_run_id: str, files: list[dict[str, Any]]) -> dict[str, int]:
+    """Nacte Trakt collection a oznaci nepritomne zaznamy jako neaktivni."""
+
     db = _db()
     imported = 0
     for file_info in files:
@@ -1649,6 +1714,8 @@ def _sync_trakt_collection(conn, sync_run_id: str, files: list[dict[str, Any]]) 
 
 
 def _read_last_activities(files: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Vrati payload `last_activities` z prvniho odpovidajiciho souboru."""
+
     db = _db()
     if not files:
         return None
@@ -1656,6 +1723,8 @@ def _read_last_activities(files: list[dict[str, Any]]) -> dict[str, Any] | None:
 
 
 def _sync_imdb_watchlist(conn, sync_run_id: str, file_info: dict[str, Any] | None) -> dict[str, int]:
+    """Importuje jeden IMDb watchlist CSV soubor do legacy tabulky."""
+
     db = _db()
     if file_info is None:
         return {"imported": 0}
@@ -1723,6 +1792,8 @@ def _sync_imdb_watchlist(conn, sync_run_id: str, file_info: dict[str, Any] | Non
 
 
 def _sync_imdb_favorite_people(conn, sync_run_id: str, file_info: dict[str, Any] | None) -> dict[str, int]:
+    """Importuje CSV oblibenych IMDb osob do legacy tabulky."""
+
     db = _db()
     if file_info is None:
         return {"imported": 0}

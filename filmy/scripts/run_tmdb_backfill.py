@@ -1,3 +1,5 @@
+"""CLI wrapper pro davkovy TMDB backfill."""
+
 from __future__ import annotations
 
 import argparse
@@ -9,16 +11,22 @@ import time
 
 from filmy.db import get_tmdb_target_counts
 from filmy.integrations.tmdb import enrich_library_from_tmdb
+
+
 def get_counts() -> tuple[int, int]:
+    """Vrat pocet vsech TMDB targetu a jiz dokoncene casti."""
     return get_tmdb_target_counts()
 
 
 def _emit(payload: dict[str, object]) -> None:
+    """Vypis jeden JSON progress zaznam backfillu."""
     print(json.dumps(payload, ensure_ascii=False), flush=True)
 
 
 def _install_lifecycle_logging() -> None:
+    """Nastav signal handlery a zaverecny exit log."""
     def handle_signal(signum: int, _: object) -> None:
+        """Ukonci backfill po signalu a vypis typ prijateho signalu."""
         _emit({"phase": "signal", "signal": signal.Signals(signum).name})
         raise SystemExit(128 + signum)
 
@@ -29,9 +37,11 @@ def _install_lifecycle_logging() -> None:
 
 
 def _start_heartbeat_thread(state: dict[str, object], interval_seconds: float = 10.0) -> tuple[threading.Event, threading.Thread]:
+    """Spust heartbeat vlakno pro dlouhy TMDB backfill."""
     stop_event = threading.Event()
 
     def run() -> None:
+        """Pravidelne emituj heartbeat s aktualnim tconstem a pocty."""
         while not stop_event.wait(interval_seconds):
             _emit(
                 {
@@ -50,6 +60,7 @@ def _start_heartbeat_thread(state: dict[str, object], interval_seconds: float = 
 
 
 def main() -> int:
+    """Spust sekvencni TMDB backfill po davkach a emituj prubezne JSON logy."""
     _install_lifecycle_logging()
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch-size", type=int, default=25)
@@ -111,6 +122,7 @@ def main() -> int:
             )
 
             def emit_progress(event: dict[str, object]) -> None:
+                """Preved detailni progress event z TMDB klienta na stdout log."""
                 if event.get("event") in {"done", "error", "not_found"}:
                     progress_state["processed"] = int(progress_state.get("processed") or 0) + 1
                 progress_state["current_tconst"] = event.get("tconst")

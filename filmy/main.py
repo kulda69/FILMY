@@ -1,3 +1,5 @@
+"""Aplikacni vstup pro FastAPI server FILMY."""
+
 from __future__ import annotations
 
 from contextlib import asynccontextmanager

@@ -1,3 +1,5 @@
+"""Nacitani a validace lokalni konfigurace FILMY."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -12,6 +14,8 @@ CONFIG_PATH = PROJECT_ROOT / "config.toml"
 
 @dataclass(frozen=True)
 class UiConfig:
+    """Nactena UI a search konfigurace z `config.toml`."""
+
     continue_watching_limit: int = 12
     my_lists_selected_limit: int = 50
     recently_watched_days: int = 183
@@ -21,14 +25,20 @@ class UiConfig:
 
     @property
     def tmdb_primary_locale(self) -> str:
+        """Vrat primarni TMDB locale podle preferovaneho jazyka."""
+
         return "cs-CZ" if self.tmdb_primary_language == "CZ" else "en-US"
 
     @property
     def tmdb_fallback_locale(self) -> str:
+        """Vrat fallback locale opacne k primarnimu jazyku."""
+
         return "en-US" if self.tmdb_primary_language == "CZ" else "cs-CZ"
 
     @property
     def tmdb_locale_order(self) -> tuple[str, str]:
+        """Vrat poradi locale pro dotazy, ktere zkouseji dva jazyky."""
+
         return (self.tmdb_primary_locale, self.tmdb_fallback_locale)
 
 
@@ -37,6 +47,8 @@ _CONFIG_MTIME_NS: int | None = None
 
 
 def load_ui_config(path: Path = CONFIG_PATH) -> UiConfig:
+    """Nacti konfiguraci z TOML souboru a dopln bezpecne defaulty."""
+
     if not path.exists():
         return UiConfig()
 

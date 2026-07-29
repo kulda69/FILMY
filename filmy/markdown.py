@@ -1,3 +1,5 @@
+"""Mala markdown render a sanitizacni vrstva pro textove bloky."""
+
 from __future__ import annotations
 
 import html
@@ -75,6 +77,8 @@ def render_user_markdown(value: str | None) -> Markup:
 
 
 def _flush_paragraph(blocks: list[str], paragraph: list[str]) -> None:
+    """Uzavri nasbirane radky jako jeden HTML odstavec."""
+
     if not paragraph:
         return
     rendered_lines = [_render_inline(line) for line in paragraph]
@@ -83,6 +87,8 @@ def _flush_paragraph(blocks: list[str], paragraph: list[str]) -> None:
 
 
 def _render_inline(value: str) -> str:
+    """Vyrenderuj inline markdown vcetne code segmentu mezi backticky."""
+
     parts = value.split("`")
     rendered: list[str] = []
     for index, part in enumerate(parts):
@@ -95,6 +101,8 @@ def _render_inline(value: str) -> str:
 
 
 def _render_inline_without_code(value: str) -> str:
+    """Vyrenderuj odkazy, tucne a kurzivu v uz escapovanem textu."""
+
     value = _LINK_RE.sub(r'<a class="link-light" href="\2" rel="noreferrer">\1</a>', value)
     value = _BOLD_RE.sub(r"<strong>\1</strong>", value)
     value = _ITALIC_RE.sub(r"<em>\1</em>", value)

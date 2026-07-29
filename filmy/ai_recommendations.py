@@ -1,3 +1,5 @@
+"""Vyklad a formatovani AI doporucovacich vystupu pro FILMY."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -174,6 +176,8 @@ def normalize_ai_recommendation_payload(payload: Any) -> dict[str, Any]:
 
 
 def _normalize_recommendation(item: Any, index: int) -> dict[str, Any]:
+    """Validuj a normalizuj jeden recommendation objekt z AI JSON batchu."""
+
     if not isinstance(item, dict):
         raise ValueError(f"Recommendation #{index} must be an object.")
     missing = sorted(REQUIRED_RECOMMENDATION_FIELDS - item.keys())
@@ -199,6 +203,8 @@ def _normalize_recommendation(item: Any, index: int) -> dict[str, Any]:
 
 
 def _require_text(value: Any, field: str) -> str:
+    """Vynut neprazdny textovy retezec pro povinne pole."""
+
     text = str(value).strip() if value is not None else ""
     if not text:
         raise ValueError(f"Field `{field}` must be a non-empty string.")
@@ -206,6 +212,8 @@ def _require_text(value: Any, field: str) -> str:
 
 
 def _optional_text(value: Any) -> str | None:
+    """Normalizuj volitelny text na orezany retezec nebo `None`."""
+
     if value is None:
         return None
     text = str(value).strip()
@@ -213,6 +221,8 @@ def _optional_text(value: Any) -> str | None:
 
 
 def _require_int(value: Any, field: str) -> int:
+    """Vynut celociselnou hodnotu pro povinne pole."""
+
     if isinstance(value, bool):
         raise ValueError(f"Field `{field}` must be an integer.")
     try:
@@ -222,12 +232,16 @@ def _require_int(value: Any, field: str) -> int:
 
 
 def _optional_int(value: Any, field: str) -> int | None:
+    """Normalizuj volitelne cislo pres stejna pravidla jako povinne cele cislo."""
+
     if value is None:
         return None
     return _require_int(value, field)
 
 
 def _optional_imdb_id(value: Any, index: int) -> str | None:
+    """Validuj volitelne IMDb ID ve tvaru `tt1234567`."""
+
     text = _optional_text(value)
     if text is None:
         return None
@@ -237,6 +251,8 @@ def _optional_imdb_id(value: Any, index: int) -> str | None:
 
 
 def _require_list(value: Any, field: str) -> list[Any]:
+    """Vynut seznamovou hodnotu pro pole, ktera musi zustat listem."""
+
     if not isinstance(value, list):
         raise ValueError(f"Field `{field}` must be a list.")
     return value

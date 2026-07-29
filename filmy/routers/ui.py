@@ -1,3 +1,5 @@
+"""Mutacni UI router pro formulare a jednoduche POST akce."""
+
 from __future__ import annotations
 
 from fastapi import APIRouter, Form, HTTPException, Request
@@ -38,6 +40,8 @@ async def ui_list_action_delete(
     display_tconst: str = Form(),
     return_to: str | None = Form(default=None),
 ):
+    """Smaz aktivni skupinu polozek z jednoho uzivatelskeho seznamu."""
+
     try:
         delete_group_from_user_list(list_id, display_tconst)
     except ValueError as exc:
@@ -53,6 +57,8 @@ async def ui_list_action_move(
     display_tconst: str = Form(),
     return_to: str | None = Form(default=None),
 ):
+    """Presun skupinu mezi dvema uzivatelskymi seznamy."""
+
     try:
         move_group_between_user_lists(source_list_id, target_list_id, display_tconst)
     except ValueError as exc:
@@ -68,6 +74,8 @@ async def ui_list_action_copy(
     display_tconst: str = Form(),
     return_to: str | None = Form(default=None),
 ):
+    """Zkopiruj skupinu mezi dvema uzivatelskymi seznamy."""
+
     try:
         copy_group_to_user_list(source_list_id, target_list_id, display_tconst)
     except ValueError as exc:
@@ -82,6 +90,8 @@ async def ui_list_action_add(
     target_list_id: str = Form(),
     return_to: str | None = Form(default=None),
 ):
+    """Pridej titul do zvoleneho uzivatelskeho seznamu."""
+
     try:
         add_title_to_user_list(tconst, target_list_id)
     except ValueError as exc:
@@ -97,6 +107,8 @@ async def ui_list_action_watched(
     display_tconst: str | None = Form(default=None),
     return_to: str | None = Form(default=None),
 ):
+    """Oznac titul jako zhlednuty a pripadne ho archivuj z puvodniho seznamu."""
+
     try:
         record_watch_event(
             tconst,
@@ -116,6 +128,8 @@ async def ui_list_action_rating(
     rating: int = Form(),
     return_to: str | None = Form(default=None),
 ):
+    """Uloz ciselne hodnoceni titulu z jednoducheho formulare."""
+
     try:
         set_user_rating(tconst, rating)
     except ValueError as exc:
@@ -132,6 +146,8 @@ async def ui_list_action_rating_notes(
     disliked_notes: str | None = Form(default=None),
     return_to: str | None = Form(default=None),
 ):
+    """Uloz hodnoceni titulu vcetne slovnich poznamek."""
+
     try:
         set_user_rating(
             tconst,
@@ -150,6 +166,8 @@ async def ui_list_action_rating_clear(
     tconst: str = Form(),
     return_to: str | None = Form(default=None),
 ):
+    """Smaz lokalni hodnoceni titulu."""
+
     try:
         clear_user_rating(tconst)
     except ValueError as exc:
@@ -164,6 +182,8 @@ async def ui_person_affinity_rating(
     rating: int = Form(),
     return_to: str | None = Form(default=None),
 ):
+    """Uloz lokalni affinity rating osoby."""
+
     try:
         set_person_affinity_rating(nconst, rating)
     except ValueError as exc:
@@ -182,6 +202,8 @@ async def ui_title_role_signal_set(
     notes: str | None = Form(default=None),
     return_to: str | None = Form(default=None),
 ):
+    """Nahrad sadu role signalu pro jednu osobu nebo postavu v titulu."""
+
     try:
         replace_title_role_signals(
             tconst,
@@ -205,6 +227,8 @@ async def ui_title_role_signal_delete(
     character_name: str | None = Form(default=None),
     return_to: str | None = Form(default=None),
 ):
+    """Smaz vsechny role signaly pro jednu osobu nebo postavu v titulu."""
+
     try:
         delete_title_role_signals(
             tconst,
@@ -222,6 +246,8 @@ async def ui_title_episode_watched_through(
     episode_tconst: str = Form(),
     return_to: str | None = Form(default=None),
 ):
+    """Oznac zvolenou epizodu a vsechny predchozi jako zhlednute."""
+
     try:
         record_watch_events_through_episode(episode_tconst)
     except ValueError as exc:
@@ -232,6 +258,8 @@ async def ui_title_episode_watched_through(
 
 @router.post("/ui/lists/create")
 async def ui_create_list(name: str = Form(), description: str | None = Form(default=None)):
+    """Vytvor novy uzivatelsky seznam a vrat uzivatele na homepage."""
+
     try:
         created = create_user_list(name, description)
     except ValueError as exc:
@@ -250,6 +278,8 @@ async def ui_update_list_description(
     ai_input_role: str | None = Form(default=None),
     return_to: str | None = Form(default=None),
 ):
+    """Uprav popis a AI roli existujiciho seznamu."""
+
     try:
         update_user_list_description(list_id, description, ai_input_role=ai_input_role)
     except ValueError as exc:
@@ -262,6 +292,8 @@ async def ui_update_list_description(
 async def ui_delete_list(
     list_id: str = Form(),
 ):
+    """Smaz uzivatelsky seznam a vrat uzivatele na prehled seznamu."""
+
     try:
         delete_user_list(list_id)
     except ValueError as exc:
@@ -277,6 +309,8 @@ async def ui_delete_list(
 async def ui_clear_ai_suggestions(
     return_to: str | None = Form(default=None),
 ):
+    """Vypradni pracovni inbox seznamu AI navrhu."""
+
     try:
         clear_ai_suggestions_list_items()
     except ValueError as exc:
@@ -287,6 +321,8 @@ async def ui_clear_ai_suggestions(
 
 @router.get("/ui/cards/background-activity", response_class=HTMLResponse)
 async def ui_background_activity_card(request: Request):
+    """Vyrenderuj homepage kartu s aktualnim background dohledem."""
+
     return templates.TemplateResponse(
         request,
         "_background_activity_card.html",
@@ -299,6 +335,8 @@ async def ui_background_activity_card(request: Request):
 
 @router.get("/ui/cards/imdb-refresh-status", response_class=HTMLResponse)
 async def ui_imdb_refresh_status_card(request: Request):
+    """Vyrenderuj kartu se stavem aktualniho IMDb refresh jobu."""
+
     return templates.TemplateResponse(
         request,
         "_imdb_refresh_status.html",

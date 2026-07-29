@@ -1,3 +1,5 @@
+"""Vypocet zanroveho scoringu z lokalnich uzivatelskych signalu."""
+
 from __future__ import annotations
 
 import math
@@ -249,6 +251,7 @@ def compute_genre_scores(
 
 
 def _build_favorite_lookup(favorite_genres: Sequence[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Preved rucni oblibene zanry na lookup podle nazvu zanru."""
     return {
         str(item.get("genre")): item
         for item in favorite_genres
@@ -257,6 +260,7 @@ def _build_favorite_lookup(favorite_genres: Sequence[dict[str, Any]]) -> dict[st
 
 
 def _rating_signal(value: Any) -> float:
+    """Normalizuj rating 1..10 do intervalu zhruba -1..1."""
     if value is None:
         return 0.0
     rating = float(value)
@@ -264,6 +268,7 @@ def _rating_signal(value: Any) -> float:
 
 
 def _watch_signal(value: Any) -> float:
+    """Preved pocet zhlednuti na mirny kladny signal s logaritmickym utlumenim."""
     watch_count = int(value or 0)
     if watch_count <= 0:
         return 0.0
@@ -271,6 +276,7 @@ def _watch_signal(value: Any) -> float:
 
 
 def _recency_signal(value: Any, observed_at: datetime) -> float:
+    """Vrat signal cerstvosti podle casu posledniho zhlednuti."""
     if value is None:
         return 0.0
     last_watched_at = _coerce_datetime(value)
@@ -279,6 +285,7 @@ def _recency_signal(value: Any, observed_at: datetime) -> float:
 
 
 def _actor_affinity_signal(value: Any) -> float:
+    """Preved lokalni oblibenost herce na jemny podpurny signal."""
     if value is None:
         return 0.0
     rating = float(value)
@@ -288,6 +295,7 @@ def _actor_affinity_signal(value: Any) -> float:
 
 
 def _favorite_overlap_score(item: dict[str, Any] | None, *, max_favorite_weight: float) -> float:
+    """Vypocti silu prekryvu s rucne zadanou oblibou zanru."""
     if not item:
         return 0.0
     rank = int(item.get("preference_rank") or 999)
@@ -297,6 +305,7 @@ def _favorite_overlap_score(item: dict[str, Any] | None, *, max_favorite_weight:
 
 
 def _novelty_score(catalog_title_count: int, *, max_catalog_count: int) -> float:
+    """Dej maly bonus zanrum, ktere nejsou v katalogu uplne masove."""
     if catalog_title_count <= 0 or max_catalog_count <= 0:
         return 0.0
     share = catalog_title_count / max_catalog_count
@@ -304,6 +313,7 @@ def _novelty_score(catalog_title_count: int, *, max_catalog_count: int) -> float
 
 
 def _consistency_score(items: Sequence[dict[str, Any]]) -> float:
+    """Ohodnot, zda jsou dukazy pro zanr vnitrne konzistentni."""
     rated = [item for item in items if item["rating"] is not None]
     if rated:
         positive = sum(1 for item in rated if float(item["rating"]) >= 7.0)
@@ -314,6 +324,7 @@ def _consistency_score(items: Sequence[dict[str, Any]]) -> float:
 
 
 def _actor_affinity_score(items: Sequence[dict[str, Any]]) -> float:
+    """Sloz zanrovy signal z lokalne hodnocenych hercu v titulech."""
     rated_items = [item for item in items if item.get("actor_affinity_rating") is not None]
     if not rated_items:
         return 0.0
@@ -325,6 +336,7 @@ def _actor_affinity_score(items: Sequence[dict[str, Any]]) -> float:
 
 
 def _confidence_score(items: Sequence[dict[str, Any]]) -> float:
+    """Odhadni duveru ve vysledek podle mnozstvi dukazu."""
     evidence = sum(1.5 for item in items if item["rating"] is not None) + sum(
         1.0 for item in items if item["watch_count"] > 0
     )
@@ -334,6 +346,7 @@ def _confidence_score(items: Sequence[dict[str, Any]]) -> float:
 
 
 def _top_titles(items: Sequence[dict[str, Any]], *, limit: int, reverse: bool) -> list[dict[str, Any]]:
+    """Vrat nejvyraznejsi pozitivni nebo negativni tituly pro dany zanr."""
     ordered = sorted(items, key=lambda item: (item["title_affinity"], item["watch_count"], item["title"] or ""), reverse=reverse)
     result: list[dict[str, Any]] = []
     for item in ordered[:limit]:
@@ -360,6 +373,7 @@ def _build_explanation(
     preference_overlap_score: float,
     titles_considered: int,
 ) -> str:
+    """Sestav kratke lidsky citelne vysvetleni zanroveho score."""
     reasons: list[str] = []
     if rating_signal_score > 0.20:
         reasons.append("strong ratings")
@@ -383,6 +397,7 @@ def _build_explanation(
 
 
 def _weighted_average(values: Sequence[float], weights: Sequence[float]) -> float:
+    """Spocti vazeny prumer s obranou proti nulove celkove vaze."""
     weighted_sum = 0.0
     total_weight = 0.0
     for value, weight in zip(values, weights, strict=False):
@@ -394,6 +409,7 @@ def _weighted_average(values: Sequence[float], weights: Sequence[float]) -> floa
 
 
 def _coerce_datetime(value: Any) -> datetime:
+    """Normalizuj ruzne datetime vstupy na timezone-aware UTC hodnotu."""
     if isinstance(value, datetime):
         if value.tzinfo is None:
             return value.replace(tzinfo=UTC)
@@ -408,4 +424,5 @@ def _coerce_datetime(value: Any) -> datetime:
 
 
 def _clamp(value: float, minimum: float, maximum: float) -> float:
+    """Omez cislo do zadaneho intervalu."""
     return max(minimum, min(maximum, value))
