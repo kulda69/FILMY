@@ -60,8 +60,25 @@
         <div class="rounded-4 border border-secondary-subtle bg-body p-3 mb-4">
             <div class="small text-secondary mb-2">Aktualni soubor</div>
             <div class="fw-semibold">{{ status.current_file or "zadny" }}</div>
+            {% if status.current_file_percent is not none %}
+            <div class="small text-secondary mt-2">
+                Prubeh: {{ status.current_file_percent }} %
+                {% if status.current_file_total_bytes %}
+                ({{ (status.current_file_bytes / 1024 / 1024)|round(1) }} / {{ (status.current_file_total_bytes / 1024 / 1024)|round(1) }} MiB)
+                {% elif status.current_file_bytes %}
+                ({{ (status.current_file_bytes / 1024 / 1024)|round(1) }} MiB)
+                {% endif %}
+            </div>
+            {% elif status.current_file_bytes %}
+            <div class="small text-secondary mt-2">
+                Zpracovano: {{ (status.current_file_bytes / 1024 / 1024)|round(1) }} MiB
+            </div>
+            {% endif %}
             {% if status.updated_at %}
             <div class="small text-secondary mt-2">Aktualizovano {{ format_czech_datetime(status.updated_at) }}</div>
+            {% endif %}
+            {% if status.last_activity_at %}
+            <div class="small text-secondary mt-2">Posledni aktivita {{ format_czech_datetime(status.last_activity_at) }}</div>
             {% endif %}
             {% if status.error %}
             <div class="small text-danger mt-2">{{ status.error }}</div>

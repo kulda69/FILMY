@@ -134,10 +134,19 @@ def _apply_catalog_schema() -> None:
     _run_psql(config, TARGET_DATABASE, "-f", str(GRANTS_MIGRATION))
 
 
-def _copy_tsv_to_raw(cursor: psycopg.Cursor, source: RawSource) -> None:
+def _copy_tsv_to_raw(
+    cursor: psycopg.Cursor,
+    source: RawSource,
+    progress: Callable[..., None] | None = None,
+) -> None:
     """Nahraje jeden IMDb TSV soubor do odpovidajici raw tabulky."""
 
+    import time
+
     column_sql = ", ".join(source.columns)
+    total_bytes = source.stat_size
+    processed_bytes = 0
+    last_report_at = 0.0
     cursor.execute(f"TRUNCATE raw.{source.table_name}")
     with cursor.copy(
         f"COPY raw.{source.table_name} ({column_sql}) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '\\N')"
@@ -149,6 +158,15 @@ def _copy_tsv_to_raw(cursor: psycopg.Cursor, source: RawSource) -> None:
                 if not chunk:
                     break
                 copy.write(chunk)
+                processed_bytes = handle.tell()
+                now = time.monotonic()
+                if progress is not None and (now - last_report_at >= 5.0 or processed_bytes >= total_bytes):
+                    progress(
+                        current_file_bytes=processed_bytes,
+                        current_file_total_bytes=total_bytes,
+                        current_file_percent=round(processed_bytes / total_bytes * 100, 1) if total_bytes else None,
+                    )
+                    last_report_at = now
 
 
 def _fetch_stored_manifest(cursor: psycopg.Cursor) -> dict[str, dict[str, object]]:
@@ -659,9 +677,23 @@ def rebuild_catalog_from_current_imdb(
                     stage="refresh_catalog",
                     message=f"Nahravam do PostgreSQL {source.path.name} ({index}/{total_sources}).",
                     current_file=source.path.name,
+                    current_file_bytes=0,
+                    current_file_total_bytes=source.stat_size,
+                    current_file_percent=0,
                 )
             with conn.cursor() as cursor:
-                _copy_tsv_to_raw(cursor, source)
+                _copy_tsv_to_raw(
+                    cursor,
+                    source,
+                    progress=lambda **payload: progress(
+                        stage="refresh_catalog",
+                        message=f"Nahravam do PostgreSQL {source.path.name} ({index}/{total_sources}).",
+                        current_file=source.path.name,
+                        **payload,
+                    )
+                    if progress is not None
+                    else None,
+                )
             conn.commit()
 
         if progress is not None:

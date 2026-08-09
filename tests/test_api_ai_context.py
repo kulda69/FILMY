@@ -164,7 +164,7 @@ def test_ai_noted_titles_endpoint_routes_filters() -> None:
     assert payload["items"][0]["liked_notes"] == "Ephram jako postava a dialogy."
 
 
-def test_ai_watched_titles_endpoint_routes_blacklist_filters() -> None:
+def test_ai_watched_titles_endpoint_always_routes_complete_blacklist() -> None:
     app = FastAPI()
     app.include_router(router)
     client = TestClient(app)
@@ -172,9 +172,16 @@ def test_ai_watched_titles_endpoint_routes_blacklist_filters() -> None:
     with patch(
         "filmy.routers.api.get_ai_watched_titles",
         return_value={
-            "contract_version": 1,
-            "filters": {"include_rated": False, "include_negative": True},
+            "contract_version": 2,
+            "filters": {
+                "mode": "complete_hard_blacklist",
+                "include_rated": True,
+                "include_negative": True,
+                "include_in_progress": True,
+                "include_strong_positive": True,
+            },
             "item_count": 1,
+            "unresolved_item_count": 0,
             "source_counts": {"watch_event": 1},
             "items": [
                 {
@@ -187,12 +194,15 @@ def test_ai_watched_titles_endpoint_routes_blacklist_filters() -> None:
             ],
         },
     ) as watched_titles_mock:
-        response = client.get("/api/ai/watched-titles?include_rated=false&include_negative=true")
+        response = client.get("/api/ai/watched-titles?include_rated=false&include_negative=false")
 
     assert response.status_code == 200
-    watched_titles_mock.assert_called_once_with(include_rated=False, include_negative=True)
+    watched_titles_mock.assert_called_once_with()
     payload = response.json()
+    assert payload["contract_version"] == 2
+    assert payload["filters"]["mode"] == "complete_hard_blacklist"
     assert payload["item_count"] == 1
+    assert payload["unresolved_item_count"] == 0
     assert payload["items"][0]["tconst"] == "tt0242795"
     assert payload["source_counts"]["watch_event"] == 1
 

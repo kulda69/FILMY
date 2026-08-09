@@ -174,6 +174,7 @@ class AiWatchedTitlesResponse(ApiFlexibleModel):
     contract_version: int
     filters: dict[str, Any]
     item_count: int
+    unresolved_item_count: int
     source_counts: dict[str, int]
     items: list[dict[str, Any]]
 
@@ -567,13 +568,10 @@ async def ai_noted_titles(
 
 
 @router.get("/api/ai/watched-titles", response_model=AiWatchedTitlesResponse)
-async def ai_watched_titles(
-    include_rated: bool = Query(default=True),
-    include_negative: bool = Query(default=True),
-):
+async def ai_watched_titles():
     """Read the complete title exclusion set for a separate AI workflow."""
 
-    return get_ai_watched_titles(include_rated=include_rated, include_negative=include_negative)
+    return get_ai_watched_titles()
 
 
 @router.get("/api/ai/context", response_model=AiContextResponse)

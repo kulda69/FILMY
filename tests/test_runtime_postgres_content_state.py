@@ -85,6 +85,45 @@ class RuntimePostgresTests(unittest.TestCase):
         self.assertEqual(result["tt1"]["disliked_notes"], "pomalejsi konec")
         self.assertEqual(result["tt2"]["updated_at"], datetime(2026, 7, 10, 10, 0, 0))
 
+    @patch("filmy.runtime_postgres._connect")
+    def test_ai_watched_titles_builds_non_weakenable_complete_blacklist(self, connect_mock) -> None:
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [
+            (
+                "tt0133093",
+                "The Matrix",
+                "The Matrix",
+                "movie",
+                1999,
+                "Action,Sci-Fi",
+                8.7,
+                2_000_000,
+                603,
+                9,
+                datetime(2026, 8, 8).date(),
+                ["strong_positive_list", "user_rating", "watch_event"],
+                {"strong_positive_list": 1, "user_rating": 1, "watch_event": 1},
+                1,
+            )
+        ]
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cursor
+        connect_mock.return_value.__enter__.return_value = conn
+
+        result = runtime_postgres.fetch_ai_watched_title_rows()
+
+        executed_sql = cursor.execute.call_args.args[0]
+        self.assertIn("old.trakt_history_events", executed_sql)
+        self.assertIn("'{show,ids,imdb}'", executed_sql)
+        self.assertIn("substring(tconst FROM '^(tt[0-9]+)')", executed_sql)
+        self.assertIn("s.interest_state IN ('watched', 'in_progress')", executed_sql)
+        self.assertIn("l.ai_input_role IN ('negative', 'in_progress', 'strong_positive')", executed_sql)
+        self.assertNotIn("LIMIT", executed_sql)
+        self.assertEqual(result["contract_version"], 2)
+        self.assertEqual(result["filters"]["mode"], "complete_hard_blacklist")
+        self.assertEqual(result["unresolved_item_count"], 1)
+        self.assertEqual(result["items"][0]["tconst"], "tt0133093")
+
     def test_row_to_user_rating_includes_taste_notes(self) -> None:
         row = [
             "movie|tt1",
@@ -182,6 +221,26 @@ class RuntimePostgresTests(unittest.TestCase):
         self.assertEqual(result[0]["effect_params"], {"threshold": 7})
         executed_sql = cursor.execute.call_args.args[0]
         self.assertIn("FROM app.list_action_rules", executed_sql)
+
+    @patch("filmy.runtime_postgres._connect")
+    def test_fetch_list_action_rules_can_match_exact_target_or_wildcard(self, connect_mock) -> None:
+        cursor = MagicMock()
+        cursor.fetchall.return_value = []
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cursor
+        connect_mock.return_value.__enter__.return_value = conn
+
+        runtime_postgres.fetch_list_action_rules(
+            source_list_id="watchlist",
+            trigger_action="move_to_list",
+            target_list_id="stahnout",
+            target_match_mode="exact_or_wildcard",
+        )
+
+        executed_sql, parameters = cursor.execute.call_args.args
+        self.assertIn("target_list_id IS NULL OR target_list_id = %s::text", executed_sql)
+        self.assertEqual(parameters[3], "exact_or_wildcard")
+        self.assertEqual(parameters[7], "stahnout")
 
     @patch("filmy.runtime_postgres._connect")
     def test_upsert_title_session_returns_stored_row(self, connect_mock) -> None:

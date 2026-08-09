@@ -7,9 +7,13 @@ import gzip
 import json
 import shutil
 import signal
+import ssl
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Callable
 from urllib.request import urlopen
+
+import certifi
 
 from filmy.paths import (
     IMDB_DIR,
@@ -84,16 +88,59 @@ def _install_lifecycle_logging() -> None:
     atexit.register(lambda: IMDB_REFRESH_PID_PATH.unlink(missing_ok=True))
 
 
-def _download_file(url: str, destination: Path) -> None:
+def _copy_stream(
+    source: object,
+    destination: object,
+    *,
+    total_bytes: int | None,
+    progress: Callable[..., None] | None,
+) -> None:
+    """Prekopiruj stream po blocich a hlas prubeh nejvyse jednou za 5 sekund."""
+    import time
+
+    processed_bytes = 0
+    last_report_at = 0.0
+    while True:
+        chunk = source.read(1024 * 1024)  # type: ignore[attr-defined]
+        if not chunk:
+            break
+        destination.write(chunk)  # type: ignore[attr-defined]
+        processed_bytes += len(chunk)
+        now = time.monotonic()
+        if progress is not None and (
+            now - last_report_at >= 5.0 or (total_bytes is not None and processed_bytes >= total_bytes)
+        ):
+            progress(
+                current_file_bytes=processed_bytes,
+                current_file_total_bytes=total_bytes,
+                current_file_percent=(
+                    round(processed_bytes / total_bytes * 100, 1) if total_bytes else None
+                ),
+            )
+            last_report_at = now
+
+
+def _download_file(
+    url: str,
+    destination: Path,
+    progress: Callable[..., None] | None = None,
+) -> None:
     """Stahni jeden IMDb archiv do pracovniho adresare."""
-    with urlopen(url, timeout=120) as response, destination.open("wb") as handle:
-        shutil.copyfileobj(response, handle, length=1024 * 1024)
+    ssl_context = ssl.create_default_context(cafile=certifi.where())
+    with urlopen(url, timeout=120, context=ssl_context) as response, destination.open("wb") as handle:
+        content_length = response.headers.get("Content-Length")
+        total_bytes = int(content_length) if content_length and content_length.isdigit() else None
+        _copy_stream(response, handle, total_bytes=total_bytes, progress=progress)
 
 
-def _extract_gzip(source: Path, destination: Path) -> None:
+def _extract_gzip(
+    source: Path,
+    destination: Path,
+    progress: Callable[..., None] | None = None,
+) -> None:
     """Rozbal jeden `.gz` archiv do TSV souboru."""
     with gzip.open(source, "rb") as compressed, destination.open("wb") as extracted:
-        shutil.copyfileobj(compressed, extracted, length=1024 * 1024)
+        _copy_stream(compressed, extracted, total_bytes=None, progress=progress)
 
 
 def _validate_extracted_files(extracted_dir: Path) -> None:
@@ -154,6 +201,10 @@ def main() -> int:
         started_at=_now_iso(),
         finished_at=None,
         current_file=None,
+        current_file_bytes=None,
+        current_file_total_bytes=None,
+        current_file_percent=None,
+        last_activity_at=_now_iso(),
         files_total=total_files,
         files_downloaded=0,
         files_extracted=0,
@@ -161,6 +212,30 @@ def main() -> int:
         error=None,
     )
     _emit({"phase": "start", "run_id": run_id, "files_total": total_files})
+
+    last_heartbeat_at = 0.0
+
+    def _update_progress(*, stage: str, message: str, current_file: str | None, **metrics: object) -> None:
+        """Uloz prubeh a zapis heartbeat do logu nejvyse jednou za 30 sekund."""
+        nonlocal last_heartbeat_at
+        _write_status(
+            stage=stage,
+            message=message,
+            current_file=current_file,
+            last_activity_at=_now_iso(),
+            **metrics,
+        )
+        now = _now_ts()
+        if now - last_heartbeat_at >= 30.0:
+            _emit(
+                {
+                    "phase": f"{stage}_heartbeat",
+                    "message": message,
+                    "current_file": current_file,
+                    **metrics,
+                }
+            )
+            last_heartbeat_at = now
 
     try:
         for index, gz_name in enumerate(IMDB_DATASET_FILES, start=1):
@@ -172,9 +247,21 @@ def main() -> int:
                 current_file=gz_name,
                 files_downloaded=downloaded,
                 files_extracted=extracted,
+                current_file_bytes=0,
+                current_file_total_bytes=None,
+                current_file_percent=0,
             )
             _emit({"phase": "download_start", "file": gz_name, "index": index, "url": url})
-            _download_file(url, download_path)
+            _download_file(
+                url,
+                download_path,
+                progress=lambda **metrics: _update_progress(
+                    stage="download",
+                    message=f"Stahuji {gz_name}.",
+                    current_file=gz_name,
+                    **metrics,
+                ),
+            )
             downloaded += 1
             _emit({"phase": "download_done", "file": gz_name, "index": index, "size": download_path.stat().st_size})
             _write_status(files_downloaded=downloaded)
@@ -187,9 +274,21 @@ def main() -> int:
                 current_file=tsv_name,
                 files_downloaded=downloaded,
                 files_extracted=extracted,
+                current_file_bytes=0,
+                current_file_total_bytes=None,
+                current_file_percent=None,
             )
             _emit({"phase": "extract_start", "file": gz_name, "target": tsv_name, "index": index})
-            _extract_gzip(download_path, extracted_path)
+            _extract_gzip(
+                download_path,
+                extracted_path,
+                progress=lambda **metrics: _update_progress(
+                    stage="extract",
+                    message=f"Rozbaluji {gz_name}.",
+                    current_file=tsv_name,
+                    **metrics,
+                ),
+            )
             extracted += 1
             _emit({"phase": "extract_done", "file": tsv_name, "index": index, "size": extracted_path.stat().st_size})
             _write_status(files_extracted=extracted)
@@ -207,9 +306,7 @@ def main() -> int:
 
             def _progress(**payload: object) -> None:
                 """Propis prubezny stav rebuild kroku do statusu i stdout logu."""
-                status_payload = {"stage": "refresh_catalog", **payload}
-                _write_status(**status_payload)
-                _emit({"phase": "refresh_catalog_progress", **payload})
+                _update_progress(stage="refresh_catalog", **payload)
 
             stats = rebuild_catalog_from_current_imdb(force=True, progress=_progress)
             _emit({"phase": "refresh_catalog_done", "stats": stats})

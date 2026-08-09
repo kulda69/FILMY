@@ -474,3 +474,40 @@ Související rozhodnutí: [AI taste bridge je datový kontrakt, ne náhrada lok
 - Každá další změna PostgreSQL schématu, funkce, view, constraintu, indexu nebo seed/role dat musí mít idempotentní upgrade krok v repozitáři.
 - Přibyl runner `filmy.scripts.upgrade_database` / `filmy-upgrade-database`, který zakládá ledger `app.database_upgrades` a spouští verziované migrace.
 - Instalační postup byl doplněný tak, aby se po `git pull` a `uv sync` spouštělo `uv run filmy-upgrade-database`.
+
+## 2026-08-07 - Zpřehlednění editoru pravidel mezi seznamy
+
+- Reálné použití ukázalo, že editor list-action pravidel vystavoval Jiřímu interní databázový rozpad pravidel místo srozumitelného popisu chování seznamu.
+- Příčinou byl seed, který vytváří samostatné řádky pro každou kombinaci zdrojového a cílového seznamu, hlavně u `copy_to_list` a `move_to_list`.
+- Technický editor byl proto z běžného detailu odstraněn. Stránka ukazuje pouze Jiřího vlastní jednoduchá pravidla a prázdný formulář s akcí, případným cílovým seznamem a volbou odebrat/zachovat členství v původním seznamu.
+- Backend z jednoduchého pravidla automaticky vytvoří potřebné effect řádky. `write_watched` a změna členství zdroje zůstávají ve fázi `finalize_only`, takže práce s detailem nepřijde o kontext; nové vlastní pravidlo zároveň vypne starší seedované řádky ve stejném scope.
+- Ověření: `tests/test_ui_system_list_action_rules.py` -> `6 passed` a `python3 -m py_compile filmy/routers/web_system.py`.
+- Navazující živý smoke odhalil `UniqueViolation` nad `idx_list_action_rules_order_key`: vypnutý seedovaný řádek stále zabíral stejné pořadí jako nové pravidlo. Generátor nyní vybírá první volný `order_index` v každé fázi; regresní sada má `7 passed` a skutečné pravidlo `Watchlist -> Watched -> odebrat původní členství` se uložilo.
+- Protože `Watched` není seznam, cílový seznam má explicitní stav `Nevybrán`. Uložené pravidlo tento stav také zobrazuje, takže je vidět, že se film nikam dalšího nepřidává.
+- Vlastní jednoduché pravidlo se nově upravuje a maže jako jedna uživatelská položka; backend přitom bezpečně obslouží všechny technické řádky stejné skupiny. Editace byla ověřena na skutečném pravidle a dočasné wildcard pravidlo bylo v živé databázi vytvořeno i odstraněno.
+- Pro akce s cílovým seznamem přibyla hodnota `Jakýkoli`. V konfiguraci ji reprezentuje prázdný cíl a znamená shodu s libovolným konkrétním cílem skutečné `copy_to_list` nebo `move_to_list` akce. Schéma rozšiřuje verziovaný upgrade [010_list_action_rule_any_target.sql](migrations/postgresql/010_list_action_rule_any_target.sql), který byl lokálně úspěšně aplikován.
+- Breadcrumb detailu už nepřebírá sám sebe z opakovaného `return_to`; návrat je normalizovaný na přehled `List Action Rules`, takže se navigace při opakovaných návštěvách nenásobí.
+- Ověření nové funkce: cílená sada `58 passed`, `py_compile`, `git diff --check` a skutečný browser smoke s rozbalenou editací. Celý pytest skončil `103 passed, 4 failed`; čtyři pády jsou omezené na starší mocky v `tests/test_app_state_postgres_overlay.py` a nesouvisejí s pravidly seznamů.
+
+## 2026-08-08 - Zpřísnění watched-titles na úplný tvrdý blacklist
+
+- Kontrola požadavku z projektu `filmy-knihy` ukázala, že deklarovaný kompletní blacklist ve skutečnosti vynechával části seznamů `Kouknout znovu` (`strong_positive`), `Rozkoukáno` (`in_progress`) a stavů `content_state=in_progress`.
+- Endpoint navíc vracel 354 historických Trakt pseudo-identit `unresolved:...` jako `imdb_id`. U 353 z nich šlo z uloženého Trakt JSON dohledat rodičovské IMDb ID seriálu; tyto epizodní signály se nyní normalizují na 77 rodičovských seriálů. Tři další IMDb identity se opravily odstraněním uloženého URL suffixu.
+- Kontrakt v2 už nemá oslabující query parametry. Vždy slučuje watched události, ratingy, watched/in-progress content state a listové role `negative`, `in_progress`, `strong_positive`. Do `items` pouští jen platná IMDb ID `tt...`; skutečně nerozřešené identity vykazuje přes `unresolved_item_count`.
+- Seznam `Špatné` měl navzdory svému významu roli `ignore`, takže jeho jinak neoznačený titul `The Descendants` (`tt1033575`) v blacklistu chyběl. Jiří potvrdil změnu role na `negative`; členství ani popis seznamu se neměnily.
+- Live helper po opravě role vrátil `item_count=1636`, `unresolved_item_count=1`, `negative_list=7`, žádnou neplatnou identitu v `items` a `tt1033575` se zdrojem `negative_list`. OpenAPI má pro endpoint nulový seznam parametrů a cílené testy skončily `26 passed`.
+
+## 2026-08-09 - Oprava SSL a ověření IMDb refreshu
+
+- Lokální IMDb refresh na MacBooku selhal na Mac mini při stahování prvního souboru kvůli `SSL_CERTIFICATE_VERIFY_FAILED`; downloader v `filmy/scripts/run_imdb_refresh.py` proto nově používá explicitní CA bundle z `certifi`, které je přímou runtime závislostí.
+- Oprava byla ověřena skutečným lokálním refreshem: všech 7 souborů se stáhlo, rozbalilo a PostgreSQL katalog se úspěšně přestavěl. Refresh běžel od `2026-08-08T17:26:54+00:00` do `22:17:56+00:00`.
+- Po refresi sedí manifest velikostí na všech 7 lokálních TSV, všechny katalogové počty odpovídají dokončovacím statistikám, nejsou neplatné PostgreSQL indexy a vyhledání/detail `The Matrix` funguje.
+- Cílený regresní test SSL downloaderu `tests/test_run_imdb_refresh.py` prošel `1 passed`. Při prvním běhu testu byl opraven vlastní mock EOF, který původně vracel data donekonečna; produkční refresh tím nebyl ovlivněn.
+- Známé orphan vazby jsou očekávané důsledky katalogového filtru: aliasy obsahují i epizody a jiné IMDb typy mimo hlavní katalog a 279 979 epizod odkazuje na dospělé seriály vyřazené z `catalog_titles`.
+
+## 2026-08-09 - Prubezny progress IMDb Refresh
+
+- Stranka IMDb Refresh se uz predtim dotazovala na status kazdych 5 sekund, ale dlouhy PostgreSQL `COPY` zapisoval dalsi log az po dokonceni celeho souboru.
+- Downloader, rozbalovani i PostgreSQL import ted posilaji prubeh nejvyse jednou za 5 sekund do status JSONu. Stav obsahuje zpracovane bajty, celkovou velikost, procenta a `last_activity_at`.
+- Log dostava skutecny heartbeat nejvyse jednou za 30 sekund. UI zobrazuje procenta/bajty aktualniho souboru a cas posledni aktivity, takze dlouhe kroky nejsou opticky zamrzle.
+- Otestovano: dva cilene testy progressu/SSL, syntakticka kontrola a render Jinja status karty prosly; novy ostry refresh se kvuli overeni znovu nespoustel.

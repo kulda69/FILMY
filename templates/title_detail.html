@@ -33,22 +33,28 @@
 
             <div class="overflow-hidden">
                 <div class="mb-4">
-                    <div class="d-flex flex-wrap gap-2 mb-4">
-                        <span class="badge text-bg-light text-dark px-3 py-2">{{ title_item.kind_label }}</span>
+                    <div class="d-flex flex-wrap align-items-center gap-2 mb-4">
+                        <span class="badge d-inline-flex align-items-center text-bg-light text-dark px-3 py-2">{{ title_item.kind_label }}</span>
                         {% if title_item.year %}
-                        <span class="badge text-bg-secondary px-3 py-2">{{ title_item.year }}</span>
+                        <span class="badge d-inline-flex align-items-center text-bg-secondary px-3 py-2">{{ title_item.year }}</span>
                         {% endif %}
                         {% if title_item.end_year and title_item.end_year != title_item.year %}
-                        <span class="badge text-bg-dark border border-secondary-subtle px-3 py-2">{{ title_item.end_year }}</span>
+                        <span class="badge d-inline-flex align-items-center text-bg-dark border border-secondary-subtle px-3 py-2">{{ title_item.end_year }}</span>
                         {% endif %}
                         {% if title_item.runtime_minutes %}
-                        <span class="badge text-bg-dark border border-secondary-subtle px-3 py-2">{{ title_item.runtime_minutes }} min</span>
+                        <span class="badge d-inline-flex align-items-center text-bg-dark border border-secondary-subtle px-3 py-2">{{ title_item.runtime_minutes }} min</span>
                         {% endif %}
                         {% if title_item.imdb_rating %}
-                        <span class="badge text-bg-warning text-dark px-3 py-2">IMDb {{ "%.1f"|format(title_item.imdb_rating) }}</span>
+                        <a
+                            class="badge d-inline-flex align-items-center text-bg-warning text-dark text-decoration-none px-3 py-2"
+                            href="https://www.imdb.com/title/{{ title_item.tconst }}/"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            aria-label="Otevřít {{ title_item.title }} na IMDb"
+                        >IMDb {{ "%.1f"|format(title_item.imdb_rating) }}</a>
                         {% endif %}
                         {% if content_state.interest_state %}
-                        <span class="badge text-bg-dark border border-secondary-subtle px-3 py-2">{{ content_state.interest_state }}</span>
+                        <span class="badge d-inline-flex align-items-center text-bg-dark border border-secondary-subtle px-3 py-2">{{ content_state.interest_state }}</span>
                         {% endif %}
                         {% if user_rating_value > 0 %}
                         <span class="d-inline-flex align-items-center gap-2 px-1">

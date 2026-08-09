@@ -35,9 +35,13 @@ class TitleSessionStore:
         source_list_id: str,
         trigger_action: str | None = None,
         target_list_id: str | None = None,
+        target_match_mode: str = "all",
         enabled_only: bool = True,
     ) -> list[dict[str, Any]]:
-        """Nacti pravidla pro konkretni zdrojovy list a volitelny trigger."""
+        """Nacti pravidla a volitelne rozlis presny nebo wildcard cil."""
+
+        if target_match_mode not in {"all", "exact", "exact_or_wildcard"}:
+            raise ValueError(f"Neznamy rezim filtrovani ciloveho seznamu: {target_match_mode}")
 
         with self._connect() as conn, conn.cursor() as cursor:
             cursor.execute(
@@ -59,11 +63,31 @@ class TitleSessionStore:
                 FROM app.list_action_rules
                 WHERE source_list_id = %s
                   AND (%s::text IS NULL OR trigger_action = %s::text)
-                  AND (%s::text IS NULL OR target_list_id = %s::text)
+                  AND (
+                        %s::text = 'all'
+                        OR (
+                            %s::text = 'exact'
+                            AND target_list_id IS NOT DISTINCT FROM %s::text
+                        )
+                        OR (
+                            %s::text = 'exact_or_wildcard'
+                            AND (target_list_id IS NULL OR target_list_id = %s::text)
+                        )
+                  )
                   AND (%s::boolean = FALSE OR enabled = TRUE)
                 ORDER BY trigger_action, target_list_id NULLS FIRST, phase, order_index, rule_id
                 """,
-                (source_list_id, trigger_action, trigger_action, target_list_id, target_list_id, enabled_only),
+                (
+                    source_list_id,
+                    trigger_action,
+                    trigger_action,
+                    target_match_mode,
+                    target_match_mode,
+                    target_list_id,
+                    target_match_mode,
+                    target_list_id,
+                    enabled_only,
+                ),
             )
             rows = cursor.fetchall()
         return [self._row_to_list_action_rule(row) for row in rows]
@@ -696,6 +720,7 @@ class TitleSessionOrchestrator:
             source_list_id=str(action.get("source_list_id") or ""),
             trigger_action=str(action["trigger_action"]),
             target_list_id=action.get("target_list_id"),
+            target_match_mode="exact_or_wildcard",
             enabled_only=True,
         )
         if not rules:

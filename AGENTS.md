@@ -1,3 +1,4 @@
+<!-- codex-project-brain:profile:programming-->
 Projekt: Filmy a seriály
 
 ## Oslovení a styl
@@ -68,3 +69,43 @@ Osobní webová appka pro filmy a seriály — co jsem viděl, co si chci vybrat
 - Use the stable `project_id` from `.agents/project-brain.json` for structured memories.
 - Ask `Mam to zapsat?` when long-term importance or the correct destination is unclear.
 <!-- codex-project-brain:end -->
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+When the user types `/graphify`, use the installed graphify skill or instructions before doing anything else.
+
+Rules:
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- Dirty graphify-out/ files are expected after hooks or incremental updates; dirty graph files are not a reason to skip graphify. Only skip graphify if the task is about stale or incorrect graph output, or the user explicitly says not to use it.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
+
+## Ucel
+
+- Tento soubor je zakladni agent pro programovaci projekt.
+- Slouzi jako operacni voditko pro skutecny software projekt, ne jako obecny brainstorming.
+
+## Pracovni postup
+
+- Pred vetsimi zmenami udelej kratky plan.
+- Postupuj v malych inkrementalnich krocich.
+- Kdyz neco neni jasne, nejdriv dohledavej v lokalnich souborech a konfiguraci projektu.
+- Pokud projekt uz ma zavedenou strukturu nebo architektonicka pravidla, drz se jich a nereorganizuj projekt bez jasneho duvodu.
+- Pokud se v projektu opakovane potvrdi stejna provozni prekazka a existuje overeny workaround, ber ji jako pracovni pravidlo a neopakuj znovu stejny slepy pokus.
+
+## Styl implementace
+
+- Preferuj jednoducha, citelna a dobre udrzovatelna reseni.
+- Pis Python kod tak, aby ho bylo mozne i po AI zasahu dal rucne cist a upravovat.
+- U funkci, kde by bez vysvetleni klesala srozumitelnost, pouzivej docstringy podle beznych Python pravidel; v cesky orientovanem projektu je pis cesky bez hacku a carek.
+- Kdyz vice funkci patri k jedne mensi uzavrene oblasti, sdileji stav nebo tvori jednu srozumitelnou odpovednost, zvaž pouziti tridy misto volnych funkci.
+- Pokud projekt pouziva databazi, nepresouvej do Pythonu logiku, kterou databaze umi vyresit prirozene, efektivne a citelne sama.
+- Kdyz se v souboru micha vice roli a ztraci se orientace, rozdel ho do vice spolupracujicich souboru podle odpovednosti.
+
+## Prostredi a spusteni
+
+- Pokud projekt pouziva uv, ber ho primarne jako nastroj pro spravu prostredi, zavislosti a vyvojove prikazy.
+- Pro nasazeni nebo systemove spousteni respektuj skutecny runtime projektu.

@@ -63,3 +63,19 @@ Rozhodnutí: když je titul otevřený ze seznamu, formulářové akce na detail
 Důvod: úprava detailu často probíhá ve více krocích, například nejdřív rating a potom přesun/kopie do jiného seznamu. Okamžitý návrat do seznamu by uživateli přerušil rozpracovanou editaci.
 
 Důsledek: původní seznam se musí zachovat v breadcrumb/back kontextu a slouží pro návrat až po dokončení celkové editace detailu. Nevracet rating, slovní hodnocení, watched, clear rating ani copy-to-list akce přímo do zdrojového seznamu.
+
+## 2026-08-07 - Prázdný cíl pravidla přesunu znamená libovolný konkrétní seznam
+
+Rozhodnutí: u konfiguračních pravidel `copy_to_list` a `move_to_list` reprezentuje prázdný `target_list_id` uživatelskou volbu `Jakýkoli`. Pravidlo se použije při přesunu nebo kopii do kteréhokoli konkrétního cílového seznamu. U ostatních akcí zůstává prázdný cíl stavem `Nevybrán`, protože například `Watched` není seznam.
+
+Důvod: Jiří potřebuje na zdrojovém seznamu vyjádřit obecné pravidlo „jakmile film přesunu jinam, odeber ho odsud“, aniž by vytvářel stejnou položku pro každý existující i budoucí cílový seznam.
+
+Důsledek: konfigurace smí mít bezcílové move/copy pravidlo, ale skutečná `title_session_action` musí dál obsahovat konkrétní cílový seznam. Runtime při konkrétní akci načte pravidla pro daný cíl i obecná pravidla `Jakýkoli`; jejich efekty se provedou až v určené fázi, typicky při finalize.
+
+## 2026-08-08 - Watched-titles nelze oslabit a vrací jen použitelné IMDb identity
+
+Rozhodnutí: `GET /api/ai/watched-titles` je vždy úplný tvrdý blacklist, ne konfigurovatelný výběr. Nemá query parametry pro vypnutí ratingů nebo negativních signálů a zahrnuje i rozkoukané a strong-positive/rewatch seznamy.
+
+Důvod: downstream projekt `filmy-knihy` musí před generováním kandidátů dostat jednu autoritativní exclude množinu. Volitelné filtry a pseudo-ID `unresolved:...` vytvářely falešný dojem úplnosti a dovolovaly již zpracované tituly znovu doporučit.
+
+Důsledek: `items` obsahuje pouze normalizovaná IMDb ID `tt...`; epizodní Trakt signály se převádějí na rodičovský seriál. Zbylé neidentifikované historické signály se nezamlčí, ale vykazují se samostatně v `unresolved_item_count`.

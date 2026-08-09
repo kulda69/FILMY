@@ -49,6 +49,7 @@ def test_database_upgrade_runner_tracks_versioned_steps() -> None:
     assert '"0007-list-actions-session-grants", "007_list_actions_session_grants.sql"' in upgrade_runner
     assert '"0008-list-action-rule-seed", "008_list_action_rule_seed.sql"' in upgrade_runner
     assert '"0009-list-action-target-rule-seed", "009_list_action_target_rule_seed.sql"' in upgrade_runner
+    assert '"0010-list-action-rule-any-target", "010_list_action_rule_any_target.sql"' in upgrade_runner
     assert "filmy-upgrade-database = \"filmy.scripts.upgrade_database:main\"" in pyproject
     assert "uv run filmy-upgrade-database" in install_doc
 
@@ -102,6 +103,16 @@ def test_list_action_target_rule_seed_upgrade_covers_move_and_copy_rules() -> No
     assert "'deactivate_source_membership'" in seed_sql
     assert "'watchlist'" not in seed_sql.split("target_lists AS", 1)[1]
     assert "'ai-navrhy'" not in seed_sql.split("target_lists AS", 1)[1]
+
+
+def test_list_action_any_target_upgrade_relaxes_only_rule_configuration() -> None:
+    upgrade_sql = Path("migrations/postgresql/010_list_action_rule_any_target.sql").read_text(encoding="utf-8")
+
+    assert "ALTER TABLE app.list_action_rules" in upgrade_sql
+    assert "DROP CONSTRAINT IF EXISTS list_action_rules_target_required_check" in upgrade_sql
+    assert "trigger_action IN ('copy_to_list', 'move_to_list')" in upgrade_sql
+    assert "target_list_id IS NULL" in upgrade_sql
+    assert "ALTER TABLE app.title_session_actions" not in upgrade_sql
 
 
 def test_bootstrap_accepts_pg_database_owner_for_public_schema() -> None:

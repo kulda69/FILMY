@@ -262,6 +262,7 @@ class UserListsPostgresOverlayTests(unittest.TestCase):
             source_list_id="watchlist",
             trigger_action="set_rating",
             target_list_id=None,
+            target_match_mode="exact_or_wildcard",
             enabled_only=True,
         )
         session_mock.assert_called_once()

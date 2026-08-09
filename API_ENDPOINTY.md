@@ -547,20 +547,20 @@ slouzit k interpretaci vkusu, ale jako tvrdy filtr pred vyberem kandidatu.
 Endpoint sklada unikatni `display_tconst` z techto lokalnich zdroju:
 
 - `watch_events` pres `app.watched_display_rollup`,
-- `content_state` s hodnotou `watched`,
-- `user_ratings`, pokud `include_rated=true`,
-- aktivni polozky v seznamech s `ai_input_role = negative`, pokud
-  `include_negative=true`.
+- `content_state` s hodnotou `watched` nebo `in_progress`,
+- vsechny `user_ratings`, protoze hodnoceny titul je povazovany za videny,
+- aktivni polozky v seznamech s `ai_input_role = negative`, `in_progress`
+  nebo `strong_positive`.
 
 Epizodni signaly se pri dostupnem mapovani normalizuji na rodicovsky serial,
-stejne jako ve zbytku listoveho UI.
+stejne jako ve zbytku listoveho UI. U starsich nerozresenych Trakt epizod se
+rodicovske IMDb ID doplni z ulozeneho `show.ids.imdb`. IMDb hodnoty omylem
+ulozene s URL suffixem se normalizuji na ciste `tt...`.
 
 ### Query parametry
 
-- `include_rated`: zda zahrnout vsechny lokalne hodnocene tituly, vychozi
-  `true`.
-- `include_negative`: zda zahrnout negativni seznamy typu `Nedokoukano`,
-  vychozi `true`.
+Endpoint nema parametry, ktere by blacklist oslabovaly. Vzdy vraci maximalni
+tvrdou exclude mnozinu dostupnou z lokalnich identit.
 
 ### Priklad volani
 
@@ -572,17 +572,24 @@ curl 'http://127.0.0.1:8019/api/ai/watched-titles'
 
 ```json
 {
-  "contract_version": 1,
+  "contract_version": 2,
   "filters": {
+    "mode": "complete_hard_blacklist",
     "include_rated": true,
-    "include_negative": true
+    "include_negative": true,
+    "include_in_progress": true,
+    "include_strong_positive": true
   },
-  "item_count": 1490,
+  "item_count": 1636,
+  "unresolved_item_count": 1,
   "source_counts": {
-    "watch_event": 1490,
-    "content_state_watched": 20,
-    "user_rating": 250,
-    "negative_list": 6
+    "watch_event": 1591,
+    "content_state_watched": 153,
+    "content_state_in_progress": 8,
+    "user_rating": 285,
+    "negative_list": 7,
+    "in_progress_list": 13,
+    "strong_positive_list": 9
   },
   "items": [
     {
@@ -604,7 +611,9 @@ curl 'http://127.0.0.1:8019/api/ai/watched-titles'
   "usage_notes": [
     "Use this endpoint as a complete hard exclusion list before generating new recommendations.",
     "The endpoint is not limit-based; it is intended as a blacklist, not a taste seed.",
-    "Episode-level watch/rating/list signals are normalized to their parent series display title when available."
+    "Coverage cannot be weakened by query parameters.",
+    "Episode-level watch/rating/list signals are normalized to their parent series display title when available.",
+    "Non-IMDb unresolved identities are excluded from items and reported in unresolved_item_count."
   ]
 }
 ```
@@ -615,6 +624,10 @@ curl 'http://127.0.0.1:8019/api/ai/watched-titles'
 doporuceni a pouzit `tconst` / `imdb_id` jako tvrdou exclude mnozinu. Tim se
 predejde chybe, kdy AI navrhne titul jen proto, ze nebyl v omezenem snapshotu
 `taste-inputs`, `rated-titles` nebo `taste-seed`.
+
+`items` obsahuje pouze pouzitelna IMDb ID ve tvaru `tt...`.
+`unresolved_item_count` je auditni pocet historickych signalu, ktere zatim
+nemaji spolehlivou IMDb identitu; nejsou vydavane za platne `imdb_id`.
 
 ## GET `/api/ai/noted-titles`
 

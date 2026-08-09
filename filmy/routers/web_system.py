@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 import uuid
 
 from fastapi import APIRouter, Form, HTTPException, Query, Request
@@ -41,6 +41,8 @@ from filmy.runtime_postgres import (
 from .web_shared import DEFAULT_FAVORITE_TRAITS, PREFERENCE_PRIORITY_MAX, PREFERENCE_PRIORITY_MIN
 
 router = APIRouter()
+
+ANY_TARGET_VALUE = "__any__"
 
 LIST_RULE_TRIGGER_ORDER: tuple[str, ...] = (
     "set_rating",
@@ -217,6 +219,222 @@ def _group_rules_for_list(list_id: str) -> list[dict[str, object]]:
             }
         )
     return groups
+
+
+def _build_simple_rule_rows(rule_groups: list[dict[str, object]]) -> list[dict[str, str]]:
+    """Seskup vlastni jednoducha pravidla bez zobrazeni technickych seed radku."""
+
+    grouped: dict[str, list[dict[str, object]]] = {}
+    for group in rule_groups:
+        for rule in group.get("rules", []):
+            rule_id = str(rule.get("rule_id") or "")
+            parts = rule_id.split(":")
+            if len(parts) < 4 or parts[:2] != ["rule", "simple"] or not bool(rule.get("is_enabled", True)):
+                continue
+            grouped.setdefault(":".join(parts[:3]), []).append(rule)
+
+    rows: list[dict[str, str]] = []
+    for group_id, rules in grouped.items():
+        trigger_action = str(rules[0].get("trigger_action") or "")
+        target_id = next((str(rule.get("target_list_id") or "") for rule in rules if rule.get("target_list_id")), "")
+        target_name = next((str(rule.get("target_list_name") or "") for rule in rules if rule.get("target_list_id")), "")
+        removes_source = any(rule.get("effect_type") == "deactivate_source_membership" for rule in rules)
+        if trigger_action == "set_rating":
+            simple_action = "set_rating"
+            action_label = "Nastavím rating"
+            result_label = "Po dokončení označit jako Watched"
+        elif trigger_action == "mark_watched":
+            simple_action = "mark_watched"
+            action_label = "Označím jako Watched"
+            result_label = "Po dokončení označit jako Watched"
+        else:
+            simple_action = "target_list"
+            target_name = target_name or "Jakýkoli"
+            verb = "Přesunu" if trigger_action == "move_to_list" else "Přidám"
+            action_label = f"{verb} do seznamu {target_name}"
+            result_label = f"{verb} do seznamu {target_name}"
+        rows.append(
+            {
+                "group_id": group_id,
+                "group_uuid": group_id.removeprefix("rule:simple:"),
+                "simple_action": simple_action,
+                "target_list_id": target_id if target_id else (ANY_TARGET_VALUE if simple_action == "target_list" else ""),
+                "source_membership": "deactivate" if removes_source else "preserve",
+                "action_label": action_label,
+                "result_label": result_label,
+                "target_label": target_name or "Nevybrán",
+                "membership_label": "Odebrat z původního seznamu" if removes_source else "Zachovat v původním seznamu",
+            }
+        )
+    return rows
+
+
+def _disable_rules_for_scope(
+    *,
+    source_list_id: str,
+    trigger_action: str,
+    target_list_id: str | None,
+) -> dict[str, set[int]]:
+    """Vypni seedovana pravidla a vrat poradi, ktera zustavaji obsazena.
+
+    Unikatni databazovy index zahrnuje i vypnuta pravidla. Nova jednoducha
+    pravidla proto nesmi znovu pouzit jejich ``order_index`` ve stejne fazi.
+    Drive vytvorena jednoducha pravidla se mazou a jejich poradi se uvolni.
+    """
+
+    existing_rules = fetch_list_action_rules(
+        source_list_id=source_list_id,
+        trigger_action=trigger_action,
+        target_list_id=target_list_id,
+        target_match_mode="exact",
+        enabled_only=False,
+    )
+    occupied_order_indexes: dict[str, set[int]] = {}
+    for rule in existing_rules:
+        if str(rule.get("rule_id") or "").startswith("rule:simple:"):
+            delete_list_action_rule(str(rule["rule_id"]))
+            continue
+        occupied_order_indexes.setdefault(str(rule["phase"]), set()).add(int(rule["order_index"]))
+        upsert_list_action_rule(
+            rule_id=str(rule["rule_id"]),
+            source_list_id=source_list_id,
+            trigger_action=trigger_action,
+            target_list_id=target_list_id,
+            effect_type=str(rule["effect_type"]),
+            phase=str(rule["phase"]),
+            order_index=int(rule["order_index"]),
+            enabled=False,
+            lock_reason_key=rule.get("lock_reason_key"),
+            lock_reason_text=rule.get("lock_reason_text"),
+            effect_params=rule.get("effect_params") or {},
+        )
+    return occupied_order_indexes
+
+
+def _assign_simple_rule_order_indexes(
+    effects: list[tuple[str, str]],
+    occupied_order_indexes: dict[str, set[int]],
+) -> list[tuple[str, str, int]]:
+    """Prirad efektum prvni volna poradi po desitkach v kazde fazi."""
+
+    assigned: list[tuple[str, str, int]] = []
+    occupied = {phase: set(indexes) for phase, indexes in occupied_order_indexes.items()}
+    for effect_type, phase in effects:
+        order_index = 10
+        phase_indexes = occupied.setdefault(phase, set())
+        while order_index in phase_indexes:
+            order_index += 10
+        phase_indexes.add(order_index)
+        assigned.append((effect_type, phase, order_index))
+    return assigned
+
+
+def _delete_simple_rule_group(*, list_id: str, group_uuid: str) -> int:
+    """Smaz vsechny technicke radky jednoho vlastniho jednoducheho pravidla."""
+
+    prefix = f"rule:simple:{group_uuid}:"
+    matching_rules = [
+        rule
+        for rule in fetch_list_action_rules(source_list_id=list_id, enabled_only=False)
+        if str(rule.get("rule_id") or "").startswith(prefix)
+    ]
+    for rule in matching_rules:
+        delete_list_action_rule(str(rule["rule_id"]))
+    return len(matching_rules)
+
+
+def _normalize_simple_rule(
+    *,
+    list_id: str,
+    simple_action: str,
+    target_list_id: str | None,
+    source_membership: str,
+) -> tuple[str, str, str | None]:
+    """Validuj lidske pravidlo a vrat trigger, clenstvi a ulozeny cil."""
+
+    action = str(simple_action or "").strip()
+    membership = str(source_membership or "").strip()
+    if action not in {"set_rating", "mark_watched", "target_list"}:
+        raise ValueError("Nejdřív vyber akci.")
+    if membership not in {"deactivate", "preserve"}:
+        raise ValueError("Vyber, zda se má členství v původním seznamu odebrat, nebo zachovat.")
+
+    normalized_target = str(target_list_id or "").strip() or None
+    if action == "target_list":
+        is_any_target = normalized_target == ANY_TARGET_VALUE
+        if normalized_target is None:
+            raise ValueError("Pro přesun nebo kopii vyber cílový seznam nebo Jakýkoli.")
+        if is_any_target:
+            normalized_target = None
+        else:
+            target_list = fetch_user_list(normalized_target)
+            if target_list is None or normalized_target == list_id:
+                raise ValueError("Vybraný cílový seznam není platný.")
+        trigger_action = "move_to_list" if membership == "deactivate" else "copy_to_list"
+    else:
+        normalized_target = None
+        trigger_action = action
+    return trigger_action, membership, normalized_target
+
+
+def _write_simple_rule(
+    *,
+    list_id: str,
+    simple_action: str,
+    target_list_id: str | None,
+    source_membership: str,
+    group_uuid: str | None = None,
+) -> str:
+    """Zapis validovane lidske pravidlo jako skupinu technickych effect radku."""
+
+    trigger_action, membership, normalized_target = _normalize_simple_rule(
+        list_id=list_id,
+        simple_action=simple_action,
+        target_list_id=target_list_id,
+        source_membership=source_membership,
+    )
+
+    occupied_order_indexes = _disable_rules_for_scope(
+        source_list_id=list_id,
+        trigger_action=trigger_action,
+        target_list_id=normalized_target,
+    )
+    normalized_group_uuid = group_uuid or str(uuid.uuid4())
+    rule_prefix = f"rule:simple:{normalized_group_uuid}"
+    effects: list[tuple[str, str]]
+    if trigger_action == "set_rating":
+        effects = [("write_rating", "immediate"), ("derive_watched", "immediate"), ("write_watched", "finalize_only")]
+    elif trigger_action == "mark_watched":
+        effects = [("write_watched", "finalize_only")]
+    else:
+        effects = [("add_target_membership", "immediate")]
+    source_effect = "deactivate_source_membership" if membership == "deactivate" else "preserve_source_membership"
+    effects.append((source_effect, "finalize_only"))
+
+    for effect_type, phase, order_index in _assign_simple_rule_order_indexes(effects, occupied_order_indexes):
+        upsert_list_action_rule(
+            rule_id=f"{rule_prefix}:{effect_type}",
+            source_list_id=list_id,
+            trigger_action=trigger_action,
+            target_list_id=normalized_target,
+            effect_type=effect_type,
+            phase=phase,
+            order_index=order_index,
+            enabled=True,
+            lock_reason_key=None,
+            lock_reason_text=None,
+            effect_params={"simple_rule": True, "any_target": simple_action == "target_list" and normalized_target is None},
+        )
+    return normalized_group_uuid
+
+
+def _list_action_rules_parent_target(request: Request, return_to: str | None) -> str:
+    """Vrat stabilni parent URL a odrizni omylem zanorený self-return."""
+
+    normalized = safe_back_target(return_to)
+    if normalized and urlsplit(normalized).path != request.url.path:
+        return normalized
+    return "/system/list-action-rules"
 
 
 def _list_action_rules_setup_message() -> str:
@@ -397,10 +615,11 @@ async def list_action_rules_detail_page(
     list_row = fetch_user_list(list_id)
     if list_row is None:
         raise HTTPException(status_code=404, detail="Seznam nebyl nalezen.")
+    parent_return_to = _list_action_rules_parent_target(request, return_to)
     breadcrumb_context = build_breadcrumb_context(
         request,
-        "List Action Rules",
-        return_to=return_to or "/system/list-action-rules",
+        str(list_row["name"]),
+        return_to=parent_return_to,
         default_trail=[{"url": "/", "label": "Home"}, {"url": "/system/list-action-rules", "label": "List Action Rules"}],
     )
     setup_message: str | None = None
@@ -418,18 +637,20 @@ async def list_action_rules_detail_page(
         ]
         setup_message = _list_action_rules_setup_message()
     all_rules = [rule for group in rule_groups for rule in group["rules"]]
+    simple_rules = _build_simple_rule_rows(rule_groups)
     response = templates.TemplateResponse(
         request,
         "system_list_action_rules_detail.html",
         {
             **breadcrumb_context,
-            "return_to": breadcrumb_context["page_return_to"],
+            "return_to": parent_return_to,
             "list_row": {
                 **list_row,
                 "list_kind_label": LIST_KIND_LABELS.get(str(list_row.get("list_kind") or ""), str(list_row.get("list_kind") or "—")),
                 "ai_input_role_label": _ai_role_label(list_row.get("ai_input_role")),
             },
             "rule_groups": rule_groups,
+            "simple_rules": simple_rules,
             "rule_count": len(all_rules),
             "locked_rule_count": sum(1 for rule in all_rules if rule["is_locked"] or (not rule["is_enabled"])),
             "target_list_options": _build_rule_editor_target_options(list_id),
@@ -444,6 +665,90 @@ async def list_action_rules_detail_page(
         },
     )
     return response
+
+
+@router.post("/system/list-action-rules/{list_id}/simple-rules/create")
+async def list_action_simple_rule_create(
+    list_id: str,
+    simple_action: str = Form(),
+    target_list_id: str | None = Form(default=None),
+    source_membership: str = Form(),
+    return_to: str | None = Form(default=None),
+):
+    """Preved jedno lidske pravidlo na malou skupinu technickych effect radku."""
+
+    source_list = fetch_user_list(list_id)
+    if source_list is None:
+        raise HTTPException(status_code=404, detail="Seznam nebyl nalezen.")
+    try:
+        _write_simple_rule(
+            list_id=list_id,
+            simple_action=simple_action,
+            target_list_id=target_list_id,
+            source_membership=source_membership,
+        )
+    except (ValueError, psycopg.Error) as exc:
+        return _no_store_redirect(_build_list_action_rule_detail_url(list_id, return_to=return_to, error=str(exc)))
+    return _no_store_redirect(_build_list_action_rule_detail_url(list_id, return_to=return_to, saved="created"))
+
+
+@router.post("/system/list-action-rules/{list_id}/simple-rules/{group_uuid}/update")
+async def list_action_simple_rule_update(
+    list_id: str,
+    group_uuid: str,
+    simple_action: str = Form(),
+    target_list_id: str | None = Form(default=None),
+    source_membership: str = Form(),
+    return_to: str | None = Form(default=None),
+):
+    """Uprav cele vlastni jednoduche pravidlo misto jeho technickych radku."""
+
+    if fetch_user_list(list_id) is None:
+        raise HTTPException(status_code=404, detail="Seznam nebyl nalezen.")
+    existing_count = sum(
+        1
+        for rule in fetch_list_action_rules(source_list_id=list_id, enabled_only=False)
+        if str(rule.get("rule_id") or "").startswith(f"rule:simple:{group_uuid}:")
+    )
+    if existing_count == 0:
+        raise HTTPException(status_code=404, detail="Pravidlo nebylo nalezeno.")
+    try:
+        _normalize_simple_rule(
+            list_id=list_id,
+            simple_action=simple_action,
+            target_list_id=target_list_id,
+            source_membership=source_membership,
+        )
+        _delete_simple_rule_group(list_id=list_id, group_uuid=group_uuid)
+        _write_simple_rule(
+            list_id=list_id,
+            simple_action=simple_action,
+            target_list_id=target_list_id,
+            source_membership=source_membership,
+            group_uuid=group_uuid,
+        )
+    except (ValueError, psycopg.Error) as exc:
+        return _no_store_redirect(_build_list_action_rule_detail_url(list_id, return_to=return_to, error=str(exc)))
+    return _no_store_redirect(_build_list_action_rule_detail_url(list_id, return_to=return_to, saved="updated"))
+
+
+@router.post("/system/list-action-rules/{list_id}/simple-rules/{group_uuid}/delete")
+async def list_action_simple_rule_delete(
+    list_id: str,
+    group_uuid: str,
+    return_to: str | None = Form(default=None),
+):
+    """Smaz vsechny technicke radky jednoho vlastniho pravidla."""
+
+    if fetch_user_list(list_id) is None:
+        raise HTTPException(status_code=404, detail="Seznam nebyl nalezen.")
+    try:
+        deleted_count = _delete_simple_rule_group(list_id=list_id, group_uuid=group_uuid)
+    except psycopg.Error as exc:
+        return _no_store_redirect(_build_list_action_rule_detail_url(list_id, return_to=return_to, error=str(exc)))
+    if deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Pravidlo nebylo nalezeno.")
+    return _no_store_redirect(_build_list_action_rule_detail_url(list_id, return_to=return_to, saved="deleted"))
 
 
 @router.post("/system/list-action-rules/{list_id}/rules/create")

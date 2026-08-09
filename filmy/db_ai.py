@@ -126,9 +126,9 @@ def get_ai_noted_titles(*, notes: str = "any", min_user_rating: int | None = Non
     return fetch_ai_noted_title_rows(notes=cleaned_notes, min_user_rating=safe_min_rating, limit=safe_limit)
 
 
-def get_ai_watched_titles(*, include_rated: bool = True, include_negative: bool = True) -> dict[str, Any]:
+def get_ai_watched_titles() -> dict[str, Any]:
     """Return a complete hard exclusion list for external AI recommendations."""
-    return fetch_ai_watched_title_rows(include_rated=include_rated, include_negative=include_negative)
+    return fetch_ai_watched_title_rows()
 
 
 def import_ai_recommendations_file(path: str | Path) -> dict[str, Any]:

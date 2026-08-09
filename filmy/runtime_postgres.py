@@ -609,39 +609,48 @@ def fetch_ai_noted_title_rows(*, notes: str, min_user_rating: int | None, limit:
         rows = cursor.fetchall()
     return {'filters': {'notes': note_mode, 'min_user_rating': min_user_rating}, 'limit': limit, 'items': [{'imdb_id': row[0], 'tconst': row[0], 'tmdb_id': row[8], 'title': row[1], 'original_title': row[2], 'title_type': row[3], 'year': row[4], 'genres': [genre for genre in str(row[5] or '').split(',') if genre], 'imdb_rating': row[6], 'imdb_votes': row[7], 'user_rating': row[9], 'liked_notes': row[10], 'disliked_notes': row[11], 'rated_at': _parse_optional_timestamp(row[12]), 'actor_affinity_rating': row[13], 'people_affinity': row[14] or [], 'title_role_signals': row[15] or [], 'genre_score_signals': row[16] or []} for row in rows]}
 
-def fetch_ai_watched_title_rows(*, include_rated: bool=True, include_negative: bool=True) -> dict[str, Any]:
+def fetch_ai_watched_title_rows() -> dict[str, Any]:
     """Return a complete do-not-recommend title set for external AI workflows."""
-    rated_filter = (
-        'WHERE COALESCE(e.series_tconst, r.tconst) IS NOT NULL'
-        if include_rated
-        else 'WHERE FALSE'
-    )
-    negative_filter = (
-        "WHERE l.ai_input_role = 'negative' AND i.display_tconst IS NOT NULL"
-        if include_negative
-        else 'WHERE FALSE'
-    )
     with _connect() as conn, conn.cursor() as cursor:
-        cursor.execute(f"""
-            WITH source_rows AS (
+        cursor.execute("""
+            WITH watch_event_rows AS (
                 SELECT
-                    w.display_tconst AS tconst,
+                    CASE
+                        WHEN w.display_tconst ~ '^unresolved:[0-9]+$'
+                            THEN COALESCE(
+                                NULLIF(h.raw_json::jsonb #>> '{show,ids,imdb}', ''),
+                                w.display_tconst
+                            )
+                        ELSE w.display_tconst
+                    END AS tconst,
                     'watch_event' AS source,
                     w.latest_watched_on AS source_date,
                     NULL::integer AS user_rating
                 FROM app.watched_display_rollup AS w
+                LEFT JOIN old.trakt_history_events AS h
+                  ON h.history_id = CASE
+                      WHEN w.display_tconst ~ '^unresolved:[0-9]+$'
+                          THEN substring(w.display_tconst FROM '^unresolved:([0-9]+)$')::bigint
+                      ELSE NULL
+                  END
                 WHERE w.display_tconst IS NOT NULL
+            ),
+            source_rows AS (
+                SELECT * FROM watch_event_rows
 
                 UNION ALL
 
                 SELECT
                     COALESCE(e.series_tconst, s.tconst) AS tconst,
-                    'content_state_watched' AS source,
-                    s.last_watched_at::date AS source_date,
+                    CASE s.interest_state
+                        WHEN 'watched' THEN 'content_state_watched'
+                        ELSE 'content_state_in_progress'
+                    END AS source,
+                    COALESCE(s.last_watched_at, s.last_previewed_at, s.updated_at)::date AS source_date,
                     NULL::integer AS user_rating
                 FROM app.content_state AS s
                 LEFT JOIN app.catalog_episodes AS e ON e.episode_tconst = s.tconst
-                WHERE s.interest_state = 'watched'
+                WHERE s.interest_state IN ('watched', 'in_progress')
                   AND COALESCE(e.series_tconst, s.tconst) IS NOT NULL
 
                 UNION ALL
@@ -653,18 +662,40 @@ def fetch_ai_watched_title_rows(*, include_rated: bool=True, include_negative: b
                     r.rating AS user_rating
                 FROM app.user_ratings AS r
                 LEFT JOIN app.catalog_episodes AS e ON e.episode_tconst = r.tconst
-                {rated_filter}
+                WHERE COALESCE(e.series_tconst, r.tconst) IS NOT NULL
 
                 UNION ALL
 
                 SELECT
                     i.display_tconst AS tconst,
-                    'negative_list' AS source,
+                    CASE l.ai_input_role
+                        WHEN 'negative' THEN 'negative_list'
+                        WHEN 'in_progress' THEN 'in_progress_list'
+                        ELSE 'strong_positive_list'
+                    END AS source,
                     i.added_at::date AS source_date,
                     NULL::integer AS user_rating
                 FROM app.active_user_list_display_items AS i
                 JOIN app.user_lists AS l ON l.id = i.list_id
-                {negative_filter}
+                WHERE l.ai_input_role IN ('negative', 'in_progress', 'strong_positive')
+                  AND i.display_tconst IS NOT NULL
+            ),
+            normalized_source_rows AS (
+                SELECT
+                    CASE
+                        WHEN tconst ~ '^tt[0-9]+'
+                            THEN substring(tconst FROM '^(tt[0-9]+)')
+                        ELSE tconst
+                    END AS tconst,
+                    source,
+                    source_date,
+                    user_rating
+                FROM source_rows
+            ),
+            valid_source_rows AS (
+                SELECT *
+                FROM normalized_source_rows
+                WHERE tconst ~ '^tt[0-9]+$'
             ),
             grouped AS (
                 SELECT
@@ -672,13 +703,18 @@ def fetch_ai_watched_title_rows(*, include_rated: bool=True, include_negative: b
                     array_agg(DISTINCT source ORDER BY source) AS sources,
                     MAX(source_date) AS latest_source_date,
                     MAX(user_rating) FILTER (WHERE user_rating IS NOT NULL) AS user_rating
-                FROM source_rows
+                FROM valid_source_rows
                 GROUP BY tconst
             ),
             source_counts AS (
                 SELECT source, COUNT(DISTINCT tconst) AS item_count
-                FROM source_rows
+                FROM valid_source_rows
                 GROUP BY source
+            ),
+            unresolved_count AS (
+                SELECT COUNT(DISTINCT tconst) AS item_count
+                FROM normalized_source_rows
+                WHERE tconst !~ '^tt[0-9]+$'
             )
             SELECT
                 g.tconst,
@@ -693,7 +729,8 @@ def fetch_ai_watched_title_rows(*, include_rated: bool=True, include_negative: b
                 g.user_rating,
                 g.latest_source_date,
                 g.sources,
-                (SELECT jsonb_object_agg(source, item_count) FROM source_counts) AS source_counts
+                (SELECT jsonb_object_agg(source, item_count) FROM source_counts) AS source_counts,
+                (SELECT item_count FROM unresolved_count) AS unresolved_item_count
             FROM grouped AS g
             LEFT JOIN app.catalog_titles AS t ON t.tconst = g.tconst
             LEFT JOIN app.tmdb_title_map AS map ON map.tconst = g.tconst
@@ -701,6 +738,7 @@ def fetch_ai_watched_title_rows(*, include_rated: bool=True, include_negative: b
             """)
         rows = cursor.fetchall()
     source_counts = rows[0][12] if rows and rows[0][12] is not None else {}
+    unresolved_item_count = int(rows[0][13]) if rows and rows[0][13] is not None else 0
     items = [
         {
             'imdb_id': row[0],
@@ -720,15 +758,24 @@ def fetch_ai_watched_title_rows(*, include_rated: bool=True, include_negative: b
         for row in rows
     ]
     return {
-        'contract_version': 1,
-        'filters': {'include_rated': include_rated, 'include_negative': include_negative},
+        'contract_version': 2,
+        'filters': {
+            'mode': 'complete_hard_blacklist',
+            'include_rated': True,
+            'include_negative': True,
+            'include_in_progress': True,
+            'include_strong_positive': True,
+        },
         'item_count': len(items),
+        'unresolved_item_count': unresolved_item_count,
         'source_counts': dict(source_counts),
         'items': items,
         'usage_notes': [
             'Use this endpoint as a complete hard exclusion list before generating new recommendations.',
             'The endpoint is not limit-based; it is intended as a blacklist, not a taste seed.',
+            'Coverage cannot be weakened by query parameters.',
             'Episode-level watch/rating/list signals are normalized to their parent series display title when available.',
+            'Non-IMDb unresolved identities are excluded from items and reported in unresolved_item_count.',
         ],
     }
 
@@ -1268,12 +1315,13 @@ def fetch_existing_import_commits(batch_id: str, import_row_ids: list[str]) -> s
     """Return which import row ids already produced watch events in PostgreSQL."""
     return _import_batch_store.fetch_existing_commits(batch_id, import_row_ids)
 
-def fetch_list_action_rules(*, source_list_id: str, trigger_action: str | None=None, target_list_id: str | None=None, enabled_only: bool=True) -> list[dict[str, Any]]:
+def fetch_list_action_rules(*, source_list_id: str, trigger_action: str | None=None, target_list_id: str | None=None, target_match_mode: str="all", enabled_only: bool=True) -> list[dict[str, Any]]:
     """Read list-action rules for one source list from PostgreSQL."""
     return _title_session_store.fetch_rules(
         source_list_id=source_list_id,
         trigger_action=trigger_action,
         target_list_id=target_list_id,
+        target_match_mode=target_match_mode,
         enabled_only=enabled_only,
     )
 

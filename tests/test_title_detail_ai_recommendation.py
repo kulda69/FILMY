@@ -75,6 +75,9 @@ def test_title_detail_renders_ai_fit_and_risk_reasons_inside_rating_notes() -> N
     assert "recommendations.json" in response.text
     assert "Hodnocení AI" in response.text
     assert "jistota high" in response.text
+    assert 'href="https://www.imdb.com/title/tt2316411/"' in response.text
+    assert 'target="_blank"' in response.text
+    assert 'rel="noopener noreferrer"' in response.text
 
 
 def test_title_detail_actions_stay_on_detail_with_source_list_breadcrumb() -> None:

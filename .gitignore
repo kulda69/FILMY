@@ -21,6 +21,9 @@ __pycache__/
 .playwright-mcp/
 .playwright-local/
 node_modules/
+.codex/
+graphify-out/
+.uv-cache/
 
 # Keep portable project docs/config/deploy recipes in git.
 !config.toml

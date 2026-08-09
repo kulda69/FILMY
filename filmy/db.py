@@ -531,11 +531,11 @@ def get_ai_noted_titles(*, notes: str='any', min_user_rating: int | None=None, l
     from filmy.db_ai import get_ai_noted_titles as _impl
     return _impl(notes=notes, min_user_rating=min_user_rating, limit=limit)
 
-def get_ai_watched_titles(*, include_rated: bool=True, include_negative: bool=True) -> dict[str, Any]:
+def get_ai_watched_titles() -> dict[str, Any]:
     """Kompatibilni facade pro AI export sledovanych titulu."""
 
     from filmy.db_ai import get_ai_watched_titles as _impl
-    return _impl(include_rated=include_rated, include_negative=include_negative)
+    return _impl()
 
 def import_ai_recommendations_file(path: str | Path) -> dict[str, Any]:
     """Kompatibilni facade pro import jednoho AI recommendation souboru."""

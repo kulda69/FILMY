@@ -229,6 +229,7 @@ def _run_title_session_action(
         source_list_id=resolved_source_list_id,
         trigger_action=trigger_action,
         target_list_id=target_list_id,
+        target_match_mode="exact_or_wildcard",
         enabled_only=True,
     )
     if not rules:

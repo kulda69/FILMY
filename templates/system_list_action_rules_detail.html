@@ -3,7 +3,7 @@
 {% block title %}Filmy | {{ list_row.name }} Rules{% endblock %}
 
 {% block content %}
-{% set current_label = "List Action Rules" %}
+{% set current_label = list_row.name %}
 {% include "_top_breadcrumbs.html" %}
 
 <section class="mb-4">
@@ -59,167 +59,140 @@
             </div>
             {% endif %}
 
-            {% for group in rule_groups %}
-            <section class="mb-4">
-                <div class="d-flex flex-wrap align-items-start justify-content-between gap-3 mb-3">
-                    <div>
-                        <h2 class="h4 mb-1" style="color: #b56a33;">{{ group.trigger_label }}</h2>
-                        <div class="small text-secondary">{{ group.rule_count }} configured rules</div>
-                        {% if group.trigger_help %}
-                        <div class="small text-secondary mt-1">{{ group.trigger_help }}</div>
-                        {% endif %}
-                    </div>
-                    <div class="small text-secondary">
-                        {% if group.target_required %}
-                        Cílový list je povinný
-                        {% else %}
-                        Cílový list se nepoužívá
-                        {% endif %}
-                    </div>
-                </div>
-
-                <div class="rounded-4 border border-secondary-subtle overflow-hidden mb-3">
-                    <div class="d-none d-xl-grid px-3 py-3 border-bottom border-secondary-subtle bg-body-tertiary text-secondary small"
-                         style="grid-template-columns: minmax(11rem, 1.2fr) minmax(11rem, 1.2fr) minmax(10rem, 1fr) minmax(5rem, 0.6fr) minmax(8rem, 0.8fr) minmax(8rem, 0.9fr) minmax(12rem, 1.3fr);">
-                        <div>Effect</div>
-                        <div>Target list</div>
-                        <div>Phase</div>
-                        <div>Order</div>
-                        <div>Status</div>
-                        <div>Updated</div>
-                        <div class="text-end">Action</div>
-                    </div>
-
-                    {% if group.rules %}
-                    {% for rule in group.rules %}
-                    <form method="post" action="/system/list-action-rules/{{ list_row.id }}/rules/{{ rule.rule_id }}/update" class="px-3 py-3 border-bottom border-secondary-subtle bg-body">
-                        <input type="hidden" name="return_to" value="{{ return_to }}">
-                        <input type="hidden" name="trigger_action" value="{{ group.trigger_action }}">
-                        <div class="d-grid gap-3 align-items-start"
-                             style="grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));">
+            <section class="rounded-4 border border-secondary-subtle bg-body p-4 mb-4">
+                <h2 class="h4 mb-3" style="color: #b56a33;">Moje pravidla</h2>
+                {% if simple_rules %}
+                <div class="vstack gap-3">
+                    {% for rule in simple_rules %}
+                    <div class="rounded-4 border border-secondary-subtle p-3">
+                        <div class="d-flex flex-wrap align-items-start justify-content-between gap-3">
                             <div>
-                                <label class="form-label small text-secondary">Effect</label>
-                                <select class="form-select form-select-sm" name="effect_type" {% if rule.is_locked %}disabled{% endif %}>
-                                    {% for option in group.effect_options %}
-                                    <option value="{{ option.value }}" {% if rule.effect_type == option.value %}selected{% endif %}>{{ option.label }}</option>
-                                    {% endfor %}
-                                </select>
+                                <div class="fw-semibold">{{ rule.action_label }}</div>
+                                <div class="text-secondary">{{ rule.result_label }}</div>
+                                <div class="text-secondary">Cílový seznam: {{ rule.target_label }}</div>
+                                <div class="text-secondary">Členství: {{ rule.membership_label }}</div>
                             </div>
-                            <div>
-                                <label class="form-label small text-secondary">Target list</label>
-                                <select class="form-select form-select-sm" name="target_list_id" {% if (not group.target_required) or rule.is_locked %}disabled{% endif %}>
-                                    <option value="">Bez cíle</option>
-                                    {% for option in target_list_options %}
-                                    <option value="{{ option.id }}" {% if rule.target_list_id == option.id %}selected{% endif %}>{{ option.name }}</option>
-                                    {% endfor %}
-                                </select>
-                                {% if not group.target_required %}
-                                <input type="hidden" name="target_list_id" value="">
-                                {% endif %}
+                            <div class="d-flex flex-wrap gap-2">
+                                <button
+                                    class="btn btn-sm btn-outline-light"
+                                    type="button"
+                                    data-bs-toggle="collapse"
+                                    data-bs-target="#edit-simple-rule-{{ rule.group_uuid }}"
+                                    aria-expanded="false"
+                                    aria-controls="edit-simple-rule-{{ rule.group_uuid }}"
+                                >Upravit</button>
+                                <form method="post" action="/system/list-action-rules/{{ list_row.id }}/simple-rules/{{ rule.group_uuid }}/delete">
+                                    <input type="hidden" name="return_to" value="{{ return_to }}">
+                                    <button class="btn btn-sm btn-outline-danger" type="submit">Smazat</button>
+                                </form>
                             </div>
-                            <div>
-                                <label class="form-label small text-secondary">Phase</label>
-                                <select class="form-select form-select-sm" name="phase" {% if rule.is_locked %}disabled{% endif %}>
-                                    <option value="immediate" {% if rule.phase == 'immediate' %}selected{% endif %}>Immediate</option>
-                                    <option value="finalize_only" {% if rule.phase == 'finalize_only' %}selected{% endif %}>Finalize only</option>
-                                </select>
-                            </div>
-                            <div>
-                                <label class="form-label small text-secondary">Order</label>
-                                <input class="form-control form-control-sm" type="number" min="1" step="1" name="order_index" value="{{ rule.order_index }}" {% if rule.is_locked %}disabled{% endif %}>
-                            </div>
-                            <div>
-                                <label class="form-label small text-secondary">Status</label>
-                                <select class="form-select form-select-sm" name="enabled" {% if rule.is_locked %}disabled{% endif %}>
-                                    <option value="true" {% if rule["is_enabled"] %}selected{% endif %}>Active</option>
-                                    <option value="false" {% if not rule["is_enabled"] %}selected{% endif %}>Disabled</option>
-                                </select>
-                            </div>
-                            <div>
-                                <label class="form-label small text-secondary">Updated</label>
-                                <div class="small text-secondary pt-2">
-                                    {% if rule.updated_at %}
-                                    {{ format_czech_datetime(rule.updated_at) }}
-                                    {% else %}
-                                    Seeded rule
-                                    {% endif %}
+                        </div>
+                        <div class="collapse mt-3" id="edit-simple-rule-{{ rule.group_uuid }}">
+                            <form
+                                method="post"
+                                action="/system/list-action-rules/{{ list_row.id }}/simple-rules/{{ rule.group_uuid }}/update"
+                                class="rounded-4 border border-secondary-subtle p-3"
+                                data-simple-rule-form
+                            >
+                                <input type="hidden" name="return_to" value="{{ return_to }}">
+                                <div class="row g-3">
+                                    <div class="col-12 col-lg-4">
+                                        <label class="form-label">Když</label>
+                                        <select class="form-select" name="simple_action" required data-simple-action>
+                                            <option value="set_rating" {% if rule.simple_action == "set_rating" %}selected{% endif %}>Nastavím rating</option>
+                                            <option value="mark_watched" {% if rule.simple_action == "mark_watched" %}selected{% endif %}>Označím jako Watched</option>
+                                            <option value="target_list" {% if rule.simple_action == "target_list" %}selected{% endif %}>Přidám nebo přesunu do jiného seznamu</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-12 col-lg-4">
+                                        <label class="form-label">Cílový seznam</label>
+                                        <select class="form-select" name="target_list_id" data-simple-target>
+                                            <option value="" {% if not rule.target_list_id %}selected{% endif %}>Nevybrán</option>
+                                            <option value="__any__" {% if rule.target_list_id == "__any__" %}selected{% endif %}>Jakýkoli</option>
+                                            {% for option in target_list_options %}
+                                            <option value="{{ option.id }}" {% if rule.target_list_id == option.id %}selected{% endif %}>{{ option.name }}</option>
+                                            {% endfor %}
+                                        </select>
+                                    </div>
+                                    <div class="col-12 col-lg-4">
+                                        <label class="form-label">Členství v původním seznamu</label>
+                                        <select class="form-select" name="source_membership" required>
+                                            <option value="deactivate" {% if rule.source_membership == "deactivate" %}selected{% endif %}>Odebrat po dokončení</option>
+                                            <option value="preserve" {% if rule.source_membership == "preserve" %}selected{% endif %}>Zachovat</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-12">
+                                        <button class="btn btn-light text-dark" type="submit">Uložit změny</button>
+                                    </div>
                                 </div>
-                                <div class="small text-secondary mt-1"><code>{{ rule.rule_id }}</code></div>
-                            </div>
-                            <div class="d-flex flex-column align-items-stretch justify-content-between gap-2">
-                                {% if rule.is_locked %}
-                                <div class="small text-warning fw-semibold">Locked</div>
-                                <div class="small text-secondary">{{ rule.lock_reason or "Tahle kombinace je zamčená." }}</div>
-                                {% else %}
-                                <button class="btn btn-sm btn-outline-light" type="submit">Uložit řádek</button>
-                                <button class="btn btn-sm btn-outline-danger" type="submit" formaction="/system/list-action-rules/{{ list_row.id }}/rules/{{ rule.rule_id }}/delete" formmethod="post">Smazat</button>
-                                {% if not rule["is_enabled"] %}
-                                <div class="small text-secondary">Pravidlo je vypnuté, ale zůstává editovatelné.</div>
-                                {% endif %}
-                                {% endif %}
-                            </div>
+                            </form>
                         </div>
-                    </form>
+                    </div>
                     {% endfor %}
-                    {% else %}
-                    <div class="px-3 py-4 bg-body text-secondary">
-                        Pro tuhle akci zatím nejsou seedovaná žádná pravidla.
-                    </div>
-                    {% endif %}
                 </div>
-
-                <form method="post" action="/system/list-action-rules/{{ list_row.id }}/rules/create" class="rounded-4 border border-secondary-subtle bg-body p-3">
-                    <input type="hidden" name="return_to" value="{{ return_to }}">
-                    <input type="hidden" name="trigger_action" value="{{ group.trigger_action }}">
-                    <div class="small text-secondary mb-3">Přidat nový řádek</div>
-                    <div class="d-grid gap-3 align-items-start"
-                         style="grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));">
-                        <div>
-                            <label class="form-label small text-secondary">Effect</label>
-                            <select class="form-select form-select-sm" name="effect_type">
-                                {% for option in group.effect_options %}
-                                <option value="{{ option.value }}">{{ option.label }}</option>
-                                {% endfor %}
-                            </select>
-                        </div>
-                        <div>
-                            <label class="form-label small text-secondary">Target list</label>
-                            <select class="form-select form-select-sm" name="target_list_id" {% if not group.target_required %}disabled{% endif %}>
-                                <option value="">Bez cíle</option>
-                                {% for option in target_list_options %}
-                                <option value="{{ option.id }}">{{ option.name }}</option>
-                                {% endfor %}
-                            </select>
-                            {% if not group.target_required %}
-                            <input type="hidden" name="target_list_id" value="">
-                            {% endif %}
-                        </div>
-                        <div>
-                            <label class="form-label small text-secondary">Phase</label>
-                            <select class="form-select form-select-sm" name="phase">
-                                <option value="immediate">Immediate</option>
-                                <option value="finalize_only">Finalize only</option>
-                            </select>
-                        </div>
-                        <div>
-                            <label class="form-label small text-secondary">Order</label>
-                            <input class="form-control form-control-sm" type="number" min="1" step="1" name="order_index" value="{{ (group.rule_count + 1) * 10 }}">
-                        </div>
-                        <div>
-                            <label class="form-label small text-secondary">Status</label>
-                            <select class="form-select form-select-sm" name="enabled">
-                                <option value="true" selected>Active</option>
-                                <option value="false">Disabled</option>
-                            </select>
-                        </div>
-                        <div class="d-flex align-items-end">
-                            <button class="btn btn-sm btn-light text-dark w-100" type="submit">Přidat pravidlo</button>
-                        </div>
-                    </div>
-                </form>
+                {% else %}
+                <div class="text-secondary">Zatím tu nemáš žádné vlastní pravidlo.</div>
+                {% endif %}
             </section>
-            {% endfor %}
+
+            <form method="post" action="/system/list-action-rules/{{ list_row.id }}/simple-rules/create" class="rounded-4 border border-secondary-subtle bg-body p-4" data-simple-rule-form>
+                <input type="hidden" name="return_to" value="{{ return_to }}">
+                <h2 class="h4 mb-3" style="color: #b56a33;">Přidat pravidlo</h2>
+                <div class="row g-3">
+                    <div class="col-12 col-lg-4">
+                        <label class="form-label">Když</label>
+                        <select class="form-select" name="simple_action" required data-simple-action>
+                            <option value="" selected disabled>Vyber akci…</option>
+                            <option value="set_rating">Nastavím rating</option>
+                            <option value="mark_watched">Označím jako Watched</option>
+                            <option value="target_list">Přidám nebo přesunu do jiného seznamu</option>
+                        </select>
+                    </div>
+                    <div class="col-12 col-lg-4">
+                        <label class="form-label">Cílový seznam</label>
+                        <select class="form-select" name="target_list_id" data-simple-target>
+                            <option value="" selected>Nevybrán</option>
+                            <option value="__any__">Jakýkoli</option>
+                            {% for option in target_list_options %}
+                            <option value="{{ option.id }}">{{ option.name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-12 col-lg-4">
+                        <label class="form-label">Členství v původním seznamu</label>
+                        <select class="form-select" name="source_membership" required>
+                            <option value="" selected disabled>Vyber chování…</option>
+                            <option value="deactivate">Odebrat po dokončení</option>
+                            <option value="preserve">Zachovat</option>
+                        </select>
+                    </div>
+                    <div class="col-12">
+                        <button class="btn btn-light text-dark" type="submit">Přidat pravidlo</button>
+                    </div>
+                </div>
+            </form>
         </div>
     </div>
 </section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    document.querySelectorAll("[data-simple-rule-form]").forEach((form) => {
+        const action = form.querySelector("[data-simple-action]");
+        const target = form.querySelector("[data-simple-target]");
+        if (!(action instanceof HTMLSelectElement) || !(target instanceof HTMLSelectElement)) {
+            return;
+        }
+        const syncTarget = () => {
+            const usesTarget = action.value === "target_list";
+            target.disabled = !usesTarget;
+            if (!usesTarget) {
+                target.value = "";
+            }
+        };
+        action.addEventListener("change", syncTarget);
+        syncTarget();
+    });
+</script>
 {% endblock %}
