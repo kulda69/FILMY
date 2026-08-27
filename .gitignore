@@ -22,6 +22,11 @@ __pycache__/
 .playwright-local/
 node_modules/
 .codex/
+.agents/
+AGENTS.md
+PLAN.md
+Historie projektu.md
+Rozhodnuti projektu.md
 graphify-out/
 .uv-cache/
 
