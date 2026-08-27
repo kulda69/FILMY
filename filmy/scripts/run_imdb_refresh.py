@@ -68,6 +68,11 @@ def _write_status(**updates: object) -> None:
     IMDB_REFRESH_STATUS_PATH.write_text(json.dumps(current, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def _forward_catalog_progress(update_progress: Callable[..., None], **payload: object) -> None:
+    """Preda katalogovy prubeh beze zmeny, vcetne jeho vlastni faze."""
+    update_progress(**payload)
+
+
 def _set_error(message: str) -> None:
     """Zapis chybovy stav a soucasne ho emituj do stdout logu."""
     _write_status(state="error", stage="error", message=message, error=message, finished_at=_now_iso())
@@ -178,6 +183,42 @@ def _swap_imdb_directory(extracted_dir: Path) -> Path | None:
     return backup_dir
 
 
+def _is_refresh_work_directory(path: Path) -> bool:
+    """Vrat, zda cesta patri casove oznacenemu pracovnimu behu refreshu."""
+    if not path.is_dir() or path.is_symlink():
+        return False
+    timestamp = path.name.removeprefix("rollback-")
+    try:
+        datetime.strptime(timestamp, "%Y%m%d-%H%M%S")
+    except ValueError:
+        return False
+    return True
+
+
+def _cleanup_refresh_work_directories() -> tuple[list[str], list[str]]:
+    """Odstran dokoncene pracovni adresare refreshu a vrat uspechy i chyby.
+
+    Volaj az po uspesnem obnoveni PostgreSQL katalogu. Zachovava jakekoli
+    ostatni soubory v `data/imdb_refresh`, aby mazani nezasahlo mimo data
+    adresare pojmenovane timestampem jednoho refresh behu.
+    """
+    removed: list[str] = []
+    errors: list[str] = []
+    if not IMDB_REFRESH_DIR.exists():
+        return removed, errors
+
+    for child in sorted(IMDB_REFRESH_DIR.iterdir()):
+        if not _is_refresh_work_directory(child):
+            continue
+        try:
+            shutil.rmtree(child)
+        except OSError as exc:
+            errors.append(f"{child.name}: {exc}")
+        else:
+            removed.append(child.name)
+    return removed, errors
+
+
 def main() -> int:
     """Proved cely refresh IMDb dumpu vcetne obnovy PostgreSQL katalogu."""
     _install_lifecycle_logging()
@@ -209,13 +250,15 @@ def main() -> int:
         files_downloaded=0,
         files_extracted=0,
         stats=None,
+        removed_work_dirs=None,
+        cleanup_errors=None,
         error=None,
     )
     _emit({"phase": "start", "run_id": run_id, "files_total": total_files})
 
     last_heartbeat_at = 0.0
 
-    def _update_progress(*, stage: str, message: str, current_file: str | None, **metrics: object) -> None:
+    def _update_progress(*, stage: str, message: str, current_file: str | None = None, **metrics: object) -> None:
         """Uloz prubeh a zapis heartbeat do logu nejvyse jednou za 30 sekund."""
         nonlocal last_heartbeat_at
         _write_status(
@@ -306,7 +349,7 @@ def main() -> int:
 
             def _progress(**payload: object) -> None:
                 """Propis prubezny stav rebuild kroku do statusu i stdout logu."""
-                _update_progress(stage="refresh_catalog", **payload)
+                _forward_catalog_progress(_update_progress, **payload)
 
             stats = rebuild_catalog_from_current_imdb(force=True, progress=_progress)
             _emit({"phase": "refresh_catalog_done", "stats": stats})
@@ -318,20 +361,33 @@ def main() -> int:
                 _emit({"phase": "rollback_done", "restored_dir": IMDB_DIR.as_posix()})
             raise
 
-        if backup_dir is not None and backup_dir.exists():
-            shutil.rmtree(backup_dir)
-
-        shutil.rmtree(work_root, ignore_errors=True)
+        removed_work_dirs, cleanup_errors = _cleanup_refresh_work_directories()
+        for cleanup_error in cleanup_errors:
+            _emit({"phase": "cleanup_error", "message": cleanup_error})
         finished_at = _now_iso()
         _write_status(
             state="completed",
             stage="completed",
-            message="IMDb refresh uspesne dokoncen.",
+            message=(
+                "IMDb refresh uspesne dokoncen."
+                if not cleanup_errors
+                else "IMDb refresh uspesne dokoncen, ale uklid pracovnich souboru nebyl uplny."
+            ),
             current_file=None,
             finished_at=finished_at,
             stats=stats,
+            removed_work_dirs=removed_work_dirs,
+            cleanup_errors=cleanup_errors,
         )
-        _emit({"phase": "done", "finished_at": finished_at, "stats": stats})
+        _emit(
+            {
+                "phase": "done",
+                "finished_at": finished_at,
+                "stats": stats,
+                "removed_work_dirs": removed_work_dirs,
+                "cleanup_errors": cleanup_errors,
+            }
+        )
         return 0
     except Exception as exc:
         _set_error(f"IMDb refresh selhal: {exc}")

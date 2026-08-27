@@ -32,6 +32,7 @@ UPGRADES: tuple[tuple[str, str], ...] = (
     ("0008-list-action-rule-seed", "008_list_action_rule_seed.sql"),
     ("0009-list-action-target-rule-seed", "009_list_action_target_rule_seed.sql"),
     ("0010-list-action-rule-any-target", "010_list_action_rule_any_target.sql"),
+    ("0011-revoke-public-database-privileges", "011_revoke_public_database_privileges.sql"),
 )
 
 

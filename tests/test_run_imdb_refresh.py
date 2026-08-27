@@ -60,3 +60,64 @@ def test_copy_stream_reports_byte_progress() -> None:
         {"current_file_bytes": 5, "current_file_total_bytes": 5, "current_file_percent": 100.0}
     ]
     assert destination.getvalue() == b"12345"
+
+
+def test_catalog_progress_preserves_stage_from_rebuild() -> None:
+    progress_events = []
+
+    run_imdb_refresh._forward_catalog_progress(
+        lambda **payload: progress_events.append(payload),
+        stage="prepare",
+        message="Aplikuji PostgreSQL katalogove schema.",
+        current_file=None,
+    )
+
+    assert progress_events == [
+        {
+            "stage": "prepare",
+            "message": "Aplikuji PostgreSQL katalogove schema.",
+            "current_file": None,
+        }
+    ]
+
+
+def test_catalog_progress_allows_missing_current_file() -> None:
+    progress_events = []
+
+    def update_progress(*, stage: str, message: str, current_file: str | None = None, **metrics: object) -> None:
+        progress_events.append(
+            {"stage": stage, "message": message, "current_file": current_file, **metrics}
+        )
+
+    run_imdb_refresh._forward_catalog_progress(
+        update_progress,
+        stage="prepare",
+        message="Aplikuji PostgreSQL katalogove schema.",
+    )
+
+    assert progress_events == [
+        {
+            "stage": "prepare",
+            "message": "Aplikuji PostgreSQL katalogove schema.",
+            "current_file": None,
+        }
+    ]
+
+
+def test_cleanup_refresh_work_directories_removes_only_timestamped_runs(tmp_path: Path) -> None:
+    refresh_dir = tmp_path / "imdb_refresh"
+    old_run = refresh_dir / "20260827-094105"
+    rollback = refresh_dir / "rollback-20260827-114243"
+    keep_dir = refresh_dir / "manual-notes"
+    for directory in (old_run, rollback, keep_dir):
+        directory.mkdir(parents=True)
+        (directory / "data").write_text("test", encoding="utf-8")
+
+    with patch.object(run_imdb_refresh, "IMDB_REFRESH_DIR", refresh_dir):
+        removed, errors = run_imdb_refresh._cleanup_refresh_work_directories()
+
+    assert removed == ["20260827-094105", "rollback-20260827-114243"]
+    assert errors == []
+    assert not old_run.exists()
+    assert not rollback.exists()
+    assert keep_dir.exists()

@@ -50,6 +50,7 @@ def test_database_upgrade_runner_tracks_versioned_steps() -> None:
     assert '"0008-list-action-rule-seed", "008_list_action_rule_seed.sql"' in upgrade_runner
     assert '"0009-list-action-target-rule-seed", "009_list_action_target_rule_seed.sql"' in upgrade_runner
     assert '"0010-list-action-rule-any-target", "010_list_action_rule_any_target.sql"' in upgrade_runner
+    assert '"0011-revoke-public-database-privileges", "011_revoke_public_database_privileges.sql"' in upgrade_runner
     assert "filmy-upgrade-database = \"filmy.scripts.upgrade_database:main\"" in pyproject
     assert "uv run filmy-upgrade-database" in install_doc
 
